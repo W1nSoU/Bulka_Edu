@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.idea/
+venv/
+.venv/
+.DS_Store
+*.db
+data/
+.env
+# Ignore local environment variables
+*.log

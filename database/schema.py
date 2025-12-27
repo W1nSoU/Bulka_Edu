@@ -1,0 +1,95 @@
+import aiosqlite
+from . import DB_PATH
+import os
+
+async def init_db():
+    """Ініціалізація бази даних"""
+    # Переконуємось, що директорія існує
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Створюємо таблицю користувачів
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            first_seen TIMESTAMP,
+            current_block INTEGER DEFAULT 1,
+            manager_name TEXT DEFAULT NULL,
+            last_activity TIMESTAMP,
+            role TEXT DEFAULT NULL,
+            city TEXT DEFAULT NULL,
+            manager_id INTEGER DEFAULT NULL
+        )
+        ''')
+        
+        # Створюємо таблицю для збереження прогресу
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS progress (
+            user_id INTEGER,
+            day INTEGER,
+            completed BOOLEAN,
+            completed_at TIMESTAMP,
+            manual_open INTEGER DEFAULT 0,
+            manual_opened_by TEXT DEFAULT NULL,
+            PRIMARY KEY (user_id, day),
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+        ''')
+        
+        # Перевіряємо та додаємо колонки до таблиці progress
+        cursor = await db.execute("PRAGMA table_info(progress)")
+        p_columns = [row[1] for row in await cursor.fetchall()]
+        if 'manual_open' not in p_columns:
+            await db.execute("ALTER TABLE progress ADD COLUMN manual_open INTEGER DEFAULT 0")
+        if 'manual_opened_by' not in p_columns:
+            await db.execute("ALTER TABLE progress ADD COLUMN manual_opened_by TEXT DEFAULT NULL")
+        
+        # Перевіряємо та додаємо колонку last_auto_reminder_at до таблиці users
+        cursor = await db.execute("PRAGMA table_info(users)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        if 'last_auto_reminder_at' not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN last_auto_reminder_at TIMESTAMP")
+        if 'day3_question_sent' not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN day3_question_sent BOOLEAN DEFAULT 0")
+
+        # Таблиця для відстеження розмов "стажер-керівник"
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            manager_id INTEGER NOT NULL,
+            created_at TIMESTAMP NOT NULL,
+            status TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(user_id),
+            FOREIGN KEY (manager_id) REFERENCES managers(id)
+        )
+        ''')
+
+        # Таблиця історії нагадувань
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS reminder_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            intern_id INTEGER NOT NULL,
+            sender_id INTEGER, -- NULL for auto
+            source TEXT NOT NULL, -- 'manager', 'hr', 'auto'
+            sent_at TIMESTAMP NOT NULL,
+            FOREIGN KEY (intern_id) REFERENCES users(user_id)
+        )
+        ''')
+        
+        # Таблиця для відстеження помилок в тестах
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS test_errors (
+            role TEXT NOT NULL,
+            day INTEGER NOT NULL,
+            question_idx INTEGER NOT NULL,
+            error_count INTEGER DEFAULT 0,
+            last_reset_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (role, day, question_idx)
+        )
+        ''')
+        
+        await db.commit()
+    # print(f"База даних ініціалізована за шляхом: {DB_PATH}")
