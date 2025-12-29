@@ -2,7 +2,7 @@
 
 from typing import Optional
 from database.hr import is_hr_user, is_developer_user
-from database.managers import get_manager_by_uid
+from database.managers import get_manager_by_uid, is_manager_user # Ensure is_manager_user is imported
 from database.users import get_user_details
 from bot.config import MAIN_DEVELOPER_ID
 from bot.services.logger import get_logger
@@ -29,6 +29,23 @@ async def is_privileged_user(user_id: int) -> bool:
         return True
 
     return False
+
+async def get_display_role(user_id: int) -> str:
+    """
+    Повертає стандартизовану роль користувача для відображення: 'Dev', 'Керівник', 'Стажер'.
+    """
+    if user_id == MAIN_DEVELOPER_ID:
+        return "Dev"
+    
+    if await is_developer_user(user_id):
+        return "Dev"
+    
+    # is_manager_user вже перевіряє role='Керівник' в таблиці managers
+    if await is_manager_user(user_id):
+        return "Керівник"
+    
+    # Якщо не є ні Dev, ні Керівник, вважаємо стажером
+    return "Стажер"
 
 
 async def validate_user_id(raw_value: str, *, context: str = "") -> Optional[int]:
@@ -115,4 +132,5 @@ __all__ = [
     "validate_user_id",
     "validate_intern_id",
     "parse_callback_id",
+    "get_display_role", # Add to all
 ]

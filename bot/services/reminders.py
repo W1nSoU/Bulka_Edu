@@ -178,36 +178,54 @@ async def send_day3_question(bot: Bot, intern_id: int) -> bool:
 async def notify_manager_test_failed(bot: Bot, intern_id: int, day: int) -> bool:
     """
     Повідомляє керівника про провал тесту стажером.
+    (Застаріла, замінено на щоденний звіт)
     """
-    intern = await get_user_details(intern_id)
-    if not intern:
-        return False
-    
-    manager_id = intern.get("manager_id")
-    if not manager_id:
-        return False
-    
-    intern_name = intern.get("full_name") or f"ID {intern_id}"
-    
-    text = (
-        f"⚠️ <b>Увага!</b>\n\n"
-        f"Стажер <b>{intern_name}</b> не пройшов тест за День {day}.\n"
-        f"Можливо, потрібна додаткова увага.\n\n"
-        f"Посада: {intern.get('role', 'Не вказано')}\n"
-        f"Місто: {intern.get('city', 'Не вказано')}"
-    )
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✉️ Написати стажеру", callback_data=f"reply_to_{intern_id}")],
-        [InlineKeyboardButton(text="📅 Переглянути прогрес", callback_data=f"manager_intern_profile_{intern_id}")],
-    ])
-    
-    try:
-        await bot.send_message(manager_id, text, reply_markup=kb, parse_mode="HTML")
-        return True
-    except Exception:
+    return False # Заглушка, оскільки ця функція тепер не використовується напряму
+
+async def send_daily_test_failure_report_to_manager(bot: Bot, manager_id: int, intern_failures: list[tuple[int, int]]) -> bool:
+    """
+    Надсилає щоденний консолідований звіт керівнику про стажерів, які не пройшли тест за відкритий день.
+    `intern_failures` - список кортежів (intern_id, day_num).
+    """
+    if not intern_failures:
         return False
 
+    manager_details = await get_manager_by_uid(manager_id)
+    manager_name = manager_details.get("full_name") or manager_details.get("username", "Керівник")
+
+    text_lines = [
+        f"🔔 <b>Щоденний звіт про тести ({datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d')})</b>",
+        f"Шановний(а) <b>{manager_name}</b>,\n",
+        "Наступні стажери мають незавершені тести за відкриті навчальні дні:",
+    ]
+
+    buttons = []
+    for intern_id, day_num in intern_failures:
+        intern_details = await get_user_details(intern_id)
+        intern_name = intern_details.get("full_name") or intern_details.get("username", f"ID {intern_id}")
+        intern_role = intern_details.get("role", "Невідома посада")
+        intern_city = intern_details.get("city", "Не вказано")
+        
+        text_lines.append(f"\n  • <b>{intern_name}</b> (День {day_num})")
+        text_lines.append(f"    Посада: {intern_role}, Місто: {intern_city}")
+
+        buttons.append([InlineKeyboardButton(
+            text=f"📅 Прогрес {intern_name} (День {day_num})",
+            callback_data=f"manager_intern_profile_{intern_id}" # Reuse existing intern profile view
+        )])
+    
+    text_lines.append("\nБудь ласка, перегляньте їхній прогрес та надайте необхідну підтримку.")
+    text_lines.append("\n<i>(Сповіщення надсилаються один раз на день о 10:00 за незавершені тести)</i>")
+
+    buttons.append([InlineKeyboardButton(text="👌 Зрозуміло", callback_data="mgr_dismiss_report")])
+
+    try:
+        await bot.send_message(manager_id, "\n".join(text_lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+        return True
+    except Exception as exc:
+        from bot.services.logger import get_logger
+        get_logger().error(f"Failed to send daily test failure report to manager {manager_id}: {exc}", exc_info=True)
+        return False
 
 async def get_interns_for_day3_question(now: datetime) -> list[dict]:
     """
@@ -246,47 +264,47 @@ async def get_interns_for_day3_question(now: datetime) -> list[dict]:
 
 
 async def auto_reminder_loop(bot: Bot) -> None:
-    """Background loop that periodically sends automatic reminders."""
+    """
+    Фонова задача для автоматичних нагадувань.
+    Виконується планувальником.
+    """
     from bot.services.health import health_check
     from bot.services.logger import get_logger
     from bot.services.access import is_privileged_user
     logger = get_logger()
     
     tz = pytz.timezone(TIMEZONE)
-    while True:
-        try:
-            health_check.heartbeat_reminder()
+    try:
+        health_check.heartbeat_reminder()
+        
+        now = datetime.now(tz)
+        
+        # 1. Автоматичні нагадування неактивним (тільки стажерам)
+        interns = await get_interns_for_auto_reminder(now)
+        for intern in interns:
+            intern_id = intern["user_id"]
             
-            now = datetime.now(tz)
+            # Пропускаємо privileged users
+            if await is_privileged_user(intern_id):
+                continue
             
-            # 1. Автоматичні нагадування неактивним (тільки стажерам)
-            interns = await get_interns_for_auto_reminder(now)
-            for intern in interns:
-                intern_id = intern["user_id"]
+            ok = await send_intern_reminder(bot, intern_id, source="auto", sender_id=None)
+            if ok:
+                await touch_auto_reminder(intern_id, now)
+                logger.debug(f"Auto reminder sent to {intern_id}")
+        
+        # 2. Питання на 3-й день (один раз на стажера)
+        day3_interns = await get_interns_for_day3_question(now)
+        for intern in day3_interns:
+            intern_id = intern["user_id"]
+            ok = await send_day3_question(bot, intern_id)
+            if ok:
+                await mark_day3_question_sent(intern_id)
+                logger.info(f"Day 3 question sent to {intern_id}")
                 
-                # Пропускаємо privileged users
-                if await is_privileged_user(intern_id):
-                    continue
-                
-                ok = await send_intern_reminder(bot, intern_id, source="auto", sender_id=None)
-                if ok:
-                    await touch_auto_reminder(intern_id, now)
-                    logger.debug(f"Auto reminder sent to {intern_id}")
-            
-            # 2. Питання на 3-й день (один раз на стажера)
-            day3_interns = await get_interns_for_day3_question(now)
-            for intern in day3_interns:
-                intern_id = intern["user_id"]
-                ok = await send_day3_question(bot, intern_id)
-                if ok:
-                    await mark_day3_question_sent(intern_id)
-                    logger.info(f"Day 3 question sent to {intern_id}")
-                    
-        except Exception as exc:
-            logger.error(f"auto_reminder_loop error: {exc}", exc_info=True)
-            health_check.record_error()
-            
-        await asyncio.sleep(60 * 60)
+    except Exception as exc:
+        logger.error(f"auto_reminder_loop error: {exc}", exc_info=True)
+        health_check.record_error()
 
 
 async def send_manager_lagging_report(bot: Bot, manager_id: int, interns: list) -> bool:
@@ -313,64 +331,47 @@ async def send_manager_lagging_report(bot: Bot, manager_id: int, interns: list) 
 
 
 async def manager_daily_report_loop(bot: Bot) -> None:
-    """Background loop that sends daily reports to managers at 18:00."""
-    from bot.services.health import health_check
+    """
+    Щоденний звіт керівникам про відстаючих стажерів.
+    Виконується планувальником о 18:00.
+    """
     from bot.services.logger import get_logger
     from database.managers import get_all_managers
     from database.users import get_interns_in_progress_for_manager, get_user_progress
     
     logger = get_logger()
-    logger.info("🔵 Manager daily report loop started")
+    logger.info("🔵 Generating manager daily reports...")
     
-    while True:
-        try:
-            # Calculate wait time for 18:00
-            now = datetime.now(pytz.timezone(TIMEZONE))
-            target = now.replace(hour=18, minute=0, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
+    try:
+        managers = await get_all_managers()
+        
+        for mgr in managers:
+            mgr_id = mgr['uid']
+            # Get active interns (already filters out graduates)
+            interns = await get_interns_in_progress_for_manager(mgr_id)
+            lagging = []
             
-            wait_seconds = (target - now).total_seconds()
-            logger.info(f"Next manager report scheduled for {target}")
-            
-            # Wait (with heartbeat check if needed, but simple sleep is ok for now)
-            await asyncio.sleep(wait_seconds)
-            
-            # Generate reports
-            logger.info("Generating manager daily reports...")
-            managers = await get_all_managers()
-            
-            for mgr in managers:
-                mgr_id = mgr['uid']
-                # Get active interns (already filters out graduates)
-                interns = await get_interns_in_progress_for_manager(mgr_id)
-                lagging = []
+            for intern in interns:
+                uid = intern['user_id']
+                current_block = intern.get('current_block', 1)
                 
-                for intern in interns:
-                    uid = intern['user_id']
-                    current_block = intern.get('current_block', 1)
-                    
-                    # Check if completed today's block
-                    progress_rows = await get_user_progress(uid)
-                    is_completed = False
-                    for row in progress_rows:
-                        if row['day'] == current_block and row['completed']:
-                            is_completed = True
-                            break
-                    
-                    if not is_completed:
-                        lagging.append(intern)
+                # Check if completed today's block
+                progress_rows = await get_user_progress(uid)
+                is_completed = False
+                for row in progress_rows:
+                    if row['day'] == current_block and row['completed']:
+                        is_completed = True
+                        break
                 
-                if lagging:
-                    await send_manager_lagging_report(bot, mgr_id, lagging)
-                    logger.debug(f"Sent report to manager {mgr_id} with {len(lagging)} interns")
+                if not is_completed:
+                    lagging.append(intern)
             
-            # Prevent double execution
-            await asyncio.sleep(60)
-            
-        except Exception as exc:
-            logger.error(f"manager_daily_report_loop error: {exc}", exc_info=True)
-            await asyncio.sleep(60)
+            if lagging:
+                await send_manager_lagging_report(bot, mgr_id, lagging)
+                logger.debug(f"Sent report to manager {mgr_id} with {len(lagging)} interns")
+        
+    except Exception as exc:
+        logger.error(f"manager_daily_report_loop error: {exc}", exc_info=True)
 
 
 __all__ = [

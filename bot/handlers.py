@@ -4,7 +4,7 @@ This file contains all the handlers for the bot.
 from aiogram import Dispatcher, types
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, FSInputFile, InputMediaPhoto, Message
 from aiogram.filters import Command
-from bot.state import get_progress, get_available_day, user_progress, initialize_user_progress
+from bot.state import get_progress, get_available_day, user_progress, initialize_user_progress, SearchStates
 from bot.keyboards import main_menu_keyboard, learning_menu_keyboard, manager_menu_keyboard, get_pagination_keyboard
 from bot.config import DAYS_TOTAL, TIMEZONE
 # from days.day_handlers import register_day_handlers
@@ -55,17 +55,14 @@ from bot.utils.paginator import split_text
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 IMG_DIR = BASE_DIR / "img"
-SEMANTIC_MIN_KEYWORD_RESULTS = 3
-SEMANTIC_RESULT_LIMIT = 5
+SEMANTIC_MIN_KEYWORD_RESULTS = 5
+SEMANTIC_RESULT_LIMIT = 10
 
 class SupportStates(StatesGroup):
     waiting_for_message = State()
 
 class ManagerReplyStates(StatesGroup):
     waiting_for_reply = State()
-
-class SearchStates(StatesGroup):
-    waiting_for_query = State()
 
 async def start_menu(message: types.Message):
     args = message.text.split()[1:] if len(message.text.split()) > 1 else []
@@ -75,8 +72,8 @@ async def start_menu(message: types.Message):
     is_hr = await is_hr_user(user_id)
     is_developer = await is_developer_user(user_id)
 
-    if is_developer:
-        await show_developer_main_menu(
+    if is_manager or is_hr:
+        await show_manager_main_menu(
             message,
             is_hr=is_hr,
             is_developer=is_developer,
@@ -84,8 +81,8 @@ async def start_menu(message: types.Message):
         )
         return
     
-    if is_manager:
-        await show_manager_main_menu(
+    if is_developer:
+        await show_developer_main_menu(
             message,
             is_hr=is_hr,
             is_developer=is_developer,
@@ -119,6 +116,7 @@ async def start_menu(message: types.Message):
             if token_data.get("status") == "ok":
                 role = token_data["role"]
                 city = token_data["city"]
+                shop = token_data.get("shop")  # Get shop from token data
                 is_valid_payload, error_text = _validate_invite_payload(role, city)
                 if not is_valid_payload:
                     await message.answer(error_text)
@@ -129,7 +127,7 @@ async def start_menu(message: types.Message):
                     username=message.from_user.username,
                     full_name=message.from_user.full_name
                 )
-                await set_intern_extra(user_id, manager_id, role, city)
+                await set_intern_extra(user_id, manager_id, role, city, shop=shop) # Pass shop
                 stored = await use_token(token, user_id)
                 if not stored:
                     print(f"⚠️ Не вдалося позначити токен {token} як використаний.")
@@ -162,6 +160,7 @@ async def start_menu(message: types.Message):
                 manager_id = int(parts[0])
                 role = urllib.parse.unquote(parts[1])
                 city = urllib.parse.unquote(parts[2])
+                shop = urllib.parse.unquote(parts[3]) if len(parts) >= 4 else None # Get shop from deep-link
                 is_valid_payload, error_text = _validate_invite_payload(role, city)
                 if not is_valid_payload:
                     await message.answer(error_text)
@@ -173,7 +172,7 @@ async def start_menu(message: types.Message):
                         username=message.from_user.username,
                         full_name=message.from_user.full_name,
                     )
-                await set_intern_extra(user_id, manager_id, role, city)
+                await set_intern_extra(user_id, manager_id, role, city, shop=shop) # Pass shop
                 valid_referral = True
                 
             except Exception as e:
@@ -212,12 +211,27 @@ async def show_developer_main_menu(
     is_hr: bool = False,
     is_developer: bool = False,
     allow_edit: bool = True,
+    force_new_message: bool = False,
 ) -> None:
     caption = (
         "🛠 Ви увійшли як розробник команди Булка!\n"
         "Час творити магію. Що робимо далі?"
     )
     keyboard = main_menu_keyboard(is_hr=is_hr, is_developer=is_developer)
+    
+    if force_new_message:
+        if message:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+        await message.answer_photo(
+            photo=FSInputFile(IMG_DIR / "stager.png"),
+            caption=caption,
+            reply_markup=keyboard,
+        )
+        return
+        
     await _show_photo_menu(
         message,
         "stager.png",
@@ -336,9 +350,25 @@ async def _ensure_learning_access(callback: CallbackQuery):
 def _build_test_callback(day: int) -> str:
     return f"day{day}_test"
 
-def _has_completed_course(user_id: int) -> bool:
-    initialize_user_progress(user_id)
-    return get_progress(user_id) >= DAYS_TOTAL
+async def _has_completed_course(user_id: int) -> bool:
+    overview = await get_days_overview(user_id)
+    print(f"_has_completed_course debug: User ID {user_id}, Overview: {overview}")
+    # Всі дні мають бути відкриті або завершені
+    for day_num, status in overview:
+        # Перевіряємо тільки ті дні, що є частиною курсу (до DAYS_TOTAL)
+        if day_num <= DAYS_TOTAL and status == DayStatus.CLOSED:
+            print(f"_has_completed_course debug: Day {day_num} is CLOSED. Returning False.")
+            return False # Якщо хоча б один день закритий, курс не завершено
+    print(f"_has_completed_course debug: All days are OPEN or COMPLETED. Returning True.")
+    return True # Всі дні або відкриті, або завершені
+
+async def _all_days_accessible(user_id: int) -> bool:
+    overview = await get_days_overview(user_id)
+    # Перевіряємо, чи всі дні до DAYS_TOTAL є OPEN або COMPLETED
+    for day_num, status in overview:
+        if day_num <= DAYS_TOTAL and status == DayStatus.CLOSED:
+            return False # Якщо хоча б один день закритий, значить не всі доступні
+    return True # Всі дні або відкриті, або завершені (доступні)
 
 def _build_snippet(text: str, limit: int = 240) -> str:
     clean = (text or "").strip()
@@ -432,13 +462,16 @@ async def show_student_main_menu(
     is_hr: bool = False,
     is_developer: bool = False,
     allow_edit: bool = True,
+    force_new_message: bool = False,
 ) -> None:
     initialize_user_progress(user_id)
     progress_count = get_progress(user_id)
     available_day = get_available_day(user_id)
     percent = int(progress_count / DAYS_TOTAL * 100) if DAYS_TOTAL else 0
     is_new_user = progress_count == 0
-    can_search = progress_count >= DAYS_TOTAL
+    all_completed = progress_count >= DAYS_TOTAL
+    all_open_or_completed = await _all_days_accessible(user_id)
+    can_search = all_completed or all_open_or_completed
 
     caption = (
         "🍞 <b>Твій булочковий прогрес</b> 🏆\n\n"
@@ -453,6 +486,20 @@ async def show_student_main_menu(
         is_developer=is_developer,
         can_search=can_search,
     )
+
+    if force_new_message:
+        if message:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+        await message.answer_photo(
+            photo=FSInputFile(IMG_DIR / "start.png"),
+            caption=caption,
+            reply_markup=keyboard,
+        )
+        return
+
     await _show_photo_menu(
         message,
         "start.png",
@@ -467,15 +514,30 @@ async def show_manager_main_menu(
     is_hr: bool = False,
     is_developer: bool = False,
     allow_edit: bool = True,
+    force_new_message: bool = False,
 ) -> None:
     caption = (
         "🥖 Ви увійшли як керівник команди Булка!\n"
         "Час дбати про розвиток стажерів. Що робимо далі?"
     )
     keyboard = main_menu_keyboard(is_manager=True, is_hr=is_hr, is_developer=is_developer)
+    
+    if force_new_message:
+        if message:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+        await message.answer_photo(
+            photo=FSInputFile(IMG_DIR / "kerivn.png"),
+            caption=caption,
+            reply_markup=keyboard,
+        )
+        return
+
     await _show_photo_menu(
         message,
-        "stager.png",
+        "kerivn.png",
         caption,
         keyboard,
         allow_edit=allow_edit,
@@ -800,11 +862,11 @@ async def remind_topic_self_callback(callback: CallbackQuery, state: FSMContext)
     if not privileged:
         if not user_details or not user_details.get("manager_id") or not user_details.get("role"):
             await callback.answer(
-                "Виглядає, що твій профіль стажера не знайдено. Напиши, будь ласка, HR.",
+                "Виглядає, що твій профіль стажера не знайдено. Напиши, будь ласка керівнику.",
                 show_alert=True,
             )
             return
-        if not _has_completed_course(user_id):
+        if not await _has_completed_course(user_id):
             await callback.answer(
                 "Ця функція стане доступною після завершення всіх днів навчання.",
                 show_alert=True,
@@ -1001,6 +1063,13 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
             return
         role_filter = None
         new_search_callback = "remind_topic_global"
+    elif mode == "manager_global":
+        if not await is_privileged_user(user_id):
+            await message.answer("Цей режим доступний лише керівникам.")
+            await state.clear()
+            return
+        role_filter = target_role
+        new_search_callback = "mgr_remind_menu"
     elif mode == "for_intern":
         intern_id = data.get("intern_id")
         if not intern_id:
@@ -1022,21 +1091,28 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
                 await message.answer("Виглядає, що твій профіль стажера не знайдено. Напиши, будь ласка, HR.")
                 await state.clear()
                 return
-            if not _has_completed_course(user_id):
+            if not await _has_completed_course(user_id):
                 await message.answer("Нагадування доступне після завершення всіх навчальних днів.")
                 await state.clear()
                 return
         role_filter = target_role or (user_details or {}).get("role")
         new_search_callback = "remind_topic_self"
 
-    keyword_results = await search_materials_db(query, role=role_filter, limit=10)
+    keyword_results = await search_materials_db(query, role=role_filter, limit=15)
     
     ai_response = None
     semantic_results = []
     
     if is_groq_configured():
-        semantic_candidates = await semantic_search(query, limit=7)
+        semantic_candidates = await semantic_search(query, limit=15)
         if semantic_candidates:
+            # Filter semantic results by role if a specific role is requested
+            if role_filter:
+                semantic_candidates = [
+                    item for item in semantic_candidates 
+                    if item.get('role') == 'ALL' or item.get('role') == role_filter
+                ]
+
             context = "\n\n".join([item['preview'] for item in semantic_candidates if item.get('preview')])
             ai_response = await search_with_ai(query, context, role_filter)
         else:
@@ -1099,15 +1175,15 @@ async def main_menu_callback(callback: CallbackQuery):
     is_developer = await is_developer_user(user_id)
 
     if callback.message:
-        if is_developer:
-            await show_developer_main_menu(
+        if manager_info or is_hr:
+            await show_manager_main_menu(
                 callback.message,
                 is_hr=is_hr,
                 is_developer=is_developer,
                 allow_edit=True,
             )
-        elif manager_info:
-            await show_manager_main_menu(
+        elif is_developer:
+            await show_developer_main_menu(
                 callback.message,
                 is_hr=is_hr,
                 is_developer=is_developer,
@@ -1120,6 +1196,37 @@ async def main_menu_callback(callback: CallbackQuery):
                 is_hr=is_hr,
                 is_developer=is_developer,
                 allow_edit=True,
+            )
+    await callback.answer()
+
+async def main_menu_callback_force_photo(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    manager_info = await get_manager_by_uid(user_id)
+    is_hr = await is_hr_user(user_id)
+    is_developer = await is_developer_user(user_id)
+
+    if callback.message:
+        if manager_info or is_hr:
+            await show_manager_main_menu(
+                callback.message,
+                is_hr=is_hr,
+                is_developer=is_developer,
+                force_new_message=True,
+            )
+        elif is_developer:
+            await show_developer_main_menu(
+                callback.message,
+                is_hr=is_hr,
+                is_developer=is_developer,
+                force_new_message=True,
+            )
+        else:
+            await show_student_main_menu(
+                callback.message,
+                user_id,
+                is_hr=is_hr,
+                is_developer=is_developer,
+                force_new_message=True,
             )
     await callback.answer()
 
@@ -1399,16 +1506,23 @@ async def profile_handler_new_message(callback: CallbackQuery):
         return
         
     manager_id = user_details.get('manager_id')
-    manager_name = "Не призначено"
+    manager_name_display = "Не призначено"
     if manager_id:
         manager_info = await get_manager_by_uid(manager_id)
         if manager_info:
-            manager_name = manager_info.get('full_name', 'Не призначено')
+            full_name = manager_info.get('full_name')
+            username = manager_info.get('username')
+            if full_name and full_name.strip():
+                manager_name_display = full_name
+            elif username and username.strip():
+                manager_name_display = f"@{username}"
+            else:
+                manager_name_display = f"ID: {manager_id}"
 
     initialize_user_progress(user_id)
     progress_count = get_progress(user_id)
     available_day = get_available_day(user_id)
-    percent = int(progress_count / DAYS_TOTAL * 100)
+    percent = int(progress_count / DAYS_TOTAL * 100) if DAYS_TOTAL else 0
 
     progress_bar_length = 10
     filled_length = int(progress_bar_length * percent / 100)
@@ -1428,62 +1542,8 @@ async def profile_handler_new_message(callback: CallbackQuery):
         f"🔹 Поточний день навчання: <b>День {available_day}</b>\n"
         f"🔹 Ваша посада: <b>{user_details.get('role', 'Не вказано')}</b>\n"
         f"🔹 Місто: <b>{user_details.get('city', 'Не вказано')}</b>\n"
-        f"🔹 Керівник: <b>{manager_name}</b>\n\n"
-        f"📊 <b>Ваш прогрес:</b>\n"
-        f"{progress_bar} {percent}% ({progress_count}/{DAYS_TOTAL})\n\n"
-        f"{motivation}"
-    )
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="В головне меню", callback_data="main_menu")]
-    ])
-    
-    if callback.message:
-        await callback.message.answer(text, reply_markup=kb)
-
-async def profile_handler_new_message(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    
-    user_details = await get_user_details(user_id)
-    if not user_details:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="В головне меню", callback_data="main_menu")]
-        ])
-        if callback.message:
-            await callback.message.answer("⚠️ Помилка: інформація про користувача не знайдена", reply_markup=kb)
-        return
-        
-    manager_id = user_details.get('manager_id')
-    manager_name = "Не призначено"
-    if manager_id:
-        manager_info = await get_manager_by_uid(manager_id)
-        if manager_info:
-            manager_name = manager_info.get('full_name', 'Не призначено')
-
-    initialize_user_progress(user_id)
-    progress_count = get_progress(user_id)
-    available_day = get_available_day(user_id)
-    percent = int(progress_count / DAYS_TOTAL * 100)
-
-    progress_bar_length = 10
-    filled_length = int(progress_bar_length * percent / 100)
-    progress_bar = "🟢" * filled_length + "⚪" * (progress_bar_length - filled_length)
-
-    if percent == 0:
-        motivation = "🌱 Ваша подорож тільки починається! Вперед до нових знань!"
-    elif percent < 30:
-        motivation = "🌿 Хороший початок - половина справи! Продовжуйте в тому ж дусі!"
-    elif percent < 70:
-        motivation = "🌲 Ви на правильному шляху до досконалості!"
-    else:
-        motivation = "✨ Ви дуже близько до початку нових звершень!"
-
-    text = (
-        f"🍞 <b>Персональний профіль Булочки</b> 🍞\n\n"
-        f"🔹 Поточний день навчання: <b>День {available_day}</b>\n"
-        f"🔹 Ваша посада: <b>{user_details.get('role', 'Не вказано')}</b>\n"
-        f"🔹 Місто: <b>{user_details.get('city', 'Не вказано')}</b>\n"
-        f"🔹 Керівник: <b>{manager_name}</b>\n\n"
+        f"🔹 Магазин: <b>{user_details.get('shop', 'Не вказано')}</b>\n"
+        f"🔹 Керівник: <b>{manager_name_display}</b>\n\n"
         f"📊 <b>Ваш прогрес:</b>\n"
         f"{progress_bar} {percent}% ({progress_count}/{DAYS_TOTAL})\n\n"
         f"{motivation}"
@@ -1528,63 +1588,14 @@ async def manager_intern_profile_handler(callback: CallbackQuery):
         f"Давай поглянемо про цього більше:\n\n"
         f"🔷 Посада: <b>{intern.get('role', 'Не вказано') if intern else 'Не вказано'}</b>\n"
         f"🔷 Місто: <b>{intern.get('city', 'Не вказано') if intern else 'Не вказано'}</b>\n"
+        f"🔷 Магазин: <b>{intern.get('shop', 'Не вказано') if intern else 'Не вказано'}</b>\n"
         f"📊 Днів пройдено: <b>{completed_days} із {DAYS_TOTAL}</b>\n"
         f"🕒 Остання активність: <b>{last_activity_str}</b>"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✉️ Надіслати повідомлення", callback_data=f"reply_to_{intern_id}")],
-        [InlineKeyboardButton(text="🔔 Нагадати", callback_data=f"remind_intern_{intern_id}")],
-        [InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"manager_intern_learning_{intern_id}")],
-        [InlineKeyboardButton(text="⬅️ Повернутися до списку", callback_data="manager_interns_list")],
-        [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")],
-    ])
-    if callback.message:
-        try:
-            await callback.message.edit_text(text, reply_markup=kb)
-        except Exception:
-            await callback.message.answer(text, reply_markup=kb)
-
-
-async def manager_intern_profile_handler(callback: CallbackQuery):
-    intern_id = int(callback.data.split("_")[-1])
-    intern = await get_user_details(intern_id)
-    progress_data = await get_user_progress(intern_id)
-    completed_days = len([p for p in progress_data if p.get("completed")])
-    percent = int(completed_days / DAYS_TOTAL * 100) if DAYS_TOTAL else 0
-
-    last_activity = intern.get('last_activity') if intern else None
-    last_activity_str = "Невідомо"
-    if last_activity:
-        try:
-            dt = datetime.fromisoformat(last_activity)
-            if dt.tzinfo is None:
-                dt = pytz.timezone(TIMEZONE).localize(dt)
-            now = datetime.now(pytz.timezone(TIMEZONE))
-            ago = now - dt
-            if ago.days == 0:
-                if ago.seconds < 3600:
-                    last_activity_str = f"{ago.seconds // 60} хв. тому"
-                else:
-                    last_activity_str = f"{ago.seconds // 3600} год. тому"
-            else:
-                last_activity_str = f"{ago.days} дн. тому"
-        except Exception:
-            last_activity_str = last_activity
-
-    intern_name = intern.get('full_name', 'Невідомий стажер') if intern else 'Невідомий стажер'
-    text = (
-        f"🐾 <b>Це – {intern_name}</b> і він(вона) один з твоїх Булка Котиків!\n"
-        f"Давай поглянемо про цього більше:\n\n"
-        f"🔷 Посада: <b>{intern.get('role', 'Не вказано') if intern else 'Не вказано'}</b>\n"
-        f"🔷 Місто: <b>{intern.get('city', 'Не вказано') if intern else 'Не вказано'}</b>\n"
-        f"📊 Днів пройдено: <b>{completed_days} із {DAYS_TOTAL}</b>\n"
-        f"🕒 Остання активність: <b>{last_activity_str}</b>"
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✉️ Надіслати повідомлення", callback_data=f"reply_to_{intern_id}")],
-        [InlineKeyboardButton(text="🔔 Нагадати", callback_data=f"remind_intern_{intern_id}")],
+        [InlineKeyboardButton(text="🔔 Нагадати", callback_data=f"remind_{intern_id}")],
         [InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"manager_intern_learning_{intern_id}")],
         [InlineKeyboardButton(text="⬅️ Повернутися до списку", callback_data="manager_interns_list")],
         [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")],
@@ -1614,12 +1625,21 @@ async def manager_profile_handler(callback: CallbackQuery):
         cute_msg = "Ваша підтримка — як тепла булочка для кожного стажера. Разом до нових звершень! 🍞✨"
 
     manager_display_name = manager_info.get("full_name", "Невідоме ім'я") if manager_info else "Невідоме ім'я"
+    manager_shops = manager_info.get("shops", []) if manager_info else []
+
+    shop_line = ""
+    if manager_shops:
+        if len(manager_shops) == 1:
+            shop_line = f"🔹 Магазин: <b>{manager_shops[0]}</b>\n"
+        else:
+            shop_line = "🔹 Магазини: <b>" + ", ".join(manager_shops) + "</b>\n"
+
     text = (
         f"🍞 <b>Профіль керівника-Булочки</b> 🍞\n\n"
         f"👤 <b>{manager_display_name}</b>\n"
         f"🔹 Посада: <b>{manager_info.get('process', 'Не вказано') if manager_info else 'Не вказано'}</b>\n"
-        f"🔹 Локація: <b>Хмельницький</b>\n\n"
-        f"📈 <b>Аналітика команди:</b>\n"
+        f"{shop_line}"
+        f"📈 <b>Аналітика вашої команди:</b>\n"
         f"— Стажерів за весь час: <b>{len(all_interns)}</b>\n"
         f"— У процесі навчання: <b>{len(interns_in_progress)}</b>\n\n"
         f"⚠️ <b>Потребують уваги:</b>\n{len(inactive_interns)} стажери(-ів) сьогодні без активності\n\n"
@@ -1765,7 +1785,7 @@ async def manager_intern_learning_menu(callback: CallbackQuery, intern_id: Optio
         callback_data = f"manager_day:{intern_id}:{day}:{action}"
         kb_rows.append([InlineKeyboardButton(text=text, callback_data=callback_data)])
 
-    kb_rows.append([InlineKeyboardButton(text="⬅️ Назад до списку", callback_data="manager_interns_list")])
+    kb_rows.append([InlineKeyboardButton(text="⬅️ Назад до списку", callback_data="mgr_manage_days")])
     text = (
         f"Навчання стажера <b>{intern_details.get('full_name', 'Невідомий') if intern_details else 'Невідомий'}</b>\n"
         f"Оберіть день, щоб змінити його доступність:"
@@ -1846,27 +1866,35 @@ async def show_test_error_statistics(callback: CallbackQuery):
     if not errors:
         text = "📊 Наразі немає статистики помилок в тестах. Все чисто! ✨"
     else:
-        text_lines = ["📊 <b>Статистика помилок в тестах (ТОП-10)</b>", ""]
+        text_lines = ["📊 <b>Топ помилок у тестах</b>", ""]
         # Sort by error_count in descending order and take top 10
         sorted_errors = sorted(errors, key=lambda x: x['error_count'], reverse=True)[:10]
-        for error in sorted_errors:
+        for idx, error in enumerate(sorted_errors, 1):
             role = error['role']
             day = error['day']
             question_idx = error['question_idx']
             count = error['error_count']
-            last_reset = datetime.fromisoformat(error['last_reset_at']).strftime('%Y-%m-%d %H:%M')
-            text_lines.append(f"🔸 <b>Посада:</b> {role}, <b>День:</b> {day}, <b>Питання:</b> {question_idx + 1}, <b>Помилок:</b> {count} (Скинуто: {last_reset})")
+            # last_reset = datetime.fromisoformat(error['last_reset_at']).strftime('%Y-%m-%d')
+            
+            text_lines.append(f"<b>{idx}. {role}</b> (День {day})")
+            text_lines.append(f"   ❓ Питання №{question_idx + 1}: ❌ <b>{count}</b> помилок")
+            text_lines.append("")
+            
         text = "\n".join(text_lines)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад до меню розробника", callback_data="developer_menu")]
+        [InlineKeyboardButton(text="⬅️ Назад до головного меню", callback_data="main_menu_photo")]
     ])
     
     if callback.message:
-        try:
-            await callback.message.edit_text(text, reply_markup=kb)
-        except Exception:
+        if callback.message.photo:
+            await callback.message.delete()
             await callback.message.answer(text, reply_markup=kb)
+        else:
+            try:
+                await callback.message.edit_text(text, reply_markup=kb)
+            except Exception:
+                await callback.message.answer(text, reply_markup=kb)
     await callback.answer()
 
 
@@ -1883,6 +1911,7 @@ def register_handlers(dp: Dispatcher):
     register_day_handlers(dp)
     
     dp.callback_query.register(main_menu_callback, lambda c: c.data == "main_menu")
+    dp.callback_query.register(main_menu_callback_force_photo, lambda c: c.data == "main_menu_photo")
     # dp.callback_query.register(manager_menu_callback, lambda c: c.data == "manager_menu") # Removed to use new manager menu
     # dp.callback_query.register(manager_interns_list_handler, lambda c: c.data == "manager_list")
     dp.callback_query.register(manager_support, lambda c: c.data == "support")

@@ -8,6 +8,9 @@ from aiogram.fsm.state import State, StatesGroup
 class TestStates(StatesGroup):
     answering_questions = State()
 
+class SearchStates(StatesGroup):
+    waiting_for_query = State()
+
 user_progress = {}
 # Змінні для керування повідомленнями
 new_blocks_notifications = []
@@ -66,56 +69,26 @@ def is_day_available(user_id, day):
 
 # --- Функція для автоматичного відкриття блоків у заданий час ---
 async def auto_open_blocks_scheduler():
-    """Функція для автоматичного відкриття нових блоків у заданий час"""
+    """
+    Функція для автоматичного відкриття нових блоків.
+    Виконується планувальником щодня у заданий час.
+    """
     from bot.services.health import health_check
     from bot.services.logger import get_logger
     logger = get_logger()
     
-    logger.info(f"🔵 Запущено планувальник відкриття нових блоків")
-    logger.info(f"⏰ Час відкриття: {BLOCKS_OPEN_HOUR:02d}:{BLOCKS_OPEN_MINUTE:02d}:{BLOCKS_OPEN_SECOND:02d}")
+    logger.info(f"🔵 Запущено планувальник відкриття нових блоків (за розкладом)")
     
-    while True:
-        try:
-            # Відмічаємо heartbeat
-            health_check.heartbeat_scheduler()
-            
-            # Отримуємо поточний час
-            now = datetime.now(pytz.timezone(TIMEZONE))
-            
-            # Розраховуємо час до наступного запуску
-            target_time = now.replace(hour=BLOCKS_OPEN_HOUR, minute=BLOCKS_OPEN_MINUTE, 
-                                      second=BLOCKS_OPEN_SECOND, microsecond=0)
-            
-            # Якщо заданий час вже минув сьогодні, переносимо на завтра
-            if now >= target_time:
-                target_time = (now + timedelta(days=1)).replace(
-                    hour=BLOCKS_OPEN_HOUR, minute=BLOCKS_OPEN_MINUTE, 
-                    second=BLOCKS_OPEN_SECOND, microsecond=0
-                )
-                
-            # Розраховуємо скільки секунд треба чекати
-            wait_seconds = (target_time - now).total_seconds()
-            
-            logger.debug(f"Планувальник: наступне відкриття о {target_time.strftime('%Y-%m-%d %H:%M:%S')}")
-            
-            # Чекаємо до заданого часу (з heartbeat кожну годину)
-            while wait_seconds > 3600:
-                await asyncio.sleep(3600)
-                health_check.heartbeat_scheduler()
-                wait_seconds -= 3600
-            
-            await asyncio.sleep(wait_seconds)
-            
-            # Запускаємо процес відкриття нових блоків
-            await open_new_blocks_for_all_users()
-            
-            # Чекаємо 1 секунду, щоб не запустити функцію двічі
-            await asyncio.sleep(1)
-            
-        except Exception as e:
-            logger.error(f"Scheduler error: {e}", exc_info=True)
-            health_check.record_error()
-            await asyncio.sleep(60)  # Чекаємо хвилину перед повторною спробою
+    try:
+        # Відмічаємо heartbeat
+        health_check.heartbeat_scheduler()
+        
+        # Запускаємо процес відкриття нових блоків
+        await open_new_blocks_for_all_users()
+        
+    except Exception as e:
+        logger.error(f"Scheduler error: {e}", exc_info=True)
+        health_check.record_error()
 
 async def open_new_blocks_for_all_users():
     """Відкриває нові блоки для всіх користувачів, які пройшли попередні"""

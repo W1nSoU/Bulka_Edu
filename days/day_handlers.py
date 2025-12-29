@@ -100,7 +100,6 @@ async def process_test_answer_handler(callback: CallbackQuery, state: FSMContext
                 (role, day, current_idx)
             )
             await db.commit()
-        await notify_manager_test_failed(callback.bot, callback.from_user.id, day)
 
 async def _finish_test_successfully(callback: CallbackQuery, state: FSMContext, day: int):
     """Handles the successful completion of the test."""

@@ -20,6 +20,7 @@ async def init_db():
             last_activity TIMESTAMP,
             role TEXT DEFAULT NULL,
             city TEXT DEFAULT NULL,
+            shop TEXT DEFAULT NULL,
             manager_id INTEGER DEFAULT NULL
         )
         ''')
@@ -53,6 +54,8 @@ async def init_db():
             await db.execute("ALTER TABLE users ADD COLUMN last_auto_reminder_at TIMESTAMP")
         if 'day3_question_sent' not in columns:
             await db.execute("ALTER TABLE users ADD COLUMN day3_question_sent BOOLEAN DEFAULT 0")
+        if 'shop' not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN shop TEXT DEFAULT NULL")
 
         # Таблиця для відстеження розмов "стажер-керівник"
         await db.execute('''

@@ -9,6 +9,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramBadRequest
 
 from bot.config import TIMEZONE, DAYS_TOTAL
+from bot.state import SearchStates
 from database.hr import is_privileged_user
 from database.users import (
     get_manager_interns, 
@@ -22,12 +23,13 @@ from database.users import (
     get_user_progress
 )
 from bot.services.developer_actions import get_user_days_report
-from bot.constants import AVAILABLE_ROLES, AVAILABLE_CITIES
+from bot.constants import AVAILABLE_ROLES, AVAILABLE_CITIES, AVAILABLE_SHOPS
 from database.tokens import generate_token
 
 class ManagerStates(StatesGroup):
     waiting_search_intern = State()
     waiting_add_intern_city = State()
+    waiting_add_intern_shop = State()
     waiting_add_intern_role = State()
     waiting_confirm_remove = State()
     waiting_remind_topic_select = State()
@@ -61,9 +63,32 @@ def _manager_main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="➕ Додати стажера", callback_data="mgr_add"),
             InlineKeyboardButton(text="❌ Видалити стажера", callback_data="mgr_remove_menu")
         ],
+        [InlineKeyboardButton(text="📅 Керування днями стажерів", callback_data="mgr_manage_days")],
         [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+async def _edit_menu_message(message: Message, text: str, reply_markup: InlineKeyboardMarkup):
+    """
+    Helper to edit message text or caption depending on whether it has a photo.
+    """
+    try:
+        if message.photo:
+            await message.edit_caption(caption=text, reply_markup=reply_markup)
+        else:
+            await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as e:
+        if "there is no text in the message to edit" in str(e) or "message to edit not found" in str(e):
+            # If editing fails drastically, try to delete and resend
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            await message.answer(text, reply_markup=reply_markup)
+        elif "message is not modified" in str(e):
+            pass # Ignore
+        else:
+            raise e
 
 async def manager_menu(callback: CallbackQuery, state: FSMContext):
     if not await _ensure_manager(callback):
@@ -73,23 +98,16 @@ async def manager_menu(callback: CallbackQuery, state: FSMContext):
     text = "👔 <b>Панель Керівника</b>\n\nОберіть дію:"
     kb = _manager_main_keyboard()
     
-    try:
-        await callback.message.edit_text(text, reply_markup=kb)
-    except TelegramBadRequest as e:
-        if "there is no text in the message to edit" in str(e) or "message to edit not found" in str(e):
-            await callback.message.delete()
-            await callback.message.answer(text, reply_markup=kb)
-        else:
-            raise e
-            
+    await _edit_menu_message(callback.message, text, kb)     
     await callback.answer()
 
 # --- Helper to list interns ---
 async def _list_interns_generic(callback: CallbackQuery, interns: list, title: str, empty_msg: str):
     if not interns:
-        await callback.message.edit_text(
+        await _edit_menu_message(
+            callback.message,
             f"{empty_msg}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")]])
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")]])
         )
         await callback.answer()
         return
@@ -109,9 +127,10 @@ async def _list_interns_generic(callback: CallbackQuery, interns: list, title: s
     
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")])
     
-    await callback.message.edit_text(
+    await _edit_menu_message(
+        callback.message,
         text + "Оберіть стажера для перегляду деталей:", 
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     await callback.answer()
 
@@ -170,7 +189,7 @@ async def manager_by_city_menu(callback: CallbackQuery):
         buttons.append([InlineKeyboardButton(text=city, callback_data=f"mgr_filter_city:{city}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")])
     
-    await callback.message.edit_text("🏙️ Оберіть місто:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, "🏙️ Оберіть місто:", InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 async def manager_filter_city(callback: CallbackQuery):
@@ -196,7 +215,7 @@ async def manager_by_role_menu(callback: CallbackQuery):
         buttons.append([InlineKeyboardButton(text=role, callback_data=f"mgr_filter_role:{role}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")])
     
-    await callback.message.edit_text("💼 Оберіть посаду:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, "💼 Оберіть посаду:", InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 async def manager_filter_role(callback: CallbackQuery):
@@ -235,42 +254,52 @@ async def manager_report(callback: CallbackQuery):
         f"😴 Неактивні (>3 днів): <b>{inactive}</b>\n\n"
     )
     
-    await callback.message.edit_text(
+    await _edit_menu_message(
+        callback.message,
         report_text,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")]])
+        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")]])
     )
     await callback.answer()
 
 # --- Remind Topic ---
 async def manager_remind_menu(callback: CallbackQuery):
-    # Just reusing the active list to select someone to remind
     if not await _ensure_manager(callback):
         return
-    interns = await get_interns_in_progress_for_manager(callback.from_user.id)
     
-    if not interns:
-        await callback.message.edit_text(
-            "📭 Немає активних стажерів, яким можна нагадати тему.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")]])
-        )
-        return
-
-    text = "🧠 <b>Оберіть стажера для нагадування:</b>\n\n"
+    # Показуємо список посад для пошуку
     buttons = []
-    for intern in interns:
-        name = intern.get("full_name", "Без імені")
-        uid = intern.get("user_id")
-        # Reuse the developer functionality for reminding
-        buttons.append([InlineKeyboardButton(
-            text=f"{name}", 
-            callback_data=f"remind_topic_for_intern:{uid}"
-        )])
+    for i, role in enumerate(AVAILABLE_ROLES):
+        label = role[:30] + "..." if len(role) > 30 else role
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"mgr_remind_role:{i}")])
     
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")])
     
-    await callback.message.edit_text(
-        text, 
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    await _edit_menu_message(
+        callback.message,
+        "🧠 <b>База знань</b>\n\nОберіть посаду для пошуку матеріалів:", 
+        InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+async def manager_process_remind_role(callback: CallbackQuery, state: FSMContext):
+    if not await _ensure_manager(callback):
+        return
+    
+    try:
+        role_idx = int(callback.data.split(":")[1])
+        role = AVAILABLE_ROLES[role_idx]
+    except (ValueError, IndexError):
+        await callback.answer("Некоректна посада.", show_alert=True)
+        return
+
+    await state.update_data(role=role, mode="manager_global")
+    await state.set_state(SearchStates.waiting_for_query)
+    
+    await _edit_menu_message(
+        callback.message,
+        f"🧠 <b>Пошук матеріалів ({role})</b>\n\n"
+        "Введи ключові слова або питання, щоб знайти інформацію:",
+        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_remind_menu")]])
     )
     await callback.answer()
 
@@ -285,9 +314,10 @@ async def manager_add_intern(callback: CallbackQuery, state: FSMContext):
         buttons.append([InlineKeyboardButton(text=city, callback_data=f"add_city:{city}")])
     buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="manager_menu")])
     
-    await callback.message.edit_text(
+    await _edit_menu_message(
+        callback.message,
         "🏙️ <b>Звідки стажер?</b>\n\nОберіть місто:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     await state.set_state(ManagerStates.waiting_add_intern_city)
     await callback.answer()
@@ -301,16 +331,73 @@ async def manager_process_add_city_callback(callback: CallbackQuery, state: FSMC
 
     await state.update_data(add_city=city)
     
+    # Отримуємо список магазинів для обраного міста
+    shops = AVAILABLE_SHOPS.get(city, [])
+    
+    buttons = []
+    if shops:
+        for i in range(0, len(shops), 2):
+            row = []
+            shop1 = shops[i]
+            label1 = shop1[:30] + "..." if len(shop1) > 30 else shop1
+            row.append(InlineKeyboardButton(text=label1, callback_data=f"add_shop:{i}"))
+            
+            if i + 1 < len(shops):
+                shop2 = shops[i+1]
+                label2 = shop2[:30] + "..." if len(shop2) > 30 else shop2
+                row.append(InlineKeyboardButton(text=label2, callback_data=f"add_shop:{i+1}"))
+            buttons.append(row)
+    
+    if not buttons:
+         # Fallback to roles if no shops defined
+        buttons = []
+        for i, role in enumerate(AVAILABLE_ROLES):
+            label = role[:30] + "..." if len(role) > 30 else role
+            buttons.append([InlineKeyboardButton(text=label, callback_data=f"add_role:{i}")])
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_add")])
+        
+        await _edit_menu_message(
+            callback.message,
+            f"🏙️ Місто: <b>{city}</b>\n(Магазини не знайдено)\n\n💼 <b>Яка посада у стажера?</b>",
+            InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+        await state.set_state(ManagerStates.waiting_add_intern_role)
+    else:
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_add")])
+        await _edit_menu_message(
+            callback.message,
+            f"🏙️ Місто: <b>{city}</b>\n\n🏪 <b>Оберіть магазин:</b>",
+            InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+        await state.set_state(ManagerStates.waiting_add_intern_shop)
+    
+    await callback.answer()
+
+async def manager_process_add_shop_callback(callback: CallbackQuery, state: FSMContext):
+    try:
+        _, shop_idx_str = callback.data.split(":", 1)
+        shop_idx = int(shop_idx_str)
+        
+        data = await state.get_data()
+        city = data.get("add_city")
+        shops = AVAILABLE_SHOPS.get(city, [])
+        shop = shops[shop_idx]
+    except (ValueError, IndexError):
+        await callback.answer("Помилка даних магазину.", show_alert=True)
+        return
+
+    await state.update_data(add_shop=shop)
+    
     buttons = []
     for i, role in enumerate(AVAILABLE_ROLES):
-        # Shorten if too long
         label = role[:30] + "..." if len(role) > 30 else role
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"add_role:{i}")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_add")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад (до міст)", callback_data="mgr_add")])
     
-    await callback.message.edit_text(
-        f"🏙️ Місто: <b>{city}</b>\n\n💼 <b>Яка посада у стажера?</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    await _edit_menu_message(
+        callback.message,
+        f"🏙️ Місто: <b>{city}</b>\n🏪 Магазин: <b>{shop}</b>\n\n💼 <b>Яка посада у стажера?</b>",
+        InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     await state.set_state(ManagerStates.waiting_add_intern_role)
     await callback.answer()
@@ -326,9 +413,10 @@ async def manager_process_add_role_callback(callback: CallbackQuery, state: FSMC
 
     data = await state.get_data()
     city = data.get("add_city")
+    shop = data.get("add_shop")
     manager_id = callback.from_user.id
     
-    token = await generate_token(manager_id, role, city)
+    token = await generate_token(manager_id, role, city, shop=shop)
     
     try:
         bot_user = await callback.bot.get_me()
@@ -338,14 +426,17 @@ async def manager_process_add_role_callback(callback: CallbackQuery, state: FSMC
 
     link = f"https://t.me/{bot_username}?start={manager_id}-{token}"
     
-    await callback.message.edit_text(
+    shop_text = f"\n🏪 Магазин: <b>{shop}</b>" if shop else ""
+    
+    await _edit_menu_message(
+        callback.message,
         f"✅ <b>Посилання створено!</b>\n\n"
-        f"🏙️ Місто: <b>{city}</b>\n"
+        f"🏙️ Місто: <b>{city}</b>{shop_text}\n"
         f"💼 Посада: <b>{role}</b>\n\n"
         f"🔗 <b>Посилання для стажера:</b>\n"
         f"<code>{link}</code>\n\n"
         f"⚠️ Посилання діє 24 години і лише для одного користувача.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👔 До панелі", callback_data="manager_menu")]])
+        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👔 До панелі", callback_data="manager_menu")]])
     )
     await state.clear()
     await callback.answer()
@@ -372,7 +463,7 @@ async def manager_remove_menu(callback: CallbackQuery):
     
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")])
     
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 async def manager_confirm_remove(callback: CallbackQuery, state: FSMContext):
@@ -384,9 +475,10 @@ async def manager_confirm_remove(callback: CallbackQuery, state: FSMContext):
     # Store ID in state to confirm
     await state.update_data(remove_user_id=user_id)
     
-    await callback.message.edit_text(
+    await _edit_menu_message(
+        callback.message,
         f"⚠️ <b>Ви впевнені, що хочете видалити стажера {user_id}?</b>\nЦе видалить всі дані про його прогрес.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Так, видалити", callback_data="mgr_perform_remove")],
             [InlineKeyboardButton(text="❌ Ні, скасувати", callback_data="manager_menu")]
         ])
@@ -417,6 +509,41 @@ async def manager_view_intern(callback: CallbackQuery, state: FSMContext):
     await _show_intern_details(callback.message, intern_id, is_callback=True)
     await callback.answer()
 
+async def manager_manage_days_menu(callback: CallbackQuery):
+    if not await _ensure_manager(callback):
+        return
+    
+    manager_id = callback.from_user.id
+    interns = await get_manager_interns(manager_id)
+    
+    if not interns:
+        await _edit_menu_message(
+            callback.message,
+            "📭 У вас немає стажерів для керування днями.",
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")]])
+        )
+        await callback.answer()
+        return
+
+    text = "📅 <b>Оберіть стажера для керування навчальними днями:</b>\n\n"
+    buttons = []
+    for intern in interns:
+        name = intern.get("full_name", "Без імені")
+        uid = intern.get("user_id")
+        buttons.append([InlineKeyboardButton(
+            text=f"{name} (ID: {uid})",
+            callback_data=f"manager_intern_learning_{uid}"
+        )])
+    
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")])
+    
+    await _edit_menu_message(
+        callback.message,
+        text, 
+        InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
 async def _show_intern_details(message_or_msg: Message, intern_id: int, is_callback=False):
     report = await get_user_days_report(intern_id)
     
@@ -428,7 +555,9 @@ async def _show_intern_details(message_or_msg: Message, intern_id: int, is_callb
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
     if is_callback:
-        await message_or_msg.edit_text(report, reply_markup=kb)
+        # message_or_msg is actually the message object when called from callback handler (callback.message)
+        # Wait, in manager_view_intern we pass callback.message, so it is a Message object.
+        await _edit_menu_message(message_or_msg, report, kb)
     else:
         await message_or_msg.answer(report, reply_markup=kb)
 
@@ -458,9 +587,10 @@ async def manager_remind_all_lagging(callback: CallbackQuery):
             if await send_intern_reminder(callback.bot, uid, source="manager", sender_id=manager_id):
                 sent_count += 1
     
-    await callback.message.edit_text(
+    await _edit_menu_message(
+        callback.message,
         f"✅ <b>Нагадування надіслано!</b>\n\nОтримали: {sent_count} стажерів.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👌 Добре", callback_data="mgr_dismiss_report")]])
+        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👌 Добре", callback_data="mgr_dismiss_report")]])
     )
     await callback.answer()
 
@@ -495,16 +625,20 @@ def register_manager_handlers(dp: Dispatcher):
     # Report & Remind
     dp.callback_query.register(manager_report, lambda c: c.data == "mgr_report")
     dp.callback_query.register(manager_remind_menu, lambda c: c.data == "mgr_remind_menu")
+    dp.callback_query.register(manager_process_remind_role, lambda c: c.data and c.data.startswith("mgr_remind_role:"))
     
     # Add Intern (New logic)
     dp.callback_query.register(manager_add_intern, lambda c: c.data == "mgr_add")
     dp.callback_query.register(manager_process_add_city_callback, lambda c: c.data and c.data.startswith("add_city:"))
+    dp.callback_query.register(manager_process_add_shop_callback, lambda c: c.data and c.data.startswith("add_shop:"))
     dp.callback_query.register(manager_process_add_role_callback, lambda c: c.data and c.data.startswith("add_role:"))
     
     # Remove Intern
     dp.callback_query.register(manager_remove_menu, lambda c: c.data == "mgr_remove_menu")
     dp.callback_query.register(manager_confirm_remove, lambda c: c.data and c.data.startswith("mgr_confirm_remove_"))
     dp.callback_query.register(manager_perform_remove, lambda c: c.data == "mgr_perform_remove")
+    
+    dp.callback_query.register(manager_manage_days_menu, lambda c: c.data == "mgr_manage_days")
     
     # View Detail
     dp.callback_query.register(manager_view_intern, lambda c: c.data and c.data.startswith("mgr_view_intern_"))

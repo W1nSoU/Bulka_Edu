@@ -89,62 +89,55 @@ health_check = HealthCheck()
 
 async def token_cleanup_loop():
     """
-    Фоновий цикл очищення прострочених токенів.
-    Запускається кожні TOKEN_CLEANUP_INTERVAL_HOURS годин.
+    Фонова задача очищення прострочених токенів.
+    Виконується планувальником.
     """
-    interval = TOKEN_CLEANUP_INTERVAL_HOURS * 3600
-    
-    while True:
-        try:
-            await asyncio.sleep(interval)
-            
-            count = await cleanup_expired_tokens()
-            health_check._last_token_cleanup = datetime.now(pytz.timezone(TIMEZONE))
-            
-            if count > 0:
-                logger.info(f"Token cleanup: {count} tokens processed")
-            
-            # Логуємо статистику
-            stats = await get_token_stats()
-            logger.debug(f"Token stats: {stats}")
-            
-        except Exception as e:
-            logger.error(f"Token cleanup error: {e}", exc_info=True)
-            health_check.record_error()
+    try:
+        count = await cleanup_expired_tokens()
+        health_check._last_token_cleanup = datetime.now(pytz.timezone(TIMEZONE))
+        
+        if count > 0:
+            logger.info(f"Token cleanup: {count} tokens processed")
+        
+        # Логуємо статистику
+        stats = await get_token_stats()
+        logger.debug(f"Token stats: {stats}")
+        
+    except Exception as e:
+        logger.error(f"Token cleanup error: {e}", exc_info=True)
+        health_check.record_error()
 
 
-async def health_monitor_loop(bot, check_interval_minutes: int = 30):
+async def health_monitor_loop(bot):
     """
-    Фоновий цикл моніторингу здоров'я.
+    Фонова задача моніторингу здоров'я.
     Надсилає алерт якщо щось не так.
+    Виконується планувальником.
     """
     from bot.config import DEV_CHAT_ID
     
-    while True:
-        try:
-            await asyncio.sleep(check_interval_minutes * 60)
-            
-            status = health_check.get_status()
-            
-            if status["status"] == "unhealthy" and DEV_CHAT_ID:
-                alert_text = (
-                    "⚠️ <b>Health Check Warning</b>\n\n"
-                    f"Scheduler: {'✅' if status['scheduler_healthy'] else '❌'}\n"
-                    f"Reminder: {'✅' if status['reminder_healthy'] else '❌'}\n"
-                    f"Uptime: {status['uptime_human']}\n"
-                    f"Errors: {status['errors_count']}"
+    try:
+        status = health_check.get_status()
+        
+        if status["status"] == "unhealthy" and DEV_CHAT_ID:
+            alert_text = (
+                "⚠️ <b>Health Check Warning</b>\n\n"
+                f"Scheduler: {'✅' if status['scheduler_healthy'] else '❌'}\n"
+                f"Reminder: {'✅' if status['reminder_healthy'] else '❌'}\n"
+                f"Uptime: {status['uptime_human']}\n"
+                f"Errors: {status['errors_count']}"
+            )
+            try:
+                await bot.send_message(
+                    chat_id=int(DEV_CHAT_ID),
+                    text=alert_text,
+                    parse_mode="HTML"
                 )
-                try:
-                    await bot.send_message(
-                        chat_id=int(DEV_CHAT_ID),
-                        text=alert_text,
-                        parse_mode="HTML"
-                    )
-                except Exception:
-                    pass
-            
-        except Exception as e:
-            logger.error(f"Health monitor error: {e}")
+            except Exception:
+                pass
+        
+    except Exception as e:
+        logger.error(f"Health monitor error: {e}")
 
 
 def get_health_status() -> Dict[str, Any]:

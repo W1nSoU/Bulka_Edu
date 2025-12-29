@@ -3,7 +3,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 import asyncio
 from bot.handlers import register_handlers
-from bot.config import API_TOKEN, validate_config, DAYS_TOTAL
+from bot.config import API_TOKEN, validate_config, DAYS_TOTAL, TIMEZONE
 from database.schema import init_db
 from database.managers import init_managers_db
 from database.tokens import init_tokens_db
@@ -15,7 +15,9 @@ from bot.services.reminders import auto_reminder_loop, manager_daily_report_loop
 from bot.services.logger import setup_bot_logger, get_logger
 from bot.services.health import token_cleanup_loop, health_monitor_loop
 from bot.services.groq_ai import is_groq_configured, get_groq_status
-from bot.services.test_error_monitoring_service import perform_quarterly_reset_if_due
+from bot.services.test_error_monitoring_service import perform_quarterly_reset_if_due, get_intern_incomplete_open_test_days, group_test_failures_by_manager
+from bot.services.reminders import send_daily_test_failure_report_to_manager # New import
+from apscheduler.schedulers.asyncio import AsyncIOScheduler # New import
 
 # Валідація конфігурації перед стартом
 validate_config()
@@ -25,6 +27,9 @@ bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher()
 logger = get_logger()
 
+# Ініціалізуємо планувальник
+scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+
 
 def print_banner():
     """Виводить красивий банер при старті."""
@@ -32,7 +37,7 @@ def print_banner():
 ╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
 ║   🍞  BULKA BOT — Навчальна платформа для стажерів  🍞       ║
-║                    Developed by WinSoU.                      ║
+║                    Developed by WinSoou.                     ║
 ╚══════════════════════════════════════════════════════════════╝
     """
     print(banner)
@@ -41,6 +46,25 @@ def print_banner():
 def print_status(emoji: str, message: str, indent: int = 5):
     """Виводить статусне повідомлення з відступом."""
     print(" " * indent + f"{emoji} {message}")
+
+
+async def daily_test_failure_notifier(bot: Bot):
+    """
+    Щоденна задача: знаходить стажерів з незавершеними тестами за відкриті дні
+    і надсилає консолідований звіт їхнім керівникам.
+    """
+    logger.info("🔵 Running daily_test_failure_notifier...")
+    try:
+        incomplete_days = await get_intern_incomplete_open_test_days()
+        grouped_failures = await group_test_failures_by_manager(incomplete_days)
+
+        for manager_id, intern_failures in grouped_failures.items():
+            await send_daily_test_failure_report_to_manager(bot, manager_id, intern_failures)
+            logger.debug(f"Sent daily test failure report to manager {manager_id}")
+
+    except Exception as exc:
+        logger.error(f"daily_test_failure_notifier error: {exc}", exc_info=True, send_alert=True)
+    logger.info("🔵 daily_test_failure_notifier finished.")
 
 
 async def start_bot():
@@ -79,13 +103,16 @@ async def start_bot():
     register_handlers(dp)
     print_status("⚙️", "Обробники зареєстровано")
     
-    # Запускаємо фонові задачі
-    asyncio.create_task(auto_open_blocks_scheduler())
-    asyncio.create_task(auto_reminder_loop(bot))
-    asyncio.create_task(manager_daily_report_loop(bot))
-    asyncio.create_task(token_cleanup_loop())
-    asyncio.create_task(health_monitor_loop(bot))
+    # Запускаємо фонові задачі та планувальник
     print_status("🔄", "Фонові задачі запущено")
+    scheduler.add_job(auto_open_blocks_scheduler, "cron", hour=23, minute=59, second=59)
+    scheduler.add_job(auto_reminder_loop, "interval", hours=1, args=(bot,))
+    scheduler.add_job(manager_daily_report_loop, "cron", hour=18, minute=0, args=(bot,))
+    scheduler.add_job(daily_test_failure_notifier, "cron", hour=10, minute=0, args=(bot,)) # New scheduled task
+    scheduler.add_job(token_cleanup_loop, "interval", hours=1)
+    scheduler.add_job(health_monitor_loop, "interval", minutes=5, args=(bot,))
+    scheduler.start()
+
     print()
     
     # Статус AI

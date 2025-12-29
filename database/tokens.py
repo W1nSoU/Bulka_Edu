@@ -26,6 +26,7 @@ async def init_tokens_db():
                 manager_id INTEGER,
                 role TEXT,
                 city TEXT,
+                shop TEXT,
                 created_at TIMESTAMP,
                 expires_at TIMESTAMP,
                 used_by INTEGER DEFAULT NULL,
@@ -36,9 +37,8 @@ async def init_tokens_db():
             # Перевіряємо, чи існує колонка expires_at
             try:
                 cursor = await db.execute("SELECT expires_at FROM tokens LIMIT 1")
-                await cursor.fetchone()  # Просто пробуємо отримати значення для перевірки існування колонки
+                await cursor.fetchone()
             except sqlite3.OperationalError:
-                # Колонка не існує, додаємо її
                 await db.execute("ALTER TABLE tokens ADD COLUMN expires_at TIMESTAMP")
                 print(f"Додано колонку expires_at до таблиці tokens")
             
@@ -57,11 +57,19 @@ async def init_tokens_db():
             except sqlite3.OperationalError:
                 await db.execute("ALTER TABLE tokens ADD COLUMN used_at TIMESTAMP DEFAULT NULL")
                 print(f"Додано колонку used_at до таблиці tokens")
+
+            # Перевіряємо shop
+            try:
+                cursor = await db.execute("SELECT shop FROM tokens LIMIT 1")
+                await cursor.fetchone()
+            except sqlite3.OperationalError:
+                await db.execute("ALTER TABLE tokens ADD COLUMN shop TEXT DEFAULT NULL")
+                print(f"Додано колонку shop до таблиці tokens")
                 
         await db.commit()
     # print(f"База токенів ініціалізована за шляхом: {TOKENS_DB_PATH}")
 
-async def generate_token(manager_id, role, city, expires_in_hours=24):
+async def generate_token(manager_id, role, city, shop=None, expires_in_hours=24):
     """
     Створює новий токен для запрошення стажера
     
@@ -69,10 +77,8 @@ async def generate_token(manager_id, role, city, expires_in_hours=24):
         manager_id: ID керівника, який запрошує
         role: Роль (посада) стажера
         city: Місто стажера
+        shop: Магазин стажера (опціонально)
         expires_in_hours: Час дії токена в годинах
-        
-    Returns:
-        str: Сгенерований токен
     """
     # Генеруємо випадковий токен
     alphabet = string.ascii_letters + string.digits
@@ -83,47 +89,25 @@ async def generate_token(manager_id, role, city, expires_in_hours=24):
     expires_at = now + timedelta(hours=expires_in_hours)
     
     try:
-        # Спроба зберегти з полем expires_at
         async with aiosqlite.connect(TOKENS_DB_PATH) as db:
-            try:
-                await db.execute(
-                    '''INSERT INTO tokens 
-                       (token, manager_id, role, city, created_at, expires_at) 
-                       VALUES (?, ?, ?, ?, ?, ?)''',
-                    (token, manager_id, role, city, now.strftime("%Y-%m-%d %H:%M:%S"), 
-                     expires_at.strftime("%Y-%m-%d %H:%M:%S"))
-                )
-                await db.commit()
-            except sqlite3.OperationalError as e:
-                if "no column named expires_at" in str(e):
-                    # Якщо колонка не існує, зберігаємо без неї
-                    await db.execute(
-                        '''INSERT INTO tokens 
-                           (token, manager_id, role, city, created_at) 
-                           VALUES (?, ?, ?, ?, ?)''',
-                        (token, manager_id, role, city, now.strftime("%Y-%m-%d %H:%M:%S"))
-                    )
-                    await db.commit()
-                    # І також додаємо колонку для майбутнього використання
-                    try:
-                        await db.execute("ALTER TABLE tokens ADD COLUMN expires_at TIMESTAMP")
-                        await db.commit()
-                        print(f"Додано колонку expires_at до таблиці tokens під час генерації токена")
-                    except:
-                        pass
-                else:
-                    raise
+            await db.execute(
+                '''INSERT INTO tokens 
+                   (token, manager_id, role, city, shop, created_at, expires_at) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                (token, manager_id, role, city, shop, now.strftime("%Y-%m-%d %H:%M:%S"), 
+                 expires_at.strftime("%Y-%m-%d %H:%M:%S"))
+            )
+            await db.commit()
     except Exception as e:
         print(f"Помилка при генерації токена: {e}")
-        # Запасний варіант - використовуємо стару функцію save_token_data
+        # Запасний варіант (без shop, якщо стара структура)
         await save_token_data(token, manager_id, role, city)
     
     return token
 
 async def save_token_data(token, manager_id, role, city):
-    """Зберігає дані токена"""
+    """Зберігає дані токена (legacy)"""
     async with aiosqlite.connect(TOKENS_DB_PATH) as db:
-        # Зберігаємо токен з даними та поточним часом
         await db.execute(
             "INSERT OR REPLACE INTO tokens (token, manager_id, role, city, created_at) VALUES (?, ?, ?, ?, ?)",
             (token, manager_id, role, city, int(time.time()))
@@ -155,7 +139,6 @@ async def get_token_data(token):
             
         # Перевіряємо термін дії
         try:
-            # Спроба перевірити expires_at
             if "expires_at" in token_data and token_data["expires_at"]:
                 expires_at = datetime.fromisoformat(token_data["expires_at"])
                 if expires_at.tzinfo is None:
@@ -163,19 +146,16 @@ async def get_token_data(token):
                     
                 if now > expires_at:
                     return {"status": "expired"}
-            else:
-                # Для старих токенів без expires_at вважаємо їх валідними
-                print(f"⚠️ Токен {token} не має дати закінчення терміну дії")
         except (ValueError, TypeError) as e:
-            # Якщо формат дати некоректний
             print(f"⚠️ Помилка при розборі дати закінчення токена {token}: {e}")
             
         # Токен валідний, повертаємо дані
         return {
             "status": "ok",
             "manager_id": token_data["manager_id"],
-            "role": token_data.get("role", "Стажер"),  # Значення за замовчуванням
-            "city": token_data.get("city", "Не вказано")  # Значення за замовчуванням
+            "role": token_data.get("role", "Стажер"),
+            "city": token_data.get("city", "Не вказано"),
+            "shop": token_data.get("shop") # Повертаємо магазин
         }
 
 async def use_token(token, user_id):

@@ -9,6 +9,10 @@ async def register_user(user_id, username=None, full_name=None):
     """Реєструє нового користувача або оновлює дані існуючого"""
     now = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
     
+    # Забезпечуємо, що full_name не буде None
+    full_name = full_name if full_name else ""
+    username = username if username else ""
+
     async with aiosqlite.connect(DB_PATH) as db:
         # Перевіряємо, чи користувач вже існує
         cursor = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
@@ -98,15 +102,6 @@ async def get_user_progress(user_id):
         )
         progress = await cursor.fetchall()
         return [dict(p) for p in progress]
-    """Отримує прогрес конкретного користувача"""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM progress WHERE user_id = ? ORDER BY day", 
-            (user_id,)
-        )
-        progress = await cursor.fetchall()
-        return [dict(p) for p in progress]
 
 async def get_manager_students(manager_name):
     """Отримати список користувачів для конкретного керівника"""
@@ -119,15 +114,15 @@ async def get_manager_students(manager_name):
         users = await cursor.fetchall()
         return [dict(user) for user in users]
 
-async def set_intern_extra(user_id, manager_id, role, city):
-    """Оновлює додаткові поля для стажера: manager_id, role, city"""
+async def set_intern_extra(user_id, manager_id, role, city, shop=None):
+    """Оновлює додаткові поля для стажера: manager_id, role, city, shop"""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE users SET manager_id = ?, role = ?, city = ? WHERE user_id = ?",
-            (manager_id, role, city, user_id)
+            "UPDATE users SET manager_id = ?, role = ?, city = ?, shop = ? WHERE user_id = ?",
+            (manager_id, role, city, shop, user_id)
         )
         await db.commit()
-        # print(f"Оновлено дані стажера: {user_id}, керівник: {manager_id}, посада: {role}, місто: {city}")
+        # print(f"Оновлено дані стажера: {user_id}, керівник: {manager_id}, посада: {role}, місто: {city}, магазин: {shop}")
 
 async def delete_user(user_id):
     """Видаляє користувача та його прогрес з бази"""
@@ -148,14 +143,23 @@ async def get_user_details(user_id):
         return dict(user) if user else None
 
 async def get_manager_interns(manager_id):
+
     """Отримує список всіх стажерів конкретного керівника"""
+
     async with aiosqlite.connect(DB_PATH) as db:
+
         db.row_factory = aiosqlite.Row
+
         cursor = await db.execute(
+
             "SELECT * FROM users WHERE manager_id = ? ORDER BY last_activity DESC",
+
             (manager_id,)
+
         )
+
         interns = await cursor.fetchall()
+
         return [dict(intern) for intern in interns]
 
 async def get_inactive_interns_for_manager(manager_id, days=1):
@@ -356,6 +360,7 @@ async def get_user_by_username(username: str) -> dict | None:
     """Отримує детальну інформацію про користувача за його username."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM users WHERE username = ?", (username.lstrip('@'),))
         user = await cursor.fetchone()
         return dict(user) if user else None
 

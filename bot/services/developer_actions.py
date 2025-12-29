@@ -87,6 +87,7 @@ async def get_user_days_report(user_id: int) -> str:
         f"👤 <b>{user.get('full_name', 'Без імені')}</b> (@{user.get('username', 'немає')})",
         f"🏢 Посада: <b>{user.get('role', 'Не вказано')}</b>",
         f"🏙 Місто: <b>{user.get('city', 'Не вказано')}</b>",
+        f"🏪 Магазин: <b>{user.get('shop', 'Не вказано')}</b>",
         f"👨‍🏫 Керівник: <b>{manager_name}</b>",
         f"📊 Прогрес: <b>{completed_days}/{DAYS_TOTAL} ({percent}%)</b>",
         f"⏱️ Остання активність: <b>{_format_last_activity(user.get('last_activity'))}</b>",

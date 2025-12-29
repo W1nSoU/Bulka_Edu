@@ -3,6 +3,7 @@ from . import DB_PATH
 from datetime import datetime
 import pytz
 from bot.config import TIMEZONE
+from database.managers import MANAGERS_DB_PATH, is_manager_user # Import is_manager_user
 
 HR_ROLES = ["HR", "Керівник", "Developer"]  # Ролі, які мають доступ до HR-панелі
 MANAGERS_DB_PATH = DB_PATH.replace("users.db", "managers.db")
@@ -24,7 +25,7 @@ async def init_hr_db():
         )
         ''')
         await db.commit()
-    print(f"HR таблиця ініціалізована за шляхом: {DB_PATH}")
+    # print(f"HR таблиця ініціалізована за шляхом: {DB_PATH}")
 
 async def is_hr_user(user_id):
     """
@@ -38,6 +39,10 @@ async def add_hr(user_id, username=None, full_name=None, role="HR"):
     """Додати користувача як HR"""
     now = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
     
+    # Забезпечуємо, що username та full_name не будуть None
+    username = username if username else ""
+    full_name = full_name if full_name else ""
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT OR REPLACE INTO hr_users (user_id, username, full_name, role, added_at) VALUES (?, ?, ?, ?, ?)",
@@ -77,7 +82,8 @@ async def is_privileged_user(user_id):
     if user_id == MAIN_DEVELOPER_ID:
         return True
     
-    return await is_developer_user(user_id) or await is_hr_user(user_id)
+    # Тепер перевіряємо також роль Керівника з таблиці managers
+    return await is_developer_user(user_id) or await is_hr_user(user_id) or await is_manager_user(user_id)
 
 async def get_user_role(user_id):
     """
@@ -128,6 +134,12 @@ async def is_developer_user(user_id):
         
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("SELECT role FROM hr_users WHERE user_id = ? AND role = 'Developer'", (user_id,))
+        if bool(await cursor.fetchone()):
+            return True
+    
+    # Додаткова перевірка в таблиці managers
+    async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+        cursor = await db.execute("SELECT process FROM managers WHERE uid = ? AND process = 'Developer'", (user_id,))
         return bool(await cursor.fetchone())
 
 async def add_developer_user(user_id, username=None, full_name=None):

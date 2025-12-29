@@ -4,14 +4,13 @@ from bot.constants import CONTENT_TYPES
 from database.materials import get_materials_for_day
 
 CONTENT_TYPE_METADATA = {
-    "video": {"label": "Відео (посилання)", "icon": "🎬"},
     "comic": {"label": "Комікс", "icon": "📚"},
     "info": {"label": "Інформація", "icon": "📝"},
     "text": {"label": "Текст", "icon": "📄"},
     "video_files": {"label": "Відео (завантажено)", "icon": "📹"}, # New content type
 }
 
-CONTENT_TYPE_ORDER = ["video_files", "video", "text"] # Prioritize uploaded videos, then external links, then text
+CONTENT_TYPE_ORDER = ["video_files", "text", "comic", "info"] # Prioritize uploaded videos, then text
 
 
 def _normalize_type(content_type: str) -> str:
