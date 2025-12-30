@@ -48,7 +48,7 @@ from bot.services.semantic_search import semantic_search
 from bot.services.groq_ai import search_with_ai, is_groq_configured
 from bot.services.logger import get_logger
 from bot.services.test_error_monitoring_service import get_test_error_statistics
-from database.materials import get_materials_for_day, search_materials as search_materials_db, get_all_materials, get_material_by_id
+from database.materials import get_materials_for_day, search_materials as search_materials_db, get_all_materials, get_material_by_id, get_material_by_role_day_type
 from bot.constants import is_valid_role, is_valid_city
 from typing import List, Optional, cast
 from bot.utils.paginator import split_text
