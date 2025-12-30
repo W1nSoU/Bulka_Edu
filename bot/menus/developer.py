@@ -84,6 +84,7 @@ class DeveloperStates(StatesGroup):
     waiting_video_role = State()
     waiting_video_day = State()
     waiting_video_uploads = State()
+    waiting_photo_uploads = State() # New state for photo uploads
 
 
 async def _ensure_developer(callback: CallbackQuery, require_main: bool = False) -> bool:
@@ -134,10 +135,15 @@ def _developer_main_keyboard(is_main_dev: bool) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="📝 Матеріали", callback_data="dev_materials_menu"),
             InlineKeyboardButton(text="📝 Тести", callback_data="dev_tests_menu"),
-            InlineKeyboardButton(text="🎥 Відео матеріали", callback_data="dev_videos_menu"),
         ],
-        [InlineKeyboardButton(text="🎟 Токени", callback_data="dev_tokens_menu")],
-        [InlineKeyboardButton(text="💚 Health Status", callback_data="dev_health_status")],
+        [
+            InlineKeyboardButton(text="🎥 Відео", callback_data="dev_videos_menu"),
+            InlineKeyboardButton(text="🖼 Фото", callback_data="dev_photos_menu"),
+        ],
+        [
+            InlineKeyboardButton(text="🎟 Токени", callback_data="dev_tokens_menu"),
+            InlineKeyboardButton(text="💚 Health Status", callback_data="dev_health_status"),
+        ],
         [InlineKeyboardButton(text="🧠 Нагадати тему", callback_data="remind_topic_global")],
         [
             InlineKeyboardButton(text="📜 Історія нагадувань", callback_data="dev_reminder_history"),
@@ -2389,6 +2395,238 @@ async def developer_videos_menu(callback: CallbackQuery):
     )
     await callback.answer()
 
+
+async def developer_photos_menu(callback: CallbackQuery):
+    """Головне меню редагування фото матеріалів — вибір посади."""
+    if not await _ensure_developer(callback):
+        return
+    
+    buttons = []
+    for i, role in enumerate(AVAILABLE_ROLES):
+        short_name = role[:25] + "..." if len(role) > 28 else role
+        buttons.append([InlineKeyboardButton(
+            text=short_name,
+            callback_data=f"dev_photo_role|{i}"
+        )])
+    
+    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="developer_menu")])
+    
+    await _edit_or_answer(
+        callback.message,
+        "🖼 <b>Редагування фото матеріалів</b>\n\n"
+        "Оберіть посаду для редагування фото:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+async def developer_photos_select_day(callback: CallbackQuery, state: FSMContext):
+    """Вибір дня для редагування фото."""
+    if not await _ensure_developer(callback):
+        return
+    
+    try:
+        _, role_part = callback.data.split("|", 1)
+        role_index = int(role_part)
+        if not (0 <= role_index < len(AVAILABLE_ROLES)):
+            await callback.answer("Неправильний індекс ролі.", show_alert=True)
+            return
+        role = AVAILABLE_ROLES[role_index]
+    except (ValueError, IndexError):
+        await callback.answer("Помилка формату ролі.", show_alert=True)
+        return
+    
+    await state.update_data(edit_photo_role=role, edit_photo_role_index=role_index)
+    
+    buttons = []
+    for day in range(1, DAYS_TOTAL + 1):
+        buttons.append([InlineKeyboardButton(
+            text=f"📅 День {day}",
+            callback_data=f"dev_photo_day|{day}"
+        )])
+    
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_photos_menu")])
+    
+    await _edit_or_answer(
+        callback.message,
+        f"🖼 <b>Редагування фото матеріалів</b>\n\n"
+        f"Посада: <b>{role}</b>\n\n"
+        f"Оберіть день:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+async def developer_photos_view(callback: CallbackQuery, state: FSMContext):
+    """Показ поточного фото матеріалу з можливістю редагування."""
+    if not await _ensure_developer(callback):
+        return
+    
+    try:
+        _, day_str = callback.data.split("|", 1)
+        day = int(day_str)
+    except (ValueError, IndexError):
+        await callback.answer("Помилка формату.", show_alert=True)
+        return
+    
+    data = await state.get_data()
+    role = data.get("edit_photo_role", "")
+    await state.update_data(edit_photo_day=day)
+    
+    # Отримуємо матеріал з БД, використовуючи новий тип для завантажених фото
+    photo_material = await get_material_by_role_day_type(role, day, "photo_files")
+    
+    current_file_ids = []
+    photo_material_id = None
+    if photo_material and photo_material.get("content"):
+        try:
+            current_file_ids = json.loads(photo_material["content"])
+            photo_material_id = photo_material.get("id")
+        except json.JSONDecodeError:
+            pass # Will be treated as no content
+    
+    await state.update_data(edit_photo_material_id=photo_material_id)
+    
+    if current_file_ids:
+        preview = f"Завантажено фотофайлів: {len(current_file_ids)}"
+        text = (
+            f"🖼 <b>Фото матеріал</b>\n\n"
+            f"Посада: <b>{role}</b>\n"
+            f"День: <b>{day}</b>\n\n"
+            f"<b>Поточний контент:</b>\n"
+            f"{preview}\n\n"
+            f"Натисніть «Редагувати», щоб змінити фотофайли."
+        )
+    else:
+        text = (
+            f"🖼 <b>Фото матеріал не знайдено</b>\n\n"
+            f"Посада: <b>{role}</b>\n"
+            f"День: <b>{day}</b>\n\n"
+            f"Натисніть «Редагувати», щоб завантажити новий фото матеріал."
+        )
+    
+    buttons = [
+        [InlineKeyboardButton(text="✏️ Редагувати", callback_data="dev_photo_edit")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_photo_role|{data.get('edit_photo_role_index')}")],
+    ]
+    
+    await _edit_or_answer(
+        callback.message,
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+async def developer_photo_edit_start(callback: CallbackQuery, state: FSMContext):
+    """Початок редагування фото — запит нових фотофайлів."""
+    if not await _ensure_developer(callback):
+        return
+    
+    data = await state.get_data()
+    role = data.get("edit_photo_role", "")
+    day = data.get("edit_photo_day", 1)
+    
+    prompt = (
+        f"🖼 <b>Завантаження фото матеріалів</b>\n\n"
+        f"Посада: <b>{role}</b>\n"
+        f"День: <b>{day}</b>\n\n"
+        f"Надішліть один або кілька фотофайлів (jpg, jpeg, png). Коли закінчите, будь ласка, напишіть <b>Готово</b>."
+    )
+    
+    buttons = [
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_photo_day|{day}")],
+    ]
+    
+    await _edit_or_answer(
+        callback.message,
+        prompt,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await state.set_state(DeveloperStates.waiting_photo_uploads)
+    await state.update_data(photo_file_ids=[])
+    await callback.answer()
+
+async def _finalize_photo_update(message: Message, state: FSMContext, photo_file_ids: list[str]):
+    """Обробка завантажених фотофайлів — запит на оповіщення."""
+    data = await state.get_data()
+    role = data.get("edit_photo_role", "")
+    day = data.get("edit_photo_day", 1)
+    material_id = data.get("edit_photo_material_id")
+    
+    if not photo_file_ids:
+        await message.answer("❌ Немає фотофайлів для збереження.")
+        return
+    
+    # Зберігаємо file_id-и у стейті для подальшого збереження
+    await state.update_data(
+        pending_content=json.dumps(photo_file_ids),
+        pending_content_type="photo_files", 
+        pending_material_id=material_id,
+        edit_role=role,
+        edit_day=day
+    )
+    
+    # Запитуємо про оповіщення
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Так ✅", callback_data="notify_yes"),
+            InlineKeyboardButton(text="Ні ❌", callback_data="notify_no"),
+        ]
+    ])
+    
+    await message.answer(
+        f"🖼 <b>Фото матеріал готовий до збереження</b>\n\n"
+        f"Посада: {role}\n"
+        f"День: {day}\n\n"
+        f"Завантажено фотофайлів: {len(photo_file_ids)}\n\n"
+        f"<b>Чи бажаєте зробити оповіщення про зміни?</b>",
+        reply_markup=kb
+    )
+    await state.set_state(DeveloperStates.waiting_notify_decision)
+
+
+async def developer_process_photo_uploads(message: Message, state: FSMContext):
+    """Collects multiple photo messages for photo content until 'Готово' is received."""
+    data = await state.get_data()
+    photo_file_ids = data.get("photo_file_ids", [])
+    confirmation_msg_id = data.get("photo_confirmation_msg_id")
+
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        photo_file_ids.append(file_id)
+        await state.update_data(photo_file_ids=photo_file_ids)
+
+        new_text = f"✅ Отримано {len(photo_file_ids)} фото. Надішліть наступне фото або напишіть 'Готово', щоб завершити."
+
+        if confirmation_msg_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=confirmation_msg_id,
+                    text=new_text,
+                )
+            except TelegramBadRequest as e:
+                if "message is not modified" not in str(e):
+                    sent_msg = await message.answer(new_text)
+                    await state.update_data(photo_confirmation_msg_id=sent_msg.message_id)
+        else:
+            sent_msg = await message.answer(new_text)
+            await state.update_data(photo_confirmation_msg_id=sent_msg.message_id)
+
+    elif message.text and message.text.lower() == 'готово':
+        if not photo_file_ids:
+            await message.answer("❌ Ви не надіслали жодного фото. Надішліть фото або скасуйте редагування.")
+            return
+            
+        if confirmation_msg_id:
+            try:
+                await message.bot.delete_message(chat_id=message.chat.id, message_id=confirmation_msg_id)
+            except Exception:
+                pass
+
+        await _finalize_photo_update(message, state, photo_file_ids)
+    else:
+        if message.text:
+             await message.answer("Будь ласка, надішліть фотофайл або напишіть 'Готово' для завершення.")
+
 # ==================== Notification handlers ====================
 
 async def _save_pending_material(state: FSMContext) -> tuple[bool, str, str, int]:
@@ -2439,6 +2677,20 @@ async def _save_pending_material(state: FSMContext) -> tuple[bool, str, str, int
                     day=day,
                     content_type="video_files",
                     title=f"День {day} — Відео (завантажено)",
+                    content=content, # JSON string of file_ids
+                    resource_url=None,
+                    order_index=0,
+                )
+        elif content_type == "photo_files": # Uploaded photo files
+            if material_id:
+                await update_material_content(material_id, content)
+                await update_material_resource_url(material_id, None)
+            else:
+                await add_or_update_material(
+                    role=role,
+                    day=day,
+                    content_type="photo_files",
+                    title=f"День {day} — Фото",
                     content=content, # JSON string of file_ids
                     resource_url=None,
                     order_index=0,
@@ -3023,6 +3275,13 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_videos_view, lambda c: c.data and c.data.startswith("dev_video_day|"))
     dp.callback_query.register(developer_video_edit_start, lambda c: c.data == "dev_video_edit")
     dp.message.register(developer_process_video_uploads, DeveloperStates.waiting_video_uploads)
+
+    # Photo Editor
+    dp.callback_query.register(developer_photos_menu, lambda c: c.data == "dev_photos_menu")
+    dp.callback_query.register(developer_photos_select_day, lambda c: c.data and c.data.startswith("dev_photo_role|"))
+    dp.callback_query.register(developer_photos_view, lambda c: c.data and c.data.startswith("dev_photo_day|"))
+    dp.callback_query.register(developer_photo_edit_start, lambda c: c.data == "dev_photo_edit")
+    dp.message.register(developer_process_photo_uploads, DeveloperStates.waiting_photo_uploads)
 
     # Tests Editor
     dp.callback_query.register(developer_tests_menu, lambda c: c.data == "dev_tests_menu")

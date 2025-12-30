@@ -682,6 +682,48 @@ async def _show_material_entry(
             await callback.answer("Помилка завантаження відеоматеріалів.", show_alert=True)
             return
 
+    elif ctype == 'photo_files':
+        try:
+            file_ids = json.loads(material.get("content", "[]"))
+            if not file_ids:
+                raise ValueError("No photo file IDs found.")
+            
+            # Send the FIRST photo with pagination
+            first_file_id = file_ids[0]
+            
+            back_to_menu = InlineKeyboardButton(text="⬅️ Повернутися до вибору", callback_data=f"day_{day}")
+            
+            keyboard = get_pagination_keyboard(
+                current_page=0,
+                total_pages=len(file_ids),
+                content_identifier=str(material.get('id')),
+                day=day,
+                final_button=back_to_menu
+            )
+            
+            if callback.message:
+                # Delete the previous message if it exists
+                if callback.message.text or callback.message.video or callback.message.photo:
+                    try:
+                        await callback.message.delete()
+                    except Exception:
+                        pass
+                
+                await callback.message.answer_photo(
+                    photo=first_file_id,
+                    caption=f"Фото 1 з {len(file_ids)}",
+                    reply_markup=keyboard
+                )
+            
+            await callback.answer()
+            return
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"Error processing photo_files content: {e}")
+            if callback.message:
+                await callback.message.answer("❌ Помилка завантаження фотоматеріалів.")
+            await callback.answer("Помилка завантаження фотоматеріалів.", show_alert=True)
+            return
+
     elif ctype == 'text':
         final_button = InlineKeyboardButton(text="➡️ До тесту", callback_data=_build_test_callback(day))
         keyboard = get_pagination_keyboard(0, len(pages), str(material.get('id')), day, final_button)
@@ -743,6 +785,34 @@ async def _handle_pagination(callback: CallbackQuery):
         except Exception as e:
             print(f"Error pagination video: {e}")
             await callback.answer("Помилка відео пагінації.")
+        return
+    
+    if material.get("content_type") == 'photo_files':
+        try:
+            file_ids = json.loads(material.get("content", "[]"))
+            if 0 <= page < len(file_ids):
+                file_id = file_ids[page]
+                back_to_menu = InlineKeyboardButton(text="⬅️ Повернутися до вибору", callback_data=f"day_{day}")
+                
+                keyboard = get_pagination_keyboard(
+                    current_page=page,
+                    total_pages=len(file_ids),
+                    content_identifier=str(material_id),
+                    day=day,
+                    final_button=back_to_menu
+                )
+                
+                media = types.InputMediaPhoto(
+                    media=file_id,
+                    caption=f"Фото {page + 1} з {len(file_ids)}"
+                )
+                
+                await callback.message.edit_media(media=media, reply_markup=keyboard)
+            else:
+                await callback.answer("Сторінка не знайдена.")
+        except Exception as e:
+            print(f"Error pagination photo: {e}")
+            await callback.answer("Помилка фото пагінації.")
         return
     
     full_text = _format_material_text(material)

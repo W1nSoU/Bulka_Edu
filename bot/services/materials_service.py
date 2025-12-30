@@ -8,9 +8,10 @@ CONTENT_TYPE_METADATA = {
     "info": {"label": "Інформація", "icon": "📝"},
     "text": {"label": "Текст", "icon": "📄"},
     "video_files": {"label": "Відео (завантажено)", "icon": "📹"}, # New content type
+    "photo_files": {"label": "Фото", "icon": "🖼"},
 }
 
-CONTENT_TYPE_ORDER = ["video_files", "text", "comic", "info"] # Prioritize uploaded videos, then text
+CONTENT_TYPE_ORDER = ["video_files", "photo_files", "text", "comic", "info"] # Prioritize uploaded videos, then text
 
 
 def _normalize_type(content_type: str) -> str:
