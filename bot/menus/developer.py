@@ -85,6 +85,7 @@ class DeveloperStates(StatesGroup):
     waiting_video_day = State()
     waiting_video_uploads = State()
     waiting_photo_uploads = State() # New state for photo uploads
+    waiting_syllabus_text = State() # State for editing syllabus
 
 
 async def _ensure_developer(callback: CallbackQuery, require_main: bool = False) -> bool:
