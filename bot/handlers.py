@@ -968,6 +968,9 @@ async def show_syllabus(callback: CallbackQuery):
         await _show_text_menu(callback.message, pages[0], keyboard, allow_edit=True, allow_caption_edit=True)
     await callback.answer()
 
+async def syllabus_locked(callback: CallbackQuery):
+    await callback.answer("🔒 Зміст стане доступним після завершення 5-го дня навчання!", show_alert=True)
+
 async def remind_topic_self_callback(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     user_details = await get_user_details(user_id)
@@ -2020,6 +2023,7 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(day_content, lambda c: c.data.startswith("day_"))
     dp.callback_query.register(day_material_detail, lambda c: c.data.startswith("daymat_"))
     dp.callback_query.register(show_syllabus, lambda c: c.data == "show_syllabus")
+    dp.callback_query.register(syllabus_locked, lambda c: c.data == "syllabus_locked")
     
     dp.callback_query.register(_handle_pagination, lambda c: c.data and c.data.startswith("paginate:"))
 

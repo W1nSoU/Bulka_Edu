@@ -77,6 +77,8 @@ def learning_menu_keyboard(day_statuses):
     
     if completed_count >= 5:
         kb_rows.append([InlineKeyboardButton(text="📚 Зміст", callback_data="show_syllabus")])
+    else:
+        kb_rows.append([InlineKeyboardButton(text="🔒 Зміст", callback_data="syllabus_locked")])
         
     kb_rows.append([InlineKeyboardButton(text="В головне меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=kb_rows)
