@@ -153,8 +153,10 @@ def _developer_main_keyboard(is_main_dev: bool) -> InlineKeyboardMarkup:
     ]
     # Розділяємо меню для головного розробника та інших
     if is_main_dev:
-        buttons.append([InlineKeyboardButton(text="👨‍💻 Команда Dev", callback_data="dev_team_menu")])
-        buttons.append([InlineKeyboardButton(text="👔 Команда Керівників", callback_data="dev_manage_managers")])
+        buttons.append([
+            InlineKeyboardButton(text="👨‍💻 Команда Dev", callback_data="dev_team_menu"),
+            InlineKeyboardButton(text="👔 Команда Керівників", callback_data="dev_manage_managers"),
+        ])
     buttons.append([InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -2676,7 +2678,7 @@ async def _save_pending_material(state: FSMContext) -> tuple[bool, str, str, int
                     role=role,
                     day=day,
                     content_type="video_files",
-                    title=f"День {day} — Відео (завантажено)",
+                    title=f"День {day} — Відео",
                     content=content, # JSON string of file_ids
                     resource_url=None,
                     order_index=0,
