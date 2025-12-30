@@ -61,12 +61,12 @@ def manager_menu_keyboard():
 
 def learning_menu_keyboard(day_statuses):
     kb_rows = []
-    completed_count = 0
+    syllabus_unlocked = False
+    
     for day, status in day_statuses:
         if status == DayStatus.COMPLETED:
             txt = f"✅ День {day}"
             cb = f"day_{day}"
-            completed_count += 1
         elif status == DayStatus.OPEN:
             txt = f"День {day}"
             cb = f"day_{day}"
@@ -74,8 +74,12 @@ def learning_menu_keyboard(day_statuses):
             txt = f"🔒 День {day}"
             cb = f"locked_{day}"
         kb_rows.append([InlineKeyboardButton(text=txt, callback_data=cb)])
+        
+        # Unlock if Day 5 is open or completed
+        if day == 5 and status != DayStatus.CLOSED:
+            syllabus_unlocked = True
     
-    if completed_count >= 5:
+    if syllabus_unlocked:
         kb_rows.append([InlineKeyboardButton(text="📚 Зміст", callback_data="show_syllabus")])
     else:
         kb_rows.append([InlineKeyboardButton(text="🔒 Зміст", callback_data="syllabus_locked")])
