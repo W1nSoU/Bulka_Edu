@@ -137,6 +137,9 @@ def _developer_main_keyboard(is_main_dev: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📝 Тести", callback_data="dev_tests_menu"),
         ],
         [
+            InlineKeyboardButton(text="📚 Змінити змісти", callback_data="dev_syllabus_menu"),
+        ],
+        [
             InlineKeyboardButton(text="🎥 Відео", callback_data="dev_videos_menu"),
             InlineKeyboardButton(text="🖼 Фото", callback_data="dev_photos_menu"),
         ],
@@ -2629,6 +2632,121 @@ async def developer_process_photo_uploads(message: Message, state: FSMContext):
         if message.text:
              await message.answer("Будь ласка, надішліть фотофайл або напишіть 'Готово' для завершення.")
 
+# ==================== Syllabus Editor ====================
+
+async def developer_syllabus_menu(callback: CallbackQuery):
+    """Головне меню редагування змістів — вибір посади."""
+    if not await _ensure_developer(callback):
+        return
+    
+    buttons = []
+    for i, role in enumerate(AVAILABLE_ROLES):
+        short_name = role[:25] + "..." if len(role) > 28 else role
+        buttons.append([InlineKeyboardButton(
+            text=short_name,
+            callback_data=f"dev_syl_role|{i}"
+        )])
+    
+    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="developer_menu")])
+    
+    await _edit_or_answer(
+        callback.message,
+        "📚 <b>Редагування змістів (Syllabus)</b>\n\n"
+        "Оберіть посаду для редагування змісту:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+async def developer_syllabus_view(callback: CallbackQuery, state: FSMContext):
+    """Перегляд поточного змісту для обраної посади."""
+    if not await _ensure_developer(callback):
+        return
+    
+    try:
+        _, role_part = callback.data.split("|", 1)
+        role_index = int(role_part)
+        role = AVAILABLE_ROLES[role_index]
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ролі.", show_alert=True)
+        return
+    
+    await state.update_data(syllabus_role=role, syllabus_role_index=role_index)
+    
+    # Syllabus is stored with day=0 and content_type='syllabus'
+    syllabus_material = await get_material_by_role_day_type(role, 0, "syllabus")
+    
+    content = syllabus_material.get("content", "") if syllabus_material else ""
+    display_content = content[:500] + "..." if len(content) > 500 else (content or "(порожньо)")
+    
+    text = (
+        f"📚 <b>Зміст: {role}</b>\n\n"
+        f"{display_content}\n\n"
+        f"Натисніть «Редагувати», щоб змінити текст змісту."
+    )
+    
+    buttons = [
+        [InlineKeyboardButton(text="✏️ Редагувати", callback_data="dev_syl_edit")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_syllabus_menu")]
+    ]
+    
+    await _edit_or_answer(
+        callback.message,
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+async def developer_syllabus_edit(callback: CallbackQuery, state: FSMContext):
+    """Початок редагування змісту."""
+    if not await _ensure_developer(callback):
+        return
+        
+    data = await state.get_data()
+    role = data.get("syllabus_role", "")
+    
+    text = (
+        f"✏️ <b>Редагування змісту: {role}</b>\n\n"
+        f"Надішліть новий текст змісту. Ви можете використовувати HTML-розмітку."
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_syl_role|{data.get('syllabus_role_index')}")]
+    ])
+    
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await state.set_state(DeveloperStates.waiting_syllabus_text)
+    await callback.answer()
+
+async def developer_process_syllabus(message: Message, state: FSMContext):
+    """Збереження змісту."""
+    text_input = message.text
+    if not text_input:
+        await message.answer("❌ Текст не може бути порожнім.")
+        return
+        
+    data = await state.get_data()
+    role = data.get("syllabus_role", "")
+    
+    # Save to DB with day=0 and type='syllabus'
+    await add_or_update_material(
+        role=role,
+        day=0,
+        content_type="syllabus",
+        title=f"Зміст: {role}",
+        content=text_input,
+        resource_url=None,
+        order_index=0
+    )
+    
+    await message.answer(
+        f"✅ <b>Зміст успішно збережено!</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ До перегляду", callback_data=f"dev_syl_role|{data.get('syllabus_role_index')}")]
+        ])
+    )
+    await state.clear()
+
+
 # ==================== Notification handlers ====================
 
 async def _save_pending_material(state: FSMContext) -> tuple[bool, str, str, int]:
@@ -3284,6 +3402,12 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_photos_view, lambda c: c.data and c.data.startswith("dev_photo_day|"))
     dp.callback_query.register(developer_photo_edit_start, lambda c: c.data == "dev_photo_edit")
     dp.message.register(developer_process_photo_uploads, DeveloperStates.waiting_photo_uploads)
+
+    # Syllabus Editor
+    dp.callback_query.register(developer_syllabus_menu, lambda c: c.data == "dev_syllabus_menu")
+    dp.callback_query.register(developer_syllabus_view, lambda c: c.data and c.data.startswith("dev_syl_role|"))
+    dp.callback_query.register(developer_syllabus_edit, lambda c: c.data == "dev_syl_edit")
+    dp.message.register(developer_process_syllabus, DeveloperStates.waiting_syllabus_text)
 
     # Tests Editor
     dp.callback_query.register(developer_tests_menu, lambda c: c.data == "dev_tests_menu")

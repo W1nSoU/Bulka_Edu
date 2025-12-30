@@ -924,6 +924,50 @@ async def day_material_detail(callback: CallbackQuery):
         target_ctype=ctype,
     )
 
+async def show_syllabus(callback: CallbackQuery):
+    user_details = await _ensure_learning_access(callback)
+    if not user_details:
+        return
+
+    role = user_details.get('role')
+    # Syllabus stored as day=0, type='syllabus'
+    material = await get_material_by_role_day_type(role, 0, "syllabus")
+
+    if not material or not material.get("content"):
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В головне меню", callback_data="main_menu")]
+        ])
+        if callback.message:
+            await callback.message.edit_text("Зміст для вашої посади ще не додано.", reply_markup=kb)
+        await callback.answer()
+        return
+
+    text = material.get("content", "")
+    pages = split_text(text)
+    
+    # We use material_id for pagination callback identification
+    # But since it's a specific "show_syllabus" action, we might need a distinct pagination handler 
+    # OR we reuse get_pagination_keyboard with a specific identifier.
+    # Let's reuse existing pagination logic. If I pass material_id, _handle_pagination will try to fetch it.
+    # _handle_pagination uses get_material_by_id. So if I pass the correct ID, it should work!
+    # BUT _handle_pagination formats text using _format_material_text which adds title/url/etc.
+    # Syllabus is just text.
+    # Let's check _format_material_text in handlers.py.
+    
+    # _format_material_text does:
+    # icon + title
+    # body
+    # url
+    
+    # This is fine for syllabus too.
+    
+    final_button = InlineKeyboardButton(text="⬅️ В головне меню", callback_data="main_menu")
+    keyboard = get_pagination_keyboard(0, len(pages), str(material.get('id')), 0, final_button)
+    
+    if callback.message:
+        await _show_text_menu(callback.message, pages[0], keyboard, allow_edit=True, allow_caption_edit=True)
+    await callback.answer()
+
 async def remind_topic_self_callback(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     user_details = await get_user_details(user_id)
@@ -1975,6 +2019,7 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(locked_day, lambda c: c.data.startswith("locked_"))
     dp.callback_query.register(day_content, lambda c: c.data.startswith("day_"))
     dp.callback_query.register(day_material_detail, lambda c: c.data.startswith("daymat_"))
+    dp.callback_query.register(show_syllabus, lambda c: c.data == "show_syllabus")
     
     dp.callback_query.register(_handle_pagination, lambda c: c.data and c.data.startswith("paginate:"))
 
