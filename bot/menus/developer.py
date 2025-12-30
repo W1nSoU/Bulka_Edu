@@ -138,11 +138,11 @@ def _developer_main_keyboard(is_main_dev: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📝 Тести", callback_data="dev_tests_menu"),
         ],
         [
-            InlineKeyboardButton(text="📚 Змінити змісти", callback_data="dev_syllabus_menu"),
-        ],
-        [
             InlineKeyboardButton(text="🎥 Відео", callback_data="dev_videos_menu"),
             InlineKeyboardButton(text="🖼 Фото", callback_data="dev_photos_menu"),
+        ],
+        [
+            InlineKeyboardButton(text="📚 Змінити змісти", callback_data="dev_syllabus_menu"),
         ],
         [
             InlineKeyboardButton(text="🎟 Токени", callback_data="dev_tokens_menu"),
