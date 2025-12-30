@@ -191,7 +191,9 @@ async def send_daily_test_failure_report_to_manager(bot: Bot, manager_id: int, i
         return False
 
     manager_details = await get_manager_by_uid(manager_id)
-    manager_name = manager_details.get("full_name") or manager_details.get("username", "Керівник")
+    manager_name = "Керівник"
+    if manager_details:
+        manager_name = manager_details.get("full_name") or manager_details.get("username", "Керівник")
 
     text_lines = [
         f"🔔 <b>Щоденний звіт про тести ({datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d')})</b>",
