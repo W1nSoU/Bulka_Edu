@@ -7,7 +7,7 @@ CONTENT_TYPE_METADATA = {
     "comic": {"label": "Комікс", "icon": "📚"},
     "info": {"label": "Інформація", "icon": "📝"},
     "text": {"label": "Текст", "icon": "📄"},
-    "video_files": {"label": "Відео (завантажено)", "icon": "📹"}, # New content type
+    "video_files": {"label": "Відео", "icon": "📹"}, # New content type
     "photo_files": {"label": "Фото", "icon": "🖼"},
 }
 

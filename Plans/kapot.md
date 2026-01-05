@@ -89,21 +89,22 @@
 - [ ] Тест відкриття днів
 - [x] Привʼязка керівника (1-10 магазинів для керівника). 
 - [x] Привʼзка стажерів до магазину (При додаванні) Вибір магазину по кнопці (при виборі міста) 
-- [ ] Зображення (jpg, png) додати фото формат. 
+- [x] Зображення (jpg, png) додати фото формат. 
 - [ ] Зміст (Після проходження стажування бот надає)
 
 
-
-Матеріали Тести
-Відео     Фото
-Токени    Health Status
-
-В дев панелі треба додати ще одну кнопку, фото (підтримувані формати jpg, jpeg, png)
-  Та трохи змінити положення поточних
-  Матеріали Тести
-  Відео     Фото
-  Токени    Health Status
-  Ніякі інші не змінюй. Треба також розробити логіку по типу як в відео, кнопка в дев панелі обирається посада, день. Також в "Розпочати навчання" Треба додати Ще одну вкладку "Фото"
+Зміст все одно не додався
 
 
- 
+2025-12-30 10:00:00 | INFO     | bulka_bot | 🔵 Running daily_test_failure_notifier...
+2025-12-30 10:00:00 | ERROR    | bulka_bot | daily_test_failure_notifier error: 'NoneType' object has no attribute 'get'
+Traceback (most recent call last):
+  File "/Users/winsou/All/Dev/Bulka/main.py", line 62, in daily_test_failure_notifier
+    await send_daily_test_failure_report_to_manager(bot, manager_id, intern_failures)
+  File "/Users/winsou/All/Dev/Bulka/bot/services/reminders.py", line 194, in send_daily_test_failure_report_to_manager
+    manager_name = manager_details.get("full_name") or manager_details.get("username", "Керівник")
+                   ^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'get'
+2025-12-30 10:00:00 | INFO     | bulka_bot | 🔵 daily_test_failure_notifier finished.
+
+
