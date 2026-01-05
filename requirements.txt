@@ -3,3 +3,5 @@ pytz
 aiosqlite
 python-dotenv
 apscheduler
+httpx
+sentence-transformers
