@@ -5,3 +5,4 @@ python-dotenv
 apscheduler
 httpx
 sentence-transformers
+faiss-cpu
