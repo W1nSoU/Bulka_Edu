@@ -116,6 +116,9 @@ async def health_monitor_loop(bot):
     """
     from bot.config import DEV_CHAT_ID
     
+    # Якщо цей цикл виконується, значить планувальник живий
+    health_check.heartbeat_scheduler()
+    
     try:
         status = health_check.get_status()
         
