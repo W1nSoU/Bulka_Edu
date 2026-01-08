@@ -2,7 +2,8 @@
 This file contains all the handlers for the bot.
 """
 from aiogram import Dispatcher, types
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, FSInputFile, InputMediaPhoto, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, FSInputFile, InputMediaPhoto, Message, ErrorEvent
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from bot.state import get_progress, get_available_day, user_progress, initialize_user_progress, SearchStates
 from bot.keyboards import main_menu_keyboard, learning_menu_keyboard, manager_menu_keyboard, get_pagination_keyboard
@@ -2016,7 +2017,27 @@ async def show_test_error_statistics(callback: CallbackQuery):
 
 
 
+async def global_error_handler(event: ErrorEvent):
+    """
+    Globally handle errors to suppress specific harmless Telegram API exceptions.
+    """
+    exception = event.exception
+    
+    if isinstance(exception, TelegramBadRequest):
+        error_message = str(exception).lower()
+        # Suppress "query is too old" (timeout) and "message is not modified" (harmless edit)
+        if "query is too old" in error_message or "message is not modified" in error_message:
+            return
+
+    # For other errors, we allow the default logger to handle them or log them here if needed.
+    from bot.services.logger import get_logger
+    logger = get_logger()
+    logger.error(f"Global error handler caught: {exception}", exc_info=True)
+
 def register_handlers(dp: Dispatcher):
+    # Register global error handler
+    dp.error.register(global_error_handler)
+
     dp.message.register(start_menu, Command("start"))
     dp.callback_query.register(menu_days, lambda c: c.data == "continue_learning")
     dp.callback_query.register(locked_day, lambda c: c.data.startswith("locked_"))
