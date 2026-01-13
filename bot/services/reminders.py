@@ -326,9 +326,11 @@ async def send_manager_lagging_report(bot: Bot, manager_id: int, interns: list) 
     ])
     
     try:
-        await bot.send_message(manager_id, text, reply_markup=kb)
+        await bot.send_message(manager_id, text, reply_markup=kb, parse_mode="HTML")
         return True
-    except Exception:
+    except Exception as e:
+        from bot.services.logger import get_logger
+        get_logger().error(f"Failed to send lagging report to manager {manager_id}: {e}", exc_info=True)
         return False
 
 

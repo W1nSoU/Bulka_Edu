@@ -151,7 +151,7 @@ async def build_and_reset_embeddings():
             parts.append(content)
         return "\n".join(parts).strip()
 
-    def _build_preview(text: str, limit: int = 300) -> str:
+    def _build_preview(text: str, limit: int = 1500) -> str:
         if len(text) <= limit:
             return text
         return text[: limit - 1].rstrip() + "…"

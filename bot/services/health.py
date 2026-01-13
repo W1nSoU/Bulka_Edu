@@ -42,10 +42,18 @@ class HealthCheck:
         now = datetime.now(pytz.timezone(TIMEZONE))
         return now - self._start_time
     
-    def is_scheduler_healthy(self, max_delay_minutes: int = 65) -> bool:
-        """Перевіряє чи scheduler працює."""
+    def is_scheduler_healthy(self, max_delay_minutes: int = 10) -> bool:
+        """Перевіряє чи scheduler працює.
+        
+        Scheduler викликає health_monitor_loop кожні 5 хвилин,
+        тому якщо пройшло більше 10 хвилин - щось не так.
+        """
         if self._last_scheduler_heartbeat is None:
-            return True  # Ще не було першого heartbeat
+            # Якщо ще не було heartbeat, даємо 15 хвилин на старт
+            uptime = self.get_uptime()
+            if uptime.total_seconds() < 900:  # 15 хвилин
+                return True
+            return False  # Більше 15 хвилин без heartbeat - проблема
         
         now = datetime.now(pytz.timezone(TIMEZONE))
         delta = now - self._last_scheduler_heartbeat
@@ -122,13 +130,29 @@ async def health_monitor_loop(bot):
     try:
         status = health_check.get_status()
         
+        # Додаткова діагностика
+        now = datetime.now(pytz.timezone(TIMEZONE))
+        scheduler_delta = "N/A"
+        reminder_delta = "N/A"
+        
+        if health_check._last_scheduler_heartbeat:
+            delta = now - health_check._last_scheduler_heartbeat
+            scheduler_delta = f"{int(delta.total_seconds() / 60)} хв"
+        
+        if health_check._last_reminder_heartbeat:
+            delta = now - health_check._last_reminder_heartbeat
+            reminder_delta = f"{int(delta.total_seconds() / 60)} хв"
+        
         if status["status"] == "unhealthy" and DEV_CHAT_ID:
             alert_text = (
                 "⚠️ <b>Health Check Warning</b>\n\n"
                 f"Scheduler: {'✅' if status['scheduler_healthy'] else '❌'}\n"
+                f"  └ Останній heartbeat: {scheduler_delta} тому\n"
                 f"Reminder: {'✅' if status['reminder_healthy'] else '❌'}\n"
+                f"  └ Останній heartbeat: {reminder_delta} тому\n"
                 f"Uptime: {status['uptime_human']}\n"
-                f"Errors: {status['errors_count']}"
+                f"Errors: {status['errors_count']}\n\n"
+                f"<i>Час сервера: {now.strftime('%Y-%m-%d %H:%M:%S')}</i>"
             )
             try:
                 await bot.send_message(
@@ -136,11 +160,12 @@ async def health_monitor_loop(bot):
                     text=alert_text,
                     parse_mode="HTML"
                 )
-            except Exception:
-                pass
+                logger.warning(f"Health check alert sent: scheduler={status['scheduler_healthy']}, reminder={status['reminder_healthy']}")
+            except Exception as e:
+                logger.error(f"Failed to send health alert: {e}")
         
     except Exception as e:
-        logger.error(f"Health monitor error: {e}")
+        logger.error(f"Health monitor error: {e}", exc_info=True)
 
 
 def get_health_status() -> Dict[str, Any]:

@@ -74,9 +74,9 @@ async def _edit_menu_message(message: Message, text: str, reply_markup: InlineKe
     """
     try:
         if message.photo:
-            await message.edit_caption(caption=text, reply_markup=reply_markup)
+            await message.edit_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
         else:
-            await message.edit_text(text, reply_markup=reply_markup)
+            await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
     except TelegramBadRequest as e:
         if "there is no text in the message to edit" in str(e) or "message to edit not found" in str(e):
             # If editing fails drastically, try to delete and resend
@@ -84,7 +84,7 @@ async def _edit_menu_message(message: Message, text: str, reply_markup: InlineKe
                 await message.delete()
             except Exception:
                 pass
-            await message.answer(text, reply_markup=reply_markup)
+            await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
         elif "message is not modified" in str(e):
             pass # Ignore
         else:
@@ -562,37 +562,65 @@ async def _show_intern_details(message_or_msg: Message, intern_id: int, is_callb
         await message_or_msg.answer(report, reply_markup=kb)
 
 async def manager_remind_all_lagging(callback: CallbackQuery):
+    """Нагадує всім відстаючим стажерам з щоденного звіту."""
     if not await _ensure_manager(callback):
         return
     
     from bot.services.reminders import send_intern_reminder
+    from bot.services.logger import get_logger
     
+    logger = get_logger()
     manager_id = callback.from_user.id
-    interns = await get_interns_in_progress_for_manager(manager_id)
-    sent_count = 0
     
-    for intern in interns:
-        uid = intern['user_id']
-        current_block = intern.get('current_block', 1)
+    try:
+        interns = await get_interns_in_progress_for_manager(manager_id)
+        sent_count = 0
+        failed_count = 0
         
-        progress_rows = await get_user_progress(uid)
-        is_completed = False
-        for row in progress_rows:
-            if row['day'] == current_block and row['completed']:
-                is_completed = True
-                break
+        logger.debug(f"Manager {manager_id} initiating reminders for {len(interns)} interns")
         
-        if not is_completed:
-            # Send reminder
-            if await send_intern_reminder(callback.bot, uid, source="manager", sender_id=manager_id):
-                sent_count += 1
-    
-    await _edit_menu_message(
-        callback.message,
-        f"✅ <b>Нагадування надіслано!</b>\n\nОтримали: {sent_count} стажерів.",
-        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👌 Добре", callback_data="mgr_dismiss_report")]])
-    )
-    await callback.answer()
+        for intern in interns:
+            uid = intern['user_id']
+            current_block = intern.get('current_block', 1)
+            
+            progress_rows = await get_user_progress(uid)
+            is_completed = False
+            for row in progress_rows:
+                if row['day'] == current_block and row['completed']:
+                    is_completed = True
+                    break
+            
+            if not is_completed:
+                # Send reminder
+                try:
+                    if await send_intern_reminder(callback.bot, uid, source="manager", sender_id=manager_id):
+                        sent_count += 1
+                        logger.debug(f"Reminder sent to intern {uid}")
+                    else:
+                        failed_count += 1
+                        logger.debug(f"Reminder failed for intern {uid}")
+                except Exception as e:
+                    failed_count += 1
+                    logger.error(f"Error sending reminder to intern {uid}: {e}")
+        
+        result_text = f"✅ <b>Нагадування надіслано!</b>\n\n"
+        result_text += f"📨 Успішно: {sent_count} стажерів\n"
+        if failed_count > 0:
+            result_text += f"❌ Не вдалося: {failed_count} стажерів\n"
+        result_text += f"\n<i>Стажери отримали повідомлення про продовження навчання</i>"
+        
+        await _edit_menu_message(
+            callback.message,
+            result_text,
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👌 Добре", callback_data="mgr_dismiss_report")]])
+        )
+        await callback.answer("✅ Нагадування відправлено")
+        
+        logger.info(f"Manager {manager_id} sent reminders: {sent_count} success, {failed_count} failed")
+        
+    except Exception as e:
+        logger.error(f"Error in manager_remind_all_lagging: {e}", exc_info=True)
+        await callback.answer("❌ Помилка при відправці нагадувань", show_alert=True)
 
 async def manager_dismiss_report(callback: CallbackQuery):
     try:

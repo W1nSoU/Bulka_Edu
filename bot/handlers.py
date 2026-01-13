@@ -16,6 +16,7 @@ import pytz
 import aiosqlite
 import json
 import asyncio
+import re # NEW IMPORT
 from database.users import (
     register_user, update_progress, get_user_progress, set_intern_extra,
     get_user_details, get_manager_interns, get_inactive_interns_for_manager, get_interns_in_progress_for_manager,
@@ -65,7 +66,10 @@ class SupportStates(StatesGroup):
 class ManagerReplyStates(StatesGroup):
     waiting_for_reply = State()
 
-async def start_menu(message: types.Message):
+class RegistrationStates(StatesGroup):
+    waiting_for_full_name = State()
+
+async def start_menu(message: types.Message, state: FSMContext):
     args = message.text.split()[1:] if len(message.text.split()) > 1 else []
     user_id = message.from_user.id
     manager_info = await get_manager_by_uid(user_id)
@@ -123,16 +127,21 @@ async def start_menu(message: types.Message):
                     await message.answer(error_text)
                     return
                 
-                await register_user(
-                    user_id, 
-                    username=message.from_user.username,
-                    full_name=message.from_user.full_name
+                # Start registration flow
+                await state.update_data(
+                    reg_manager_id=manager_id,
+                    reg_role=role,
+                    reg_city=city,
+                    reg_shop=shop,
+                    reg_token=token
                 )
-                await set_intern_extra(user_id, manager_id, role, city, shop=shop) # Pass shop
-                stored = await use_token(token, user_id)
-                if not stored:
-                    print(f"⚠️ Не вдалося позначити токен {token} як використаний.")
-                valid_referral = True
+                await state.set_state(RegistrationStates.waiting_for_full_name)
+                await message.answer(
+                    "Вітаю в команді Булка! 🥐\n\n"
+                    "Будь ласка, напишіть ваше <b>Прізвище Ім'я По батькові (ПІБ)</b> для завершення реєстрації."
+                )
+                return
+
             elif token_data.get("status") == "expired":
                 await message.answer(
                     "⚠️ <b>Помилка реєстрації!</b>\n\n"
@@ -167,14 +176,19 @@ async def start_menu(message: types.Message):
                     await message.answer(error_text)
                     return
                 
-                if not existing_user:
-                    await register_user(
-                        user_id,
-                        username=message.from_user.username,
-                        full_name=message.from_user.full_name,
-                    )
-                await set_intern_extra(user_id, manager_id, role, city, shop=shop) # Pass shop
-                valid_referral = True
+                # Start registration flow
+                await state.update_data(
+                    reg_manager_id=manager_id,
+                    reg_role=role,
+                    reg_city=city,
+                    reg_shop=shop
+                )
+                await state.set_state(RegistrationStates.waiting_for_full_name)
+                await message.answer(
+                    "Вітаю в команді Булка! 🥐\n\n"
+                    "Будь ласка, напишіть ваше <b>Прізвище Ім'я По батькові (ПІБ)</b> для завершення реєстрації."
+                )
+                return
                 
             except Exception as e:
                 print(f"Помилка обробки deep-link параметрів: {e}")
@@ -1006,10 +1020,10 @@ async def remind_topic_self_callback(callback: CallbackQuery, state: FSMContext)
         [InlineKeyboardButton(text="⬅️ В головне меню", callback_data="main_menu")]
     ])
     if callback.message:
-        try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=prompt, reply_markup=kb)
+        else:
             await callback.message.edit_text(prompt, reply_markup=kb)
-        except Exception:
-            await callback.message.answer(prompt, reply_markup=kb)
     await callback.answer()
 
 async def remind_topic_global_callback(callback: CallbackQuery, state: FSMContext):
@@ -1039,10 +1053,10 @@ async def remind_topic_global_callback(callback: CallbackQuery, state: FSMContex
             "Обери посаду, по якій шукати матеріали:"
         )
         if callback.message:
-            try:
+            if callback.message.photo:
+                await callback.message.edit_caption(caption=prompt, reply_markup=kb)
+            else:
                 await callback.message.edit_text(prompt, reply_markup=kb)
-            except Exception:
-                await callback.message.answer(prompt, reply_markup=kb)
         await callback.answer()
         return
 
@@ -1057,10 +1071,10 @@ async def remind_topic_global_callback(callback: CallbackQuery, state: FSMContex
         [InlineKeyboardButton(text="⬅️ В головне меню", callback_data="main_menu")]
     ])
     if callback.message:
-        try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=prompt, reply_markup=kb)
+        else:
             await callback.message.edit_text(prompt, reply_markup=kb)
-        except Exception:
-            await callback.message.answer(prompt, reply_markup=kb)
     await callback.answer()
 
 async def remind_role_select_callback(callback: CallbackQuery, state: FSMContext):
@@ -1107,10 +1121,10 @@ async def remind_role_select_callback(callback: CallbackQuery, state: FSMContext
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="remind_topic_global")]
     ])
     if callback.message:
-        try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=prompt, reply_markup=kb)
+        else:
             await callback.message.edit_text(prompt, reply_markup=kb)
-        except Exception:
-            await callback.message.answer(prompt, reply_markup=kb)
     await callback.answer()
 
 async def remind_topic_for_intern_callback(callback: CallbackQuery, state: FSMContext):
@@ -1155,10 +1169,10 @@ async def remind_topic_for_intern_callback(callback: CallbackQuery, state: FSMCo
         [InlineKeyboardButton(text="⬅️ В головне меню", callback_data="main_menu")]
     ])
     if callback.message:
-        try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=prompt, reply_markup=kb)
+        else:
             await callback.message.edit_text(prompt, reply_markup=kb)
-        except Exception:
-            await callback.message.answer(prompt, reply_markup=kb)
     await callback.answer()
 
 async def process_keyword_search(message: types.Message, state: FSMContext):
@@ -1216,27 +1230,238 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
         role_filter = target_role or (user_details or {}).get("role")
         new_search_callback = "remind_topic_self"
 
+    # DEBUG: Log search parameters
+    logger = get_logger()
+    logger.debug(f"=== SEARCH DEBUG START ===")
+    logger.debug(f"Search parameters: query='{query}', mode='{mode}', target_role='{target_role}', role_filter='{role_filter}'")
+    if user_details:
+        logger.debug(f"User details: role='{user_details.get('role')}', manager_id='{user_details.get('manager_id')}'")
+
     keyword_results = await search_materials_db(query, role=role_filter, limit=15)
     
+    # DEBUG: Log search results for diagnostics
+    logger.debug(f"Keyword search for '{query}' with role '{role_filter}': found {len(keyword_results)} materials")
+    if keyword_results:
+        for result in keyword_results[:3]:
+            logger.debug(f"  - Material {result['id']}: day={result['day']}, role='{result['role']}', title='{result.get('title', 'No title')}'")
+    else:
+        logger.debug("  - No materials found by keyword search")
+    
     ai_response = None
-    semantic_results = []
+    semantic_results = [] # Keep this for the non-AI fallback
     
     if is_groq_configured():
+        # --- NEW RELIABLE CONTEXT ASSEMBLY ---
+        
+        # 1. Collect unique material IDs from both search methods
+        unique_material_ids = {} # Using a dict to preserve order: id -> None
+        for item in keyword_results:
+            unique_material_ids[item['id']] = None
+        
         semantic_candidates = await semantic_search(query, limit=15)
-        if semantic_candidates:
-            # Filter semantic results by role if a specific role is requested
+        logger.debug(f"Semantic search found {len(semantic_candidates)} candidates")
+        for item in semantic_candidates:
+            if item['material_id']:
+                unique_material_ids[item['material_id']] = None
+                logger.debug(f"Added semantic result: material {item['material_id']}, score={item.get('score', 0):.3f}")
+        
+        logger.debug(f"Combined search found {len(unique_material_ids)} unique materials")
+        
+        # FALLBACK: If no results from targeted search, search ALL materials for role
+        if len(unique_material_ids) == 0:
+            logger.debug(f"No targeted results found, searching ALL materials for role '{role_filter}'")
+            all_materials = await get_all_materials()
+            
+            # Filter by role if specified
             if role_filter:
-                semantic_candidates = [
-                    item for item in semantic_candidates 
-                    if item.get('role') == 'ALL' or item.get('role') == role_filter
-                ]
+                relevant_materials = [m for m in all_materials if m.get('role') == role_filter or m.get('role') == 'ALL']
+            else:
+                relevant_materials = all_materials
+            
+            logger.debug(f"Fallback search: checking {len(relevant_materials)} materials for query '{query}'")
+            
+            # Search in all relevant materials
+            query_lower = query.lower()
+            query_words = [w.lower() for w in query.split() if len(w) > 2]
+            
+            # Add specific search terms for better matching
+            search_terms = query_words + [query_lower]
+            if "багет" in query_lower:
+                search_terms.extend(["багет", "хліб", "круассан", "випав", "пакет", "продукція"])
+            if "випав" in query_lower:
+                search_terms.extend(["випав", "випало", "компенсац", "заміню"])
+            
+            for material in relevant_materials:
+                content = (material.get('content') or '').lower()
+                title = (material.get('title') or '').lower()
+                
+                # Check if any search terms appear in content or title
+                found = False
+                matched_term = None
+                
+                for term in search_terms:
+                    if term in content or term in title:
+                        found = True
+                        matched_term = term
+                        break
+                
+                if found:
+                    unique_material_ids[material['id']] = None
+                    logger.debug(f"Found material {material['id']} (day {material.get('day')}) via fallback search, matched term: '{matched_term}'")
+                    logger.debug(f"Material title: {material.get('title', 'No title')}")
+                    # Log a snippet of content for debugging
+                    content_full = material.get('content', '')
+                    if matched_term and matched_term in content_full.lower():
+                        idx = content_full.lower().find(matched_term)
+                        start = max(0, idx - 50)
+                        end = min(len(content_full), idx + 150)
+                        snippet = content_full[start:end]
+                        logger.debug(f"Content snippet: ...{snippet}...")
+            
+            logger.debug(f"Fallback search found {len(unique_material_ids)} total materials")
+        
+        # 2. Fetch full content for all unique materials
+        full_materials = {} # id -> full_text
+        for mid in unique_material_ids.keys():
+            mat = await get_material_by_id(mid)
+            if mat:
+                full_materials[mid] = mat.get('content') or ""
 
-            context = "\n\n".join([item['preview'] for item in semantic_candidates if item.get('preview')])
-            ai_response = await search_with_ai(query, context, role_filter)
+        # 3. Generate Smart Snippets for AI Context from every found document
+        context_parts = []
+        query_words = [w.lower() for w in query.split() if len(w) > 2]
+        if not query_words:
+            query_words.append(query.lower())
+        
+        # Add common variations for Ukrainian words
+        expanded_words = []
+        for word in query_words:
+            expanded_words.append(word)
+            if "алкоголь" in word or word == "алкоголь":
+                expanded_words.extend(["спирт", "алкогол", "горілк", "пив", "вин"])
+            elif "списув" in word or word == "списувати":
+                expanded_words.extend(["спис", "списання", "списати"])
+            elif "конфлікт" in word or "конфлікт" in query.lower():
+                expanded_words.extend(["конфлікт", "суперечк", "скарг", "незадовол", "проблем"])
+            elif word in ["багет", "хліб", "випав", "пакет"]:
+                expanded_words.extend(["багет", "хліб", "круассан", "випав", "пакет", "продукція", "компенсац", "заміню", "їжа"])
+        
+        # Add the full original query for exact matching
+        expanded_words.append(query.lower())
+
+        # Collect relevant materials with scores (FULL TEXT, not snippets)
+        scored_materials = []
+        
+        for mid, text in full_materials.items():
+            if not text:
+                continue
+                
+            text_lower = text.lower()
+            
+            # Calculate relevance score based on matches
+            matches = []
+            
+            # Priority A: Find exact phrase (highest priority)
+            phrase_idx = text_lower.find(query.lower())
+            if phrase_idx != -1:
+                matches.append((phrase_idx, 3, "exact_phrase"))
+            
+            # Priority B: Find expanded keywords
+            for word in expanded_words:
+                word_idx = text_lower.find(word)
+                if word_idx != -1:
+                    matches.append((word_idx, 2, f"keyword_{word}"))
+            
+            # Priority C: Find original query words
+            for word in query_words:
+                word_idx = text_lower.find(word)
+                if word_idx != -1 and word_idx not in [m[0] for m in matches]:
+                    matches.append((word_idx, 1, f"query_word_{word}"))
+            
+            # Score this material if it has matches
+            if matches:
+                # Calculate score based on match quality and quantity
+                best_match = max(matches, key=lambda x: x[1])
+                score = best_match[1] * 10 + len([m for m in matches if m[1] >= 2]) * 5
+                
+                scored_materials.append((score, text, mid, best_match[2], len(matches)))
+                logger.debug(f"Material {mid}: score={score}, matches={len(matches)}, best_match_type={best_match[2]}")
+        
+        # Sort materials by score (highest first)
+        scored_materials.sort(key=lambda x: x[0], reverse=True)
+        
+        # Build context from top-scored FULL materials
+        context_parts = []
+        total_length = 0
+        max_context_length = 15000  # Increased limit for full materials
+        max_materials = 5  # Maximum number of materials to include
+        
+        for score, full_text, mid, match_type, num_matches in scored_materials:
+            # Check if we can fit this material
+            if len(context_parts) >= max_materials:
+                logger.debug(f"Reached max materials limit ({max_materials})")
+                break
+            
+            if total_length + len(full_text) > max_context_length:
+                # Try to fit a truncated version if it's the first material
+                if len(context_parts) == 0:
+                    truncated = full_text[:max_context_length - total_length]
+                    context_parts.append(f"[Матеріал {mid}]: {truncated}...")
+                    total_length += len(truncated)
+                    logger.debug(f"Added TRUNCATED material {mid}: score={score}, type={match_type}, length={len(truncated)}")
+                break
+            
+            # Add FULL material text
+            context_parts.append(f"[Матеріал {mid}]: {full_text}")
+            total_length += len(full_text)
+            
+            logger.debug(f"Added FULL material {mid}: score={score}, type={match_type}, matches={num_matches}, length={len(full_text)}")
+        
+        # Fallback: if no scored materials, take first few materials completely
+        if not context_parts:
+            logger.debug("No scored materials, using fallback: taking first few materials")
+            for mid, text in list(full_materials.items())[:3]:
+                if text and len(context_parts) < 3:
+                    # Take as much as we can fit
+                    available_space = max_context_length - total_length
+                    if available_space <= 0:
+                        break
+                    
+                    if len(text) <= available_space:
+                        context_parts.append(f"[Матеріал {mid}]: {text}")
+                        total_length += len(text)
+                        logger.debug(f"Fallback: added full material {mid}, length={len(text)}")
+                    else:
+                        truncated = text[:available_space]
+                        context_parts.append(f"[Матеріал {mid}]: {truncated}...")
+                        total_length += len(truncated)
+                        logger.debug(f"Fallback: added truncated material {mid}, length={len(truncated)}")
+                        break
+
+        context = "\n\n---\n\n".join(context_parts)
+        
+        # DEBUG: Log context info
+        logger.debug(f"Context assembled: {len(context_parts)} FULL materials, total length {len(context)}")
+        material_ids = [int(part.split(']:')[0].replace('[Матеріал ', '')) for part in context_parts if '[Матеріал ' in part]
+        logger.debug(f"Final materials in context: {material_ids}")
+        logger.debug(f"Top-scored materials: {[(s[0], s[2], s[3], s[4]) for s in scored_materials[:5]]}")
+        
+        # Log what's actually in the context for each material
+        for i, part in enumerate(context_parts[:2], 1):  # Show first 2 materials
+            lines = part.split('\n')
+            preview = '\n'.join(lines[:5])  # First 5 lines
+            logger.debug(f"Context material {i} preview (first 5 lines):\n{preview}")
+        
+        logger.debug(f"=== SEARCH DEBUG END ===")
+        
+        if context.strip():
+             ai_response = await search_with_ai(query, context, role_filter, user_id=message.from_user.id)
         else:
-            # Fallback or a message that nothing was found
-            ai_response = "На жаль, AI не зміг знайти релевантну інформацію за вашим запитом."
+             ai_response = "На жаль, я не знайшов інформації за вашим запитом у матеріалах."
+        # --- END OF NEW LOGIC ---
+
     elif len(keyword_results) < SEMANTIC_MIN_KEYWORD_RESULTS:
+        # Fallback for no AI configured - simplified existing logic
         semantic_candidates = await semantic_search(query, limit=SEMANTIC_RESULT_LIMIT)
         keyword_ids = {item.get("id") for item in keyword_results if item.get("id")}
         for candidate in semantic_candidates:
@@ -1247,7 +1472,10 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
             if len(semantic_results) >= SEMANTIC_RESULT_LIMIT:
                 break
 
-    if not keyword_results and not semantic_results and not ai_response:
+    # semantic_results is only for fallback when AI is not configured or fails,
+    # so we don't need to worry about it here directly for AI output.
+
+    if not context.strip(): # Check if no context was formed
         text = (
             f"😿 Не вдалося знайти матеріали за запитом <b>“{query}”</b>.\n"
             "Спробуй інше формулювання або синоніми."
@@ -1255,10 +1483,25 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
     else:
         lines = [f"🔎 <b>Результати AI-пошуку за запитом “{query}”</b>", ""]
         
-        # AI-відповідь (Groq або semantic search)
         if ai_response:
-            lines.append(ai_response)
-        elif semantic_results:
+            # Перевіряємо чи ШІ дає стандартну відповідь "немає інформації"
+            if ("немає інформації" in ai_response.lower() or "не знайшов" in ai_response.lower()) and len(keyword_results) > 0:
+                # Якщо ШІ каже що немає інформації, але ключові слова знайшли результати,
+                # додаємо базовий перелік знайдених матеріалів
+                lines.append(ai_response)
+                lines.append("")
+                lines.append("📄 <b>Знайдені матеріали за ключовими словами:</b>")
+                for idx, item in enumerate(keyword_results[:5], 1):
+                    day = item.get("day", "?")
+                    title = item.get("title", "Без назви")
+                    content_snippet = _build_snippet(item.get("content", ""), 150)
+                    lines.append(f"{idx}. <b>День {day}</b> - {title}")
+                    if content_snippet:
+                        lines.append(f"   {content_snippet}")
+                    lines.append("")
+            else:
+                lines.append(ai_response) # This now includes the debug context for developers
+        elif semantic_results: # Fallback only if AI not configured, but semantic_results are found
             lines.append("🤖 <b>За змістом (локальний AI)</b>:")
             for idx, item in enumerate(semantic_results, 1):
                 meta = CONTENT_TYPE_METADATA.get(item.get("block_type") or "text", {"icon": "📄", "label": "Матеріал"})
@@ -1273,6 +1516,7 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
                 )
                 lines.append("")
         else:
+            # This case should ideally not be reached if context.strip() is checked before
             lines.append("💡 <i>AI-пошук недоступний. Для активації встановіть GROQ_API_KEY.</i>")
 
         text = "\n".join(line for line in lines if line is not None).strip()
@@ -1283,7 +1527,19 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
             [InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")],
         ]
     )
-    await message.answer(text, reply_markup=kb)
+    
+    # Telegram має ліміт 4096 символів на повідомлення
+    MAX_MESSAGE_LENGTH = 4000
+    
+    if len(text) <= MAX_MESSAGE_LENGTH:
+        await message.answer(text, reply_markup=kb)
+    else:
+        # Якщо повідомлення занадто довге, обрізаємо
+        truncated = text[:MAX_MESSAGE_LENGTH - 100]
+        truncated += "\n\n<i>... (повідомлення обрізано)</i>"
+        await message.answer(truncated, reply_markup=kb)
+        logger.warning(f"Message truncated: original length {len(text)}, sent {len(truncated)}")
+    
     await state.clear()
 
 async def main_menu_callback(callback: CallbackQuery):
@@ -1634,6 +1890,20 @@ async def profile_handler_new_message(callback: CallbackQuery):
                 manager_name_display = full_name
             elif username and username.strip():
                 manager_name_display = f"@{username}"
+            else:
+                manager_name_display = f"ID: {manager_id}"
+        else:
+            # Fallback: check users table (e.g. for Developers who are not in managers table)
+            manager_user = await get_user_details(manager_id)
+            if manager_user:
+                full_name = manager_user.get('full_name')
+                username = manager_user.get('username')
+                if full_name and full_name.strip():
+                    manager_name_display = full_name
+                elif username and username.strip():
+                    manager_name_display = f"@{username}"
+                else:
+                    manager_name_display = f"ID: {manager_id}"
             else:
                 manager_name_display = f"ID: {manager_id}"
 
@@ -2017,6 +2287,35 @@ async def show_test_error_statistics(callback: CallbackQuery):
 
 
 
+async def process_registration_full_name(message: types.Message, state: FSMContext):
+    full_name = message.text.strip()
+    if len(full_name.split()) < 2:
+        await message.answer("Будь ласка, введіть повне ім'я та прізвище (мінімум 2 слова).")
+        return
+
+    data = await state.get_data()
+    manager_id = data.get("reg_manager_id")
+    role = data.get("reg_role")
+    city = data.get("reg_city")
+    shop = data.get("reg_shop")
+    token = data.get("reg_token")
+    
+    user_id = message.from_user.id
+    username = message.from_user.username
+
+    # Register/Update user with provided full_name
+    await register_user(user_id, username=username, full_name=full_name)
+    await set_intern_extra(user_id, manager_id, role, city, shop=shop)
+    
+    if token:
+        await use_token(token, user_id)
+    
+    await message.answer(f"Дякую, {full_name}! Реєстрацію завершено. ✅")
+    
+    initialize_user_progress(user_id)
+    await show_student_main_menu(message, user_id, allow_edit=False)
+    await state.clear()
+
 async def global_error_handler(event: ErrorEvent):
     """
     Globally handle errors to suppress specific harmless Telegram API exceptions.
@@ -2039,6 +2338,7 @@ def register_handlers(dp: Dispatcher):
     dp.error.register(global_error_handler)
 
     dp.message.register(start_menu, Command("start"))
+    dp.message.register(process_registration_full_name, RegistrationStates.waiting_for_full_name)
     dp.callback_query.register(menu_days, lambda c: c.data == "continue_learning")
     dp.callback_query.register(locked_day, lambda c: c.data.startswith("locked_"))
     dp.callback_query.register(day_content, lambda c: c.data.startswith("day_"))

@@ -85,27 +85,90 @@ async def search_materials(keyword: str, role: Optional[str] = None, limit: int 
     Простий пошук матеріалів за ключовим словом.
     Використовується як базовий варіант до впровадження semantic search.
     """
-    like_pattern = f"%{keyword.lower()}%"
-    query = """
-        SELECT *
+    # Розширюємо пошук синонімами та варіаціями
+    search_terms = [keyword.lower()]
+    
+    # Додаємо варіації для алкоголю
+    if "алкоголь" in keyword.lower() or keyword.lower() == "алкоголь":
+        search_terms.extend(["спирт", "алкогол", "горілк", "пив", "вин", "алкогольн"])
+    
+    # Додаємо варіації для списання
+    elif "списув" in keyword.lower() or "спис" in keyword.lower():
+        search_terms.extend(["спис", "списання", "списати", "списувати"])
+    
+    # Додаємо варіації для конфліктів
+    elif "конфлікт" in keyword.lower() or "конфлікт" in keyword:
+        search_terms.extend(["конфлікт", "суперечк", "скарг", "незадовол", "проблем", "ситуац"])
+    
+    # Додаємо варіації для роботи з клієнтами
+    elif any(word in keyword.lower() for word in ["клієнт", "покупец", "обслуговув", "сервіс"]):
+        search_terms.extend(["клієнт", "покупец", "обслуговув", "сервіс", "стандарт", "якість"])
+    
+    # Для загальних питань типу "як", "що робити"
+    elif any(word in keyword.lower() for word in ["як", "що робити", "як вирішити"]):
+        # Шукаємо також по процедурах та інструкціях
+        search_terms.extend(["процедур", "інструкц", "алгоритм", "кроки", "дії"])
+    
+    # Для випадків з продукцією (багет, хліб тощо)
+    elif any(word in keyword.lower() for word in ["багет", "хліб", "випав", "пакет", "продукція"]):
+        search_terms.extend(["багет", "хліб", "круассан", "випав", "пакет", "продукція", "компенсац", "заміню", "їжа"])
+    
+    # Для загальних слів - додаємо контекстні варіанти
+    if len(search_terms) == 1:  # Тільки оригінальне слово
+        original = keyword.lower()
+        # Додаємо загальні варіанти для кращого пошуку
+        if len(original) > 3:  # Тільки для довгих слів
+            # Додаємо частину слова для пошуку коренів
+            if len(original) >= 5:
+                search_terms.append(original[:4])  # Перші 4 символи
+    
+    # Створюємо умови для пошуку з пріоритетами
+    priority_conditions = []
+    standard_conditions = []
+    params: List = []
+    
+    # Пріоритетний пошук: точна фраза в заголовку або на початку контенту
+    exact_phrase = keyword.lower()
+    priority_conditions.append("(lower(title) LIKE ? OR lower(substr(content, 1, 500)) LIKE ?)")
+    params.extend([f"%{exact_phrase}%", f"%{exact_phrase}%"])
+    
+    # Стандартний пошук по всьому контенту
+    for term in search_terms:
+        pattern = f"%{term}%"
+        standard_conditions.append("(lower(content) LIKE ? OR lower(title) LIKE ?)")
+        params.extend([pattern, pattern])
+    
+    # Комбінуємо умови з пріоритетами
+    all_conditions = priority_conditions + standard_conditions
+    
+    query = f"""
+        SELECT *, 
+        CASE 
+            WHEN lower(title) LIKE ? THEN 100
+            WHEN lower(substr(content, 1, 500)) LIKE ? THEN 90
+            ELSE 50
+        END as relevance_score
         FROM materials
-        WHERE lower(content) LIKE ?
-           OR lower(title) LIKE ?
+        WHERE ({' OR '.join(all_conditions)})
     """
-    params: List = [like_pattern, like_pattern]
+    
+    # Додаємо параметри для скорингу
+    score_params = [f"%{exact_phrase}%", f"%{exact_phrase}%"] + params
 
     if role:
         query += " AND (role = ? OR role = 'ALL')"
-        params.append(role)
+        score_params.append(role)
 
-    query += " ORDER BY day ASC, order_index ASC LIMIT ?"
-    params.append(limit)
+    query += " ORDER BY relevance_score DESC, day ASC, order_index ASC LIMIT ?"
+    score_params.append(limit)
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute(query, params)
+        cursor = await db.execute(query, score_params)
         rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        results = [dict(row) for row in rows]
+        
+        return results
 
 
 async def get_all_materials() -> List[dict]:

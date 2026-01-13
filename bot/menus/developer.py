@@ -1,6 +1,7 @@
 import asyncio
 import sys
 from pathlib import Path
+from datetime import datetime # NEW IMPORT
 from aiogram import Dispatcher
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.fsm.context import FSMContext
@@ -13,6 +14,7 @@ from database.users import (
     get_all_users,
     get_user_details,
     get_user_by_username,
+    get_users_by_full_name, # NEW
     delete_user,
     register_user,
     get_reminder_history,
@@ -44,6 +46,7 @@ from database.materials import (
     update_material_resource_url,
     add_or_update_material,
     get_test_by_role_and_day,
+    get_material_by_id, # NEW IMPORT
 )
 from database.tokens import get_token_stats, cleanup_expired_tokens
 from database.analytics import get_daily_stats, get_dropout_funnel
@@ -53,6 +56,7 @@ from bot.services.learning_progress import get_days_overview, DayStatus
 from bot.services.access import get_display_role # Import get_display_role
 from bot.constants import AVAILABLE_ROLES, AVAILABLE_SHOPS, AVAILABLE_CITIES
 from bot.keyboards import get_pagination_keyboard # Import get_pagination_keyboard
+from bot.utils.paginator import split_text # NEW IMPORT
 import json
 
 
@@ -60,6 +64,7 @@ class DeveloperStates(StatesGroup):
     waiting_user_search = State()
     waiting_delete_user = State()
     waiting_add_manager_id = State()
+    waiting_add_manager_name = State()
     waiting_add_manager_city = State()
     waiting_add_manager_shops = State()
     waiting_delete_manager = State()
@@ -68,6 +73,8 @@ class DeveloperStates(StatesGroup):
     waiting_days_close = State()
     waiting_days_reset = State()
     waiting_add_developer = State()
+    waiting_add_developer_name = State()
+    waiting_add_hr = State()
     # Стани для редагування матеріалів
     waiting_material_text = State()
     waiting_material_video = State()
@@ -587,7 +594,12 @@ async def developer_request_user_search(callback: CallbackQuery, state: FSMConte
     await state.set_state(DeveloperStates.waiting_user_search)
     await _edit_or_answer(
         callback.message,
-        "🔍 Введіть ID користувача або username (наприклад, 123456 або @username).",
+        "🔍 <b>Пошук користувача</b>\n\n"
+        "Введіть один з варіантів:\n"
+        "• ID користувача (наприклад, <code>123456</code>)\n"
+        "• Username (наприклад, <code>@username</code>)\n"
+        "• ПІБ (наприклад, <code>Іванов Іван</code>)\n\n"
+        "<i>💡 Пошук не чутливий до регістру</i>",
         reply_markup=_users_menu_keyboard(),
     )
     await callback.answer()
@@ -595,35 +607,86 @@ async def developer_request_user_search(callback: CallbackQuery, state: FSMConte
 
 async def developer_process_user_search(message: Message, state: FSMContext):
     query = (message.text or "").strip()
-    user = None
+    users = []
+    
     if query.startswith("@"):
         user = await get_user_by_username(query)
+        if user:
+            users.append(user)
+    elif query.isdigit():
+        user = await get_user_details(int(query))
+        if user:
+            users.append(user)
     else:
-        try:
-            user_id = int(query)
-            user = await get_user_details(user_id)
-        except ValueError:
-            user = None
+        # Search by full name if it's not a username or ID
+        users = await get_users_by_full_name(query)
 
-    if not user:
-        await message.answer("❌ Користувача не знайдено. Спробуйте ще раз або натисніть /cancel.")
+    if not users:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Новий пошук", callback_data="dev_user_search")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")]
+        ])
+        
+        await message.answer(
+            "❌ <b>Користувача не знайдено</b>\n\n"
+            f"Ваш запит: <code>{query}</code>\n\n"
+            "💡 <b>Поради:</b>\n"
+            "• Перевірте правильність написання\n"
+            "• Спробуйте ввести частину імені\n"
+            "• Використайте ID якщо він відомий\n"
+            "• Або натисніть /cancel для скасування",
+            reply_markup=kb
+        )
         return
 
-    intern_id = int(user["user_id"])
-    report = await get_user_days_report(intern_id)
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{intern_id}"),
-            InlineKeyboardButton(text="✍️ Змінити", callback_data=f"dev_user_modify:{intern_id}")
-        ],
-        [
-            InlineKeyboardButton(text="❌ Видалити", callback_data=f"dev_user_delete_confirm:{intern_id}"),
-            InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")
-        ]
-    ])
-    
-    await message.answer(report, reply_markup=kb)
+    if len(users) == 1:
+        # If only one user is found, show their profile directly
+        user = users[0]
+        intern_id = int(user["user_id"])
+        report = await get_user_days_report(intern_id)
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{intern_id}"),
+                InlineKeyboardButton(text="✍️ Змінити", callback_data=f"dev_user_modify:{intern_id}")
+            ],
+            [
+                InlineKeyboardButton(text="❌ Видалити", callback_data=f"dev_user_delete_confirm:{intern_id}"),
+                InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")
+            ]
+        ])
+        
+        await message.answer(report, reply_markup=kb)
+    else:
+        # If multiple users are found, show a list
+        lines = [f"👥 <b>Знайдено {len(users)} користувачів:</b>\n"]
+        
+        # Показуємо максимум 20 користувачів
+        display_users = users[:20]
+        for user in display_users:
+            full_name = user.get('full_name', 'Без імені')
+            user_id = user['user_id']
+            username = user.get('username', '')
+            
+            user_info = f"• <b>{full_name}</b> (ID: <code>{user_id}</code>)"
+            if username:
+                user_info += f" | @{username}"
+            lines.append(user_info)
+        
+        if len(users) > 20:
+            lines.append(f"\n<i>... та ще {len(users) - 20} користувачів</i>")
+        
+        lines.append("\n💡 <b>Уточніть пошук:</b>")
+        lines.append("• Введіть повне ім'я")
+        lines.append("• Або використайте ID конкретного користувача")
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Новий пошук", callback_data="dev_user_search")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")]
+        ])
+        
+        await message.answer("\n".join(lines), reply_markup=kb)
+
     await state.clear()
 
 
@@ -1261,13 +1324,30 @@ async def _build_manager_shops_keyboard(city: str, selected_shops: list) -> Inli
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 async def developer_process_add_manager_id(message: Message, state: FSMContext):
-    """Processes the manager ID and shows the city selection menu."""
+    """Processes the manager ID and asks for their Full Name."""
     if not message.text or not message.text.isdigit():
         await message.answer("❌ ID повинен бути числом. Спробуйте ще раз.")
         return
     
     user_id = int(message.text)
     await state.update_data(new_manager_id=user_id, selected_shops=[])
+    await state.set_state(DeveloperStates.waiting_add_manager_name)
+    
+    await message.answer(
+        f"ID: {user_id}. Тепер введіть ПІБ керівника:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_manage_managers")]
+        ])
+    )
+
+async def developer_process_add_manager_name(message: Message, state: FSMContext):
+    """Processes the manager Name and shows the city selection menu."""
+    full_name = message.text.strip()
+    if len(full_name.split()) < 2:
+        await message.answer("Будь ласка, введіть повне ім'я та прізвище (мінімум 2 слова).")
+        return
+
+    await state.update_data(new_manager_name=full_name)
     await state.set_state(DeveloperStates.waiting_add_manager_city)
     
     buttons = []
@@ -1276,7 +1356,7 @@ async def developer_process_add_manager_id(message: Message, state: FSMContext):
     buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_manage_managers")])
     
     await message.answer(
-        f"Керівник ID: {user_id}.\nТепер оберіть місто, до якого належать його магазини:",
+        f"Керівник: <b>{full_name}</b>.\nТепер оберіть місто, до якого належать його магазини:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
 
@@ -1319,17 +1399,17 @@ async def developer_finish_shop_selection(callback: CallbackQuery, state: FSMCon
     data = await state.get_data()
     user_id = data.get("new_manager_id")
     selected_shops = data.get("selected_shops", [])
+    full_name = data.get("new_manager_name", "Керівник")
     
     if not user_id:
         await callback.answer("Помилка: ID керівника не знайдено.", show_alert=True)
         return await developer_manage_managers_menu(callback, state)
 
+    # Get username if possible, but rely on provided full_name
     try:
         chat_info = await callback.bot.get_chat(user_id)
-        full_name = chat_info.full_name
         username = chat_info.username
     except Exception:
-        full_name = ""
         username = ""
 
     await register_user(user_id, username=username, full_name=full_name)
@@ -1435,7 +1515,6 @@ async def developer_request_add_dev(callback: CallbackQuery, state: FSMContext):
 async def developer_process_add_dev(message: Message, state: FSMContext):
     data = await state.get_data()
     prompt_info = data.get("dev_prompt")
-    panel_info = data.get("dev_panel")
     text_value = (message.text or "").strip()
     if not text_value.isdigit():
         await _update_prompt_message(
@@ -1447,15 +1526,32 @@ async def developer_process_add_dev(message: Message, state: FSMContext):
         return
 
     user_id = int(text_value)
+    await state.update_data(new_dev_id=user_id)
+    await state.set_state(DeveloperStates.waiting_add_developer_name)
     
-    # Отримуємо дані користувача напряму з Telegram API
+    await _update_prompt_message(
+        message.bot,
+        prompt_info,
+        f"ID: {user_id}. Тепер введіть ПІБ розробника:",
+        "dev_cancel_add_role"
+    )
+
+async def developer_process_add_dev_name(message: Message, state: FSMContext):
+    full_name = message.text.strip()
+    if len(full_name.split()) < 2:
+        await message.answer("Будь ласка, введіть повне ім'я та прізвище (мінімум 2 слова).")
+        return
+
+    data = await state.get_data()
+    user_id = data.get("new_dev_id")
+    prompt_info = data.get("dev_prompt")
+    panel_info = data.get("dev_panel")
+
+    # Отримуємо username якщо можливо
     try:
         chat_info = await message.bot.get_chat(user_id)
-        full_name = chat_info.full_name
         username = chat_info.username
-    except Exception as e:
-        print(f"Не вдалося отримати дані для {user_id}: {e}")
-        full_name = ""
+    except Exception:
         username = ""
 
     # Реєструємо або оновлюємо користувача в таблиці users
@@ -1472,7 +1568,7 @@ async def developer_process_add_dev(message: Message, state: FSMContext):
     await _update_prompt_message(
         message.bot,
         prompt_info,
-        f"✅ Користувача {full_name or user_id} додано до Dev-команди.\n\nВикористайте кнопку нижче, щоб повернутися.",
+        f"✅ Користувача {full_name} додано до Dev-команди.\n\nВикористайте кнопку нижче, щоб повернутися.",
         "dev_team_back",
     )
     await _refresh_panel_view(message.bot, panel_info, _build_developer_team_view)
@@ -1521,16 +1617,27 @@ async def developer_process_add_hr(message: Message, state: FSMContext):
         await register_user(user_id)
         user = await get_user_details(user_id) or {"username": None, "full_name": None}
 
+    # Use the name from Telegram API or the one already in the DB
+    try:
+        chat_info = await message.bot.get_chat(user_id)
+        full_name = chat_info.full_name
+        username = chat_info.username
+    except Exception:
+        full_name = user.get("full_name", "")
+        username = user.get("username", "")
+
     await add_manager(
         user_id,
         process="Керівник",
+        full_name=full_name,
+        username=username
     )
     await state.set_state(None)
     await state.update_data(hr_prompt=None)
     await _update_prompt_message(
         message.bot,
         prompt_info,
-        f"✅ Користувача {user_id} додано до HR-команди.\n\nВикористайте кнопку нижче, щоб повернутися.",
+        f"✅ Користувача {full_name or user_id} додано до HR-команди.\n\nВикористайте кнопку нижче, щоб повернутися.",
         "hr_team_back",
     )
     await _refresh_panel_view(message.bot, panel_info, _build_hr_team_view)
@@ -1801,6 +1908,7 @@ async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
     
     buttons = [
         [InlineKeyboardButton(text="✏️ Редагувати", callback_data=f"dev_mat_edit|{content_type}")],
+        [InlineKeyboardButton(text="🔍 Повний перегляд", callback_data=f"dev_mat_full_view|{content_type}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_mat_day|{day}")],
     ]
     
@@ -1810,6 +1918,117 @@ async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     await callback.answer()
+
+
+def _get_dev_pagination_keyboard(current_page, total_pages, material_id, day, content_type):
+    buttons = []
+    
+    # Navigation row (arrows)
+    nav_row = []
+    if current_page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_pag:{material_id}:{day}:{current_page-1}:{content_type}"))
+    
+    if total_pages > 1:
+        nav_row.append(InlineKeyboardButton(text=f"{current_page+1}/{total_pages}", callback_data="noop"))
+    
+    if current_page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_pag:{material_id}:{day}:{current_page+1}:{content_type}"))
+    
+    if nav_row:
+        buttons.append(nav_row)
+    
+    # Action buttons: on the last page OR if there is only 1 page
+    if current_page == total_pages - 1:
+        buttons.append([InlineKeyboardButton(text="✏️ Редагувати", callback_data=f"dev_mat_edit|{content_type}")])
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_mat_type|{content_type}")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+async def developer_pagination_handler(callback: CallbackQuery):
+    try:
+        _, mid_str, day_str, page_str, ctype = callback.data.split(":")
+        material_id = int(mid_str)
+        day = int(day_str)
+        page = int(page_str)
+    except (ValueError, IndexError):
+        await callback.answer("Помилка навігації.")
+        return
+
+    material = await get_material_by_id(material_id)
+    if not material:
+        await callback.answer("Матеріал не знайдено.")
+        return
+
+    full_text = ""
+    if ctype == "text":
+        full_text = material.get("content", "")
+    elif ctype == "video":
+        full_text = material.get("resource_url", "")
+    
+    pages = split_text(full_text)
+    if 0 <= page < len(pages):
+        kb = _get_dev_pagination_keyboard(page, len(pages), material_id, day, ctype)
+        try:
+            if callback.message.text != pages[page]:
+                 await callback.message.edit_text(pages[page], reply_markup=kb)
+            else:
+                 await callback.message.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            pass # Ignore unchanged message errors
+    
+    await callback.answer()
+
+async def developer_materials_full_view(callback: CallbackQuery, state: FSMContext):
+    """Надсилає повний текст матеріалу розробнику з пагінацією в одному повідомленні."""
+    if not await _ensure_developer(callback):
+        return
+
+    try:
+        _, content_type = callback.data.split("|", 1)
+    except (ValueError, IndexError):
+        await callback.answer("Помилка формату.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    role = data.get("edit_role", "")
+    day = data.get("edit_day", 1)
+
+    material = await get_material_by_role_day_type(role, day, content_type)
+
+    full_text = ""
+    material_id = None
+    if material:
+        if content_type == "text":
+            full_text = material.get("content", "(Порожньо)")
+        elif content_type == "video": # For video links, just show the URL
+            full_text = material.get("resource_url", "(Не встановлено)")
+        material_id = material.get("id")
+    else:
+        full_text = "(Матеріал ще не створено)"
+    
+    if material_id is None:
+        await callback.answer("Не вдалося завантажити матеріал.", show_alert=True)
+        return
+
+    pages = split_text(full_text)
+    
+    # Show page 0
+    kb = _get_dev_pagination_keyboard(0, len(pages), material_id, day, content_type)
+    
+    # Always delete the old message (which might be a photo/video menu) and send a new text message
+    # This avoids MEDIA_CAPTION_TOO_LONG errors
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass # Ignore deletion errors
+
+    await callback.message.answer(
+        pages[0],
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
 
 
 async def developer_materials_edit_start(callback: CallbackQuery, state: FSMContext):
@@ -1900,113 +2119,98 @@ async def developer_process_material_parts(message: Message, state: FSMContext):
 
 
 async def _finalize_material_update(message: Message, state: FSMContext, new_content: str):
-    """Обробка нового текстового контенту — запит на оповіщення."""
-    data = await state.get_data()
-    role = data.get("edit_role", "")
-    day = data.get("edit_day", 1)
-    material_id = data.get("edit_material_id")
-    
+    """Обробка нового текстового контенту і збереження."""
     if not new_content:
         await message.answer("❌ Текст не може бути порожнім.")
         return
     
+    data = await state.get_data()
+    material_id = data.get("edit_material_id") # Get the original material ID
+
     # Зберігаємо новий контент у стейті для подальшого збереження
     await state.update_data(
         pending_content=new_content,
         pending_content_type="text",
-        pending_material_id=material_id
+        pending_material_id=material_id # Pass it to the save function
     )
     
-    # Запитуємо про оповіщення
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="Так ✅", callback_data="notify_yes"),
-            InlineKeyboardButton(text="Ні ❌", callback_data="notify_no"),
-        ]
-    ])
+    # Одразу зберігаємо матеріал
+    success, role, content_type, day = await _save_pending_material(state)
     
-    await message.answer(
-        f"📝 <b>Матеріал готовий до збереження</b>\n\n"
-        f"Посада: {role}\n"
-        f"День: {day}\n\n"
-        f"<b>Чи бажаєте зробити оповіщення про зміни?</b>",
-        reply_markup=kb
-    )
-    await state.set_state(DeveloperStates.waiting_notify_decision)
+    if success:
+        await message.answer(
+            f"✅ <b>Матеріал оновлено!</b>\n\n"
+            f"Посада: {role}\n"
+            f"День: {day}\n"
+            f"Тип: {content_type}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]
+            ])
+        )
+    else:
+        await message.answer(
+            "❌ Помилка збереження матеріалу.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]
+            ])
+        )
+    
+    await state.clear()
 
 
 async def developer_process_material_video(message: Message, state: FSMContext):
-    """Обробка нового посилання на відео — запит на оповіщення."""
-    data = await state.get_data()
-    role = data.get("edit_role", "")
-    day = data.get("edit_day", 1)
-    material_id = data.get("edit_material_id")
+    """Обробка нового посилання на відео і збереження."""
     new_url = message.text.strip()
-    
     if not new_url:
         await message.answer("❌ Посилання не може бути порожнім.")
         return
-    
-    # Зберігаємо новий контент у стейті для подальшого збереження
+
+    data = await state.get_data()
+    material_id = data.get("edit_material_id")
     await state.update_data(
         pending_content=new_url,
         pending_content_type="video",
         pending_material_id=material_id
     )
     
-    # Запитуємо про оповіщення
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="Так ✅", callback_data="notify_yes"),
-            InlineKeyboardButton(text="Ні ❌", callback_data="notify_no"),
-        ]
-    ])
+    success, role, content_type, day = await _save_pending_material(state)
     
-    await message.answer(
-        f"🎥 <b>Матеріал готовий до збереження</b>\n\n"
-        f"Посада: {role}\n"
-        f"День: {day}\n\n"
-        f"<b>Чи бажаєте зробити оповіщення про зміни?</b>",
-        reply_markup=kb
-    )
-    await state.set_state(DeveloperStates.waiting_notify_decision)
+    if success:
+        await message.answer(
+            f"✅ <b>Матеріал оновлено!</b>\n\nПосада: {role}\nДень: {day}\nТип: {content_type}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]])
+        )
+    else:
+        await message.answer("❌ Помилка збереження матеріалу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]]))
+    
+    await state.clear()
 
 
 async def _finalize_video_update(message: Message, state: FSMContext, video_file_ids: list[str]):
-    """Обробка завантажених відеофайлів — запит на оповіщення."""
-    data = await state.get_data()
-    role = data.get("edit_video_role", "")
-    day = data.get("edit_video_day", 1)
-    material_id = data.get("edit_video_material_id")
-    
+    """Обробка завантажених відеофайлів і збереження."""
     if not video_file_ids:
         await message.answer("❌ Немає відеофайлів для збереження.")
         return
-    
-    # Зберігаємо file_id-и у стейті для подальшого збереження
+
+    data = await state.get_data()
+    material_id = data.get("edit_video_material_id")
     await state.update_data(
         pending_content=json.dumps(video_file_ids),
-        pending_content_type="video_files", # New content type for multiple video files
+        pending_content_type="video_files",
         pending_material_id=material_id
     )
+
+    success, role, content_type, day = await _save_pending_material(state)
     
-    # Запитуємо про оповіщення
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="Так ✅", callback_data="notify_yes"),
-            InlineKeyboardButton(text="Ні ❌", callback_data="notify_no"),
-        ]
-    ])
+    if success:
+        await message.answer(
+            f"✅ <b>Матеріал оновлено!</b>\n\nПосада: {role}\nДень: {day}\nТип: {content_type}\nЗавантажено файлів: {len(video_file_ids)}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]])
+        )
+    else:
+        await message.answer("❌ Помилка збереження матеріалу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]]))
     
-    await message.answer(
-        f"🎥 <b>Відео матеріал готовий до збереження</b>\n\n"
-        f"Посада: {role}\n"
-        f"День: {day}\n\n"
-        f"Завантажено відеофайлів: {len(video_file_ids)}\n\n"
-        f"<b>Чи бажаєте зробити оповіщення про зміни?</b>",
-        reply_markup=kb
-    )
-    await state.set_state(DeveloperStates.waiting_notify_decision)
+    await state.clear()
 
 
 # ==================== Tests Editor ====================
@@ -2551,42 +2755,36 @@ async def developer_photo_edit_start(callback: CallbackQuery, state: FSMContext)
     await callback.answer()
 
 async def _finalize_photo_update(message: Message, state: FSMContext, photo_file_ids: list[str]):
-    """Обробка завантажених фотофайлів — запит на оповіщення."""
+    """Обробка завантажених фотофайлів і збереження."""
+    if not photo_file_ids:
+        await message.answer("❌ Немає фотофайлів для збереження.")
+        return
+
+    # edit_role and edit_day are needed by _save_pending_material
     data = await state.get_data()
     role = data.get("edit_photo_role", "")
     day = data.get("edit_photo_day", 1)
     material_id = data.get("edit_photo_material_id")
-    
-    if not photo_file_ids:
-        await message.answer("❌ Немає фотофайлів для збереження.")
-        return
-    
-    # Зберігаємо file_id-и у стейті для подальшого збереження
+
     await state.update_data(
         pending_content=json.dumps(photo_file_ids),
-        pending_content_type="photo_files", 
-        pending_material_id=material_id,
+        pending_content_type="photo_files",
         edit_role=role,
-        edit_day=day
+        edit_day=day,
+        pending_material_id=material_id
     )
+
+    success, role, content_type, day = await _save_pending_material(state)
     
-    # Запитуємо про оповіщення
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="Так ✅", callback_data="notify_yes"),
-            InlineKeyboardButton(text="Ні ❌", callback_data="notify_no"),
-        ]
-    ])
+    if success:
+        await message.answer(
+            f"✅ <b>Матеріал оновлено!</b>\n\nПосада: {role}\nДень: {day}\nТип: {content_type}\nЗавантажено файлів: {len(photo_file_ids)}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]])
+        )
+    else:
+        await message.answer("❌ Помилка збереження матеріалу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]]))
     
-    await message.answer(
-        f"🖼 <b>Фото матеріал готовий до збереження</b>\n\n"
-        f"Посада: {role}\n"
-        f"День: {day}\n\n"
-        f"Завантажено фотофайлів: {len(photo_file_ids)}\n\n"
-        f"<b>Чи бажаєте зробити оповіщення про зміни?</b>",
-        reply_markup=kb
-    )
-    await state.set_state(DeveloperStates.waiting_notify_decision)
+    await state.clear()
 
 
 async def developer_process_photo_uploads(message: Message, state: FSMContext):
@@ -2998,19 +3196,43 @@ async def developer_health_status(callback: CallbackQuery):
     scheduler_icon = "✅" if status["scheduler_healthy"] else "❌"
     reminder_icon = "✅" if status["reminder_healthy"] else "❌"
     
+    # Додаткова діагностика
+    from datetime import datetime
+    import pytz
+    from bot.config import TIMEZONE
+    from bot.services.health import health_check
+    
+    now = datetime.now(pytz.timezone(TIMEZONE))
+    
+    scheduler_delta = "N/A"
+    reminder_delta = "N/A"
+    
+    if health_check._last_scheduler_heartbeat:
+        delta = now - health_check._last_scheduler_heartbeat
+        minutes = int(delta.total_seconds() / 60)
+        scheduler_delta = f"{minutes} хв тому" if minutes > 0 else "щойно"
+    
+    if health_check._last_reminder_heartbeat:
+        delta = now - health_check._last_reminder_heartbeat
+        minutes = int(delta.total_seconds() / 60)
+        reminder_delta = f"{minutes} хв тому" if minutes > 0 else "щойно"
+    
     text = (
         f"💚 <b>Health Status</b>\n\n"
         f"{health_icon} Загальний статус: <b>{status['status']}</b>\n\n"
         f"<b>Компоненти:</b>\n"
-        f"{scheduler_icon} Scheduler\n"
-        f"{reminder_icon} Reminder Loop\n\n"
+        f"{scheduler_icon} Scheduler (перевірка кожні 5 хв)\n"
+        f"  └ Останній heartbeat: {scheduler_delta}\n"
+        f"{reminder_icon} Reminder Loop (перевірка кожні 65 хв)\n"
+        f"  └ Останній heartbeat: {reminder_delta}\n\n"
         f"<b>Статистика:</b>\n"
         f"⏱ Uptime: {status['uptime_human']}\n"
         f"❌ Помилок: {status['errors_count']}\n\n"
-        f"<b>Останні heartbeats:</b>\n"
-        f"📅 Scheduler: {status['last_scheduler_heartbeat'] or 'N/A'}\n"
-        f"🔔 Reminder: {status['last_reminder_heartbeat'] or 'N/A'}\n"
-        f"🧹 Token cleanup: {status['last_token_cleanup'] or 'N/A'}"
+        f"<b>Детальна інформація:</b>\n"
+        f"🕒 Час сервера: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"🌍 Timezone: {TIMEZONE}\n"
+        f"🧹 Останнє очищення токенів: {status['last_token_cleanup'] or 'N/A'}\n\n"
+        f"<i>Оновлено: {now.strftime('%H:%M:%S')}</i>"
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -3367,6 +3589,7 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_list_managers, lambda c: c.data == "dev_managers_list")
     dp.callback_query.register(developer_request_add_manager, lambda c: c.data == "dev_add_manager")
     dp.message.register(developer_process_add_manager_id, DeveloperStates.waiting_add_manager_id)
+    dp.message.register(developer_process_add_manager_name, DeveloperStates.waiting_add_manager_name) # NEW
     dp.callback_query.register(developer_process_add_manager_city, DeveloperStates.waiting_add_manager_city, lambda c: c.data.startswith("dev_mgr_city_select:"))
     dp.callback_query.register(developer_process_shop_selection, DeveloperStates.waiting_add_manager_shops, lambda c: c.data.startswith("dev_mgr_shop_toggle:"))
     dp.callback_query.register(developer_finish_shop_selection, DeveloperStates.waiting_add_manager_shops, lambda c: c.data == "dev_mgr_shop_done")
@@ -3374,6 +3597,14 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_remove_manager, lambda c: c.data and c.data.startswith("mgr_remove:"))
     dp.callback_query.register(manager_cancel_add, lambda c: c.data == "mgr_cancel_add")
     dp.callback_query.register(manager_team_back, lambda c: c.data == "mgr_team_back")
+    
+    # HR Team Management (moved up or handled here)
+    dp.callback_query.register(developer_request_add_hr, lambda c: c.data == "dev_add_hr")
+    dp.message.register(developer_process_add_hr, DeveloperStates.waiting_add_hr)
+    dp.callback_query.register(hr_cancel_add_role, lambda c: c.data == "hr_cancel_add_role")
+    dp.callback_query.register(hr_team_member_handler, lambda c: c.data and c.data.startswith("hr_team_member_"))
+    dp.callback_query.register(hr_remove_member, lambda c: c.data and c.data.startswith("hr_remove_"))
+    dp.callback_query.register(hr_team_back, lambda c: c.data == "hr_team_back")
 
     # Tokens & Health
     dp.callback_query.register(developer_tokens_menu, lambda c: c.data == "dev_tokens_menu")
@@ -3385,6 +3616,8 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_materials_select_day, lambda c: c.data and c.data.startswith("dev_mat_role|"))
     dp.callback_query.register(developer_materials_select_type, lambda c: c.data and c.data.startswith("dev_mat_day|"))
     dp.callback_query.register(developer_materials_view, lambda c: c.data and c.data.startswith("dev_mat_type|"))
+    dp.callback_query.register(developer_materials_full_view, lambda c: c.data and c.data.startswith("dev_mat_full_view|"))
+    dp.callback_query.register(developer_pagination_handler, lambda c: c.data and c.data.startswith("dev_pag:")) # NEW
     dp.callback_query.register(developer_materials_edit_start, lambda c: c.data and c.data.startswith("dev_mat_edit|"))
     dp.message.register(developer_process_material_parts, DeveloperStates.waiting_material_parts)
     dp.message.register(developer_process_material_video, DeveloperStates.waiting_material_video)
@@ -3441,6 +3674,7 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_remove_dev, lambda c: c.data and c.data.startswith("dev_remove_confirm:"))
     dp.callback_query.register(developer_cancel_add_role, lambda c: c.data == "dev_cancel_add_role")
     dp.message.register(developer_process_add_dev, DeveloperStates.waiting_add_developer)
+    dp.message.register(developer_process_add_dev_name, DeveloperStates.waiting_add_developer_name)
 
     # New User Profile Actions
     dp.callback_query.register(developer_days_manage_menu, lambda c: c.data and c.data.startswith("dev_days_manage:"))

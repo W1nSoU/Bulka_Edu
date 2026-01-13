@@ -357,10 +357,18 @@ async def mark_day3_question_sent(user_id: int) -> None:
         await db.commit()
 
 async def get_user_by_username(username: str) -> dict | None:
-    """Отримує детальну інформацію про користувача за його username."""
+    """Отримує детальну інформацію про користувача за його username.
+    
+    Пошук не чутливий до регістру.
+    Наприклад, "@Username", "@username", "@USERNAME" - всі знайдуть того самого користувача.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT * FROM users WHERE username = ?", (username.lstrip('@'),))
+        # Використовуємо LOWER() для регістронезалежного пошуку
+        cursor = await db.execute(
+            "SELECT * FROM users WHERE LOWER(username) = LOWER(?)", 
+            (username.lstrip('@'),)
+        )
         user = await cursor.fetchone()
         return dict(user) if user else None
 
@@ -407,4 +415,20 @@ async def get_reminder_history(limit: int = 50, offset: int = 0) -> list[dict]:
             history_records.append(record)
             
         return history_records
+
+async def get_users_by_full_name(full_name: str) -> list[dict]:
+    """Retrieves a list of users matching a full name (case-insensitive).
+    
+    Пошук не чутливий до регістру та знаходить часткові збіги.
+    Наприклад, "іван" знайде "Іванов Іван Іванович", "ІВАНОВ", "іванова" тощо.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Використовуємо LOWER() для регістронезалежного пошуку
+        cursor = await db.execute(
+            "SELECT * FROM users WHERE LOWER(full_name) LIKE LOWER(?)", 
+            (f'%{full_name}%',)
+        )
+        users = await cursor.fetchall()
+        return [dict(user) for user in users]
 

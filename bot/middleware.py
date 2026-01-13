@@ -83,4 +83,5 @@ class AccessMiddleware(BaseMiddleware):
         
         # Продовження обробки події
         return await handler(event, data)
-            
+    
+

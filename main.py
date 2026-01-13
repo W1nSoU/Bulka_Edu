@@ -37,7 +37,7 @@ def print_banner():
 ╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
 ║   🍞  BULKA BOT — Навчальна платформа для стажерів  🍞       ║
-║                    Developed by WinSoou.                     ║
+║                    Developed by WinSoU.                      ║
 ╚══════════════════════════════════════════════════════════════╝
     """
     print(banner)
@@ -104,14 +104,35 @@ async def start_bot():
     print_status("⚙️", "Обробники зареєстровано")
     
     # Запускаємо фонові задачі та планувальник
-    print_status("🔄", "Фонові задачі запущено")
-    scheduler.add_job(auto_open_blocks_scheduler, "cron", hour=23, minute=59, second=59)
-    scheduler.add_job(auto_reminder_loop, "interval", hours=1, args=(bot,))
-    scheduler.add_job(manager_daily_report_loop, "cron", hour=18, minute=0, args=(bot,))
-    scheduler.add_job(daily_test_failure_notifier, "cron", hour=10, minute=0, args=(bot,)) # New scheduled task
-    scheduler.add_job(token_cleanup_loop, "interval", hours=1)
-    scheduler.add_job(health_monitor_loop, "interval", minutes=5, args=(bot,))
+    print_status("🔄", "Налаштування планувальника...")
+    
+    # Додаємо задачі
+    scheduler.add_job(auto_open_blocks_scheduler, "cron", hour=23, minute=59, second=59, id="auto_open_blocks")
+    print_status("  ✓", "Щоденне відкриття блоків (23:59:59)")
+    
+    scheduler.add_job(auto_reminder_loop, "interval", hours=1, args=(bot,), id="auto_reminder")
+    print_status("  ✓", "Автонагадування (кожну годину)")
+    
+    scheduler.add_job(manager_daily_report_loop, "cron", hour=18, minute=0, args=(bot,), id="daily_report")
+    print_status("  ✓", "Щоденний звіт керівникам (18:00)")
+    
+    scheduler.add_job(daily_test_failure_notifier, "cron", hour=10, minute=0, args=(bot,), id="test_failure_notifier")
+    print_status("  ✓", "Звіт про незавершені тести (10:00)")
+    
+    scheduler.add_job(token_cleanup_loop, "interval", hours=1, id="token_cleanup")
+    print_status("  ✓", "Очищення токенів (кожну годину)")
+    
+    scheduler.add_job(health_monitor_loop, "interval", minutes=5, args=(bot,), id="health_monitor")
+    print_status("  ✓", "Моніторинг здоров'я (кожні 5 хвилин)")
+    
+    # Запускаємо scheduler
     scheduler.start()
+    print_status("✅", "Планувальник запущено", indent=5)
+    
+    # Логуємо запущені задачі
+    logger.info(f"Scheduler started with {len(scheduler.get_jobs())} jobs")
+    for job in scheduler.get_jobs():
+        logger.debug(f"Job scheduled: {job.id} - {job.trigger}")
 
     print()
     

@@ -8,6 +8,7 @@ import httpx
 import os
 from bot.services.logger import get_logger
 from bot.config import GROQ_API_KEY
+from database.hr import is_developer_user
 
 logger = get_logger()
 
@@ -109,21 +110,25 @@ async def ask_groq(
     system_prompt = """Ти — асистент навчальної платформи Булка для стажерів.
 Твоя задача — відповідати на питання стажерів на основі наданих навчальних матеріалів.
 
-Правила:
+ВАЖЛИВІ ПРАВИЛА:
 1. Відповідай ТІЛЬКИ на основі наданого контексту
-2. Якщо інформації недостатньо — скажи про це
-3. Відповідай українською мовою
-4. Будь стислим, але інформативним
-5. Використовуй дружній тон"""
+2. Шукай НАЙБІЛЬШ релевантну інформацію до конкретного питання
+3. Ігноруй інформацію з контексту, яка не стосується питання
+4. Якщо в контексті є кілька різних тем - фокусуйся на тій, що відповідає питанню
+5. Структуруй відповідь логічно та зрозуміло
+6. Відповідай українською мовою
+7. Будь стислим, але інформативним
+8. Використовуй дружній професійний тон
+9. Якщо релевантної інформації справді немає - чітко про це скажи"""
 
-    user_message = f"""Контекст (навчальні матеріали):
+    user_message = f"""Навчальні матеріали (кожен матеріал позначений [Матеріал X]):
 ---
-{context[:8000]}
+{context[:20000]}
 ---
 
 Питання стажера: {question}
 
-Дай відповідь на основі наданих матеріалів:"""
+Проаналізуй матеріали та дай КОНКРЕТНУ відповідь на питання. Використовуй ТІЛЬКИ ту інформацію з матеріалів, яка безпосередньо стосується питання. Ігноруй неRelевантну інформацію:"""
 
     for attempt in range(max_retries):
         api_key = _key_manager.get_current_key()
@@ -186,6 +191,7 @@ async def search_with_ai(
     question: str,
     context: str,
     user_role: Optional[str] = None,
+    user_id: Optional[int] = None, # Add user_id for debugging
 ) -> str:
     """
     Виконує AI-пошук по навчальних матеріалах на основі наданого контексту.
@@ -193,7 +199,8 @@ async def search_with_ai(
     Args:
         question: Питання від користувача
         context: Сформований контекст з релевантних матеріалів
-        user_role: Роль користувача (наразі не використовується, але залишено для сумісності)
+        user_role: Роль користувача
+        user_id: ID користувача для перевірки, чи є він розробником
     
     Returns:
         Відповідь від AI або повідомлення про помилку
@@ -211,10 +218,29 @@ async def search_with_ai(
     # Викликаємо Groq API
     ai_response = await ask_groq(question, context)
     
+    is_dev = await is_developer_user(user_id) if user_id else False
+
     if ai_response:
         keys_info = f" (ключів: {_key_manager.available_keys_count})" if _key_manager.available_keys_count > 1 else ""
+        
+        # DEBUG: Log context for developers (without showing in message)
+        if is_dev:
+            from bot.services.logger import get_logger
+            logger = get_logger()
+            material_count = context.count('[Матеріал ')
+            logger.debug(f"AI search - materials in context: {material_count}, total length: {len(context)}")
+            logger.debug(f"Context preview: {context[:500]}...")
+            
         return f"🤖 <b>AI-відповідь{keys_info}:</b>\n\n{ai_response}"
     else:
+        # If AI fails, log context for debugging
+        if is_dev:
+            from bot.services.logger import get_logger
+            logger = get_logger()
+            material_count = context.count('[Матеріал ')
+            logger.debug(f"AI search failed - materials: {material_count}, context length: {len(context)}")
+            logger.debug(f"Context preview: {context[:500]}...")
+        
         return (
             "⚠️ Не вдалося отримати відповідь від AI.\n"
             "Спробуйте ще раз або використайте пошук за ключовими словами."

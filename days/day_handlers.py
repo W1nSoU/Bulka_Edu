@@ -131,8 +131,21 @@ async def _finish_test_successfully(callback: CallbackQuery, state: FSMContext, 
     )
     await state.clear()
 
+async def complete_day_handler(callback: CallbackQuery, state: FSMContext):
+    """Manually completes a day when no test is available."""
+    try:
+        day = int(callback.data.replace("complete_day_", ""))
+    except ValueError:
+        await callback.answer("Помилка даних.")
+        return
+
+    # Use the existing logic
+    await _finish_test_successfully(callback, state, day)
+
 def register_day_handlers(dp: Dispatcher):
     # Dynamic handler for any day start test
     dp.callback_query.register(start_test_handler, lambda c: c.data and c.data.startswith("day") and c.data.endswith("_test"))
     # Handler for test answers
     dp.callback_query.register(process_test_answer_handler, lambda c: c.data and c.data.startswith("test_ans:"), TestStates.answering_questions)
+    # Handler for manually completing a day
+    dp.callback_query.register(complete_day_handler, lambda c: c.data and c.data.startswith("complete_day_"))
