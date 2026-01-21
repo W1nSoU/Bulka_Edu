@@ -1,9 +1,10 @@
 import asyncio
 import sys
+import json
 from pathlib import Path
 from datetime import datetime # NEW IMPORT
 from aiogram import Dispatcher
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message, InputMediaPhoto
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramBadRequest
@@ -1851,6 +1852,42 @@ async def developer_materials_select_type(callback: CallbackQuery, state: FSMCon
     await callback.answer()
 
 
+def parse_material_content(content: str) -> list[dict]:
+    """
+    Parses material content which can be:
+    1. A JSON string representing a list of pages (each page is a dict with 'text' and optional 'photo').
+    2. A plain text string (old format).
+    
+    Returns a list of dicts: [{'text': '...', 'photo': '...'}, ...]
+    """
+    if not content:
+        return []
+    
+    content = content.strip()
+    
+    # Try parsing as JSON list of dicts (new format)
+    if content.startswith('[') and content.endswith(']'):
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, list):
+                # Validate items are dicts or can be converted
+                normalized = []
+                for item in parsed:
+                    if isinstance(item, dict):
+                        normalized.append(item)
+                    elif isinstance(item, str):
+                        normalized.append({"text": item})
+                return normalized
+        except json.JSONDecodeError:
+            pass # Fallback to plain text handling
+            
+    # Fallback: Treat as plain text (old format)
+    # Use split_text to paginate plain text
+    from bot.utils.paginator import split_text
+    text_pages = split_text(content)
+    return [{"text": p} for p in text_pages]
+
+
 async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
     """Показ поточного матеріалу з можливістю редагування."""
     if not await _ensure_developer(callback):
@@ -1871,19 +1908,28 @@ async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
     material = await get_material_by_role_day_type(role, day, content_type)
     
     if material:
-        current_content = material.get("content", "")[:500]
+        current_content = material.get("content", "")
         current_url = material.get("resource_url", "")
         material_id = material.get("id")
         await state.update_data(edit_material_id=material_id)
         
         if content_type == "text":
-            preview = current_content if current_content else "(порожньо)"
+            parsed = parse_material_content(current_content)
+            if parsed:
+                preview_text = parsed[0].get("text", "")[:500]
+                if len(parsed) > 1:
+                    preview_text += f"\n\n... (ще сторінок: {len(parsed)-1})"
+                elif parsed[0].get("photo"):
+                    preview_text += "\n\n[Містить фото]"
+            else:
+                preview_text = "(порожньо)"
+
             text = (
                 f"📝 <b>Текстовий матеріал</b>\n\n"
                 f"Посада: <b>{role}</b>\n"
                 f"День: <b>{day}</b>\n\n"
                 f"<b>Поточний контент:</b>\n"
-                f"<code>{preview}</code>\n\n"
+                f"<code>{preview_text}</code>\n\n"
                 f"Натисніть «Редагувати», щоб змінити текст."
             )
         else:
@@ -1959,27 +2005,46 @@ async def developer_pagination_handler(callback: CallbackQuery):
         await callback.answer("Матеріал не знайдено.")
         return
 
-    full_text = ""
     if ctype == "text":
-        full_text = material.get("content", "")
+        pages = parse_material_content(material.get("content", ""))
     elif ctype == "video":
-        full_text = material.get("resource_url", "")
-    
-    pages = split_text(full_text)
+        pages = [{"text": material.get("resource_url", "")}]
+    else:
+        # Fallback for other types
+        from bot.utils.paginator import split_text
+        pages = [{"text": p} for p in split_text(material.get("content", ""))]
+
     if 0 <= page < len(pages):
         kb = _get_dev_pagination_keyboard(page, len(pages), material_id, day, ctype)
-        try:
-            if callback.message.text != pages[page]:
-                 await callback.message.edit_text(pages[page], reply_markup=kb)
+        
+        page_data = pages[page]
+        text = page_data.get("text", "")
+        photo = page_data.get("photo")
+        
+        is_photo_message = bool(callback.message.photo)
+        is_text_message = bool(callback.message.text)
+        
+        if photo:
+            if is_photo_message:
+                 media = InputMediaPhoto(media=photo, caption=text)
+                 await callback.message.edit_media(media=media, reply_markup=kb)
             else:
-                 await callback.message.edit_reply_markup(reply_markup=kb)
-        except Exception:
-            pass # Ignore unchanged message errors
+                 await callback.message.delete()
+                 await callback.message.answer_photo(photo, caption=text, reply_markup=kb)
+        else:
+            if is_text_message:
+                 if callback.message.text != text:
+                     await callback.message.edit_text(text, reply_markup=kb)
+                 else:
+                     await callback.message.edit_reply_markup(reply_markup=kb)
+            else:
+                 await callback.message.delete()
+                 await callback.message.answer(text, reply_markup=kb)
     
     await callback.answer()
 
 async def developer_materials_full_view(callback: CallbackQuery, state: FSMContext):
-    """Надсилає повний текст матеріалу розробнику з пагінацією в одному повідомленні."""
+    """Надсилає повний текст матеріалу розробнику з пагінацією."""
     if not await _ensure_developer(callback):
         return
 
@@ -1995,37 +2060,37 @@ async def developer_materials_full_view(callback: CallbackQuery, state: FSMConte
 
     material = await get_material_by_role_day_type(role, day, content_type)
 
-    full_text = ""
-    material_id = None
     if material:
         if content_type == "text":
-            full_text = material.get("content", "(Порожньо)")
-        elif content_type == "video": # For video links, just show the URL
-            full_text = material.get("resource_url", "(Не встановлено)")
+            pages = parse_material_content(material.get("content", ""))
+        elif content_type == "video": 
+            pages = [{"text": material.get("resource_url", "(Не встановлено)")}]
+        else:
+            from bot.utils.paginator import split_text
+            pages = [{"text": p} for p in split_text(material.get("content", ""))]
         material_id = material.get("id")
     else:
-        full_text = "(Матеріал ще не створено)"
-    
-    if material_id is None:
-        await callback.answer("Не вдалося завантажити матеріал.", show_alert=True)
-        return
-
-    pages = split_text(full_text)
+        pages = [{"text": "(Матеріал ще не створено)"}]
+        material_id = 0
     
     # Show page 0
     kb = _get_dev_pagination_keyboard(0, len(pages), material_id, day, content_type)
     
-    # Always delete the old message (which might be a photo/video menu) and send a new text message
-    # This avoids MEDIA_CAPTION_TOO_LONG errors
+    # Always delete the old message (which might be a menu) and send a new message
     try:
         await callback.message.delete()
     except Exception:
-        pass # Ignore deletion errors
+        pass 
 
-    await callback.message.answer(
-        pages[0],
-        reply_markup=kb
-    )
+    page_0 = pages[0]
+    text = page_0.get("text", "")
+    photo = page_0.get("photo")
+    
+    if photo:
+        await callback.message.answer_photo(photo, caption=text, reply_markup=kb)
+    else:
+        await callback.message.answer(text, reply_markup=kb)
+
     await callback.answer()
 
 
