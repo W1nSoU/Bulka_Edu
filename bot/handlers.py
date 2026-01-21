@@ -563,6 +563,41 @@ async def _load_day_materials(role: str | None, day: int) -> List[dict]:
     materials = await get_materials_for_day(normalized_role, day)
     return sorted(materials, key=lambda m: m.get("order_index", 0))
 
+def parse_material_content(content: str) -> List[dict]:
+    """
+    Parses material content which can be:
+    1. A JSON string representing a list of pages (each page is a dict with 'text' and optional 'photo').
+    2. A plain text string (old format).
+    
+    Returns a list of dicts: [{'text': '...', 'photo': '...'}, ...]
+    """
+    if not content:
+        return []
+    
+    content = content.strip()
+    
+    # Try parsing as JSON list of dicts (new format)
+    if content.startswith('[') and content.endswith(']'):
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, list):
+                # Validate items are dicts or can be converted
+                normalized = []
+                for item in parsed:
+                    if isinstance(item, dict):
+                        normalized.append(item)
+                    elif isinstance(item, str):
+                        normalized.append({"text": item})
+                return normalized
+        except json.JSONDecodeError:
+            pass # Fallback to plain text handling
+            
+    # Fallback: Treat as plain text (old format)
+    # Use split_text to paginate plain text
+    from bot.utils.paginator import split_text
+    text_pages = split_text(content)
+    return [{"text": p} for p in text_pages]
+
 def _format_material_text(material: dict) -> str:
     title = material.get("title") or "Матеріал без назви"
     body = (material.get("content") or "").strip()
@@ -630,6 +665,53 @@ async def _show_material_entry(
     material = entries[idx]
     ctype = material.get("content_type", "text")
     
+    if ctype == 'text':
+        pages = parse_material_content(material.get("content", ""))
+        
+        # Add metadata (title/url)
+        title = material.get("title") or "Матеріал без назви"
+        resource_url = (material.get("resource_url") or "").strip()
+        icon = CONTENT_TYPE_METADATA.get(ctype, {"icon": "📄"}).get("icon", "📄")
+        
+        # Prepend title to first page
+        if pages:
+            # We want to keep the photo of the first page if it exists
+            pages[0]["text"] = f"{icon} <b>{title}</b>\n\n{pages[0].get('text', '')}".strip()
+        else:
+            pages = [{"text": f"{icon} <b>{title}</b>"}]
+            
+        # Append URL to last page
+        if resource_url:
+            pages[-1]["text"] = f"{pages[-1].get('text', '')}\n\n🔗 {resource_url}".strip()
+            
+        final_button = InlineKeyboardButton(text="➡️ До тесту", callback_data=_build_test_callback(day))
+        
+        # Display first page (0)
+        keyboard = get_pagination_keyboard(0, len(pages), str(material.get('id')), day, final_button)
+        
+        page_0 = pages[0]
+        text_0 = page_0.get("text", "")
+        photo_0 = page_0.get("photo")
+        
+        if callback.message:
+            is_photo_message = bool(callback.message.photo)
+            
+            if photo_0:
+                if is_photo_message:
+                     media = types.InputMediaPhoto(media=photo_0, caption=text_0)
+                     await callback.message.edit_media(media=media, reply_markup=keyboard)
+                else:
+                     await callback.message.delete()
+                     await callback.message.answer_photo(photo_0, caption=text_0, reply_markup=keyboard)
+            else:
+                if is_photo_message:
+                     await callback.message.delete()
+                     await callback.message.answer(text_0, reply_markup=keyboard)
+                else:
+                     await callback.message.edit_text(text_0, reply_markup=keyboard)
+        await callback.answer()
+        return
+
     text = _format_material_text(material)
     pages = split_text(text)
     
@@ -830,12 +912,55 @@ async def _handle_pagination(callback: CallbackQuery):
             await callback.answer("Помилка фото пагінації.")
         return
     
+    if material.get("content_type") == 'text':
+        pages = parse_material_content(material.get("content", ""))
+        
+        # Add metadata (title/url)
+        title = material.get("title") or "Матеріал без назви"
+        resource_url = (material.get("resource_url") or "").strip()
+        icon = CONTENT_TYPE_METADATA.get('text', {"icon": "📄"}).get("icon", "📄")
+        
+        if pages:
+            pages[0]["text"] = f"{icon} <b>{title}</b>\n\n{pages[0].get('text', '')}".strip()
+        else:
+            pages = [{"text": f"{icon} <b>{title}</b>"}]
+            
+        if resource_url:
+            pages[-1]["text"] = f"{pages[-1].get('text', '')}\n\n🔗 {resource_url}".strip()
+
+        final_button = InlineKeyboardButton(text="➡️ До тесту", callback_data=_build_test_callback(day))
+        
+        if 0 <= page < len(pages):
+            keyboard = get_pagination_keyboard(page, len(pages), str(material_id), day, final_button)
+            
+            page_data = pages[page]
+            text = page_data.get("text", "")
+            photo = page_data.get("photo")
+            
+            if isinstance(callback.message, Message):
+                is_photo_message = bool(callback.message.photo)
+                
+                if photo:
+                    if is_photo_message:
+                        media = types.InputMediaPhoto(media=photo, caption=text)
+                        await callback.message.edit_media(media=media, reply_markup=keyboard)
+                    else:
+                        await callback.message.delete()
+                        await callback.message.answer_photo(photo, caption=text, reply_markup=keyboard)
+                else:
+                    if is_photo_message:
+                        await callback.message.delete()
+                        await callback.message.answer(text, reply_markup=keyboard)
+                    else:
+                        await callback.message.edit_text(text, reply_markup=keyboard)
+        else:
+            await callback.answer("Помилка: сторінка не знайдена.")
+        return
+
     full_text = _format_material_text(material)
     pages = split_text(full_text)
     
     final_button = None
-    if material.get("content_type") == 'text':
-        final_button = InlineKeyboardButton(text="➡️ До тесту", callback_data=_build_test_callback(day))
 
     if 0 <= page < len(pages):
         keyboard = get_pagination_keyboard(page, len(pages), str(material_id), day, final_button)

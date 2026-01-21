@@ -2078,7 +2078,7 @@ async def developer_materials_edit_start(callback: CallbackQuery, state: FSMCont
 
 async def developer_process_material_parts(message: Message, state: FSMContext):
     """Collects multiple messages for material content until 'Готово' is received."""
-    text = message.text.strip()
+    text = (message.text or message.caption or "").strip()
     data = await state.get_data()
     material_parts = data.get("material_parts", [])
     confirmation_msg_id = data.get("text_confirmation_msg_id")
@@ -2094,13 +2094,20 @@ async def developer_process_material_parts(message: Message, state: FSMContext):
             except Exception:
                 pass
             
-        full_content = "\n\n".join(material_parts)
+        # Serialize to JSON for new format
+        import json
+        full_content = json.dumps(material_parts, ensure_ascii=False)
         await _finalize_material_update(message, state, full_content)
     else:
-        material_parts.append(text)
+        # Store as object with text and optional photo
+        page = {"text": text}
+        if message.photo:
+            page["photo"] = message.photo[-1].file_id
+            
+        material_parts.append(page)
         await state.update_data(material_parts=material_parts)
 
-        new_text = f"✅ Отримано {len(material_parts)} частин тексту. Надішліть наступну частину або напишіть 'Готово', щоб завершити."
+        new_text = f"✅ Отримано частин: {len(material_parts)}. Надішліть наступну частину (текст/фото) або напишіть 'Готово', щоб завершити."
 
         if confirmation_msg_id:
             try:
