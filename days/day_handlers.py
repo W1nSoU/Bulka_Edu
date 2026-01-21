@@ -30,12 +30,18 @@ async def start_test_handler(callback: CallbackQuery, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Завершити день", callback_data=f"complete_day_{day}")]
         ])
-        await callback.message.edit_text(
+        
+        fallback_text = (
             f"📝 <b>Тест для Дня {day}</b>\n\n"
             "На даний момент тестування проходить оновлення.\n"
-            "Ви можете позначити цей день як завершений автоматично, щоб продовжити навчання.",
-            reply_markup=kb
+            "Ви можете позначити цей день як завершений автоматично, щоб продовжити навчання."
         )
+        
+        if callback.message.text:
+            await callback.message.edit_text(fallback_text, reply_markup=kb)
+        else:
+             await callback.message.delete()
+             await callback.message.answer(fallback_text, reply_markup=kb)
         return
 
     # Initialize state
@@ -48,7 +54,13 @@ async def start_test_handler(callback: CallbackQuery, state: FSMContext):
     )
     
     text, kb = await render_test_question(questions, 0, day)
-    await callback.message.edit_text(text, reply_markup=kb)
+    
+    if callback.message.text:
+        await callback.message.edit_text(text, reply_markup=kb)
+    else:
+        await callback.message.delete()
+        await callback.message.answer(text, reply_markup=kb)
+        
     await callback.answer()
 
 async def process_test_answer_handler(callback: CallbackQuery, state: FSMContext):
