@@ -695,6 +695,7 @@ async def _show_material_entry(
         
         if callback.message:
             is_photo_message = bool(callback.message.photo)
+            is_text_message = bool(callback.message.text)
             
             if photo_0:
                 if is_photo_message:
@@ -704,11 +705,11 @@ async def _show_material_entry(
                      await callback.message.delete()
                      await callback.message.answer_photo(photo_0, caption=text_0, reply_markup=keyboard)
             else:
-                if is_photo_message:
+                if is_text_message:
+                     await callback.message.edit_text(text_0, reply_markup=keyboard)
+                else:
                      await callback.message.delete()
                      await callback.message.answer(text_0, reply_markup=keyboard)
-                else:
-                     await callback.message.edit_text(text_0, reply_markup=keyboard)
         await callback.answer()
         return
 
@@ -939,6 +940,7 @@ async def _handle_pagination(callback: CallbackQuery):
             
             if isinstance(callback.message, Message):
                 is_photo_message = bool(callback.message.photo)
+                is_text_message = bool(callback.message.text)
                 
                 if photo:
                     if is_photo_message:
@@ -948,11 +950,11 @@ async def _handle_pagination(callback: CallbackQuery):
                         await callback.message.delete()
                         await callback.message.answer_photo(photo, caption=text, reply_markup=keyboard)
                 else:
-                    if is_photo_message:
+                    if is_text_message:
+                        await callback.message.edit_text(text, reply_markup=keyboard)
+                    else:
                         await callback.message.delete()
                         await callback.message.answer(text, reply_markup=keyboard)
-                    else:
-                        await callback.message.edit_text(text, reply_markup=keyboard)
         else:
             await callback.answer("Помилка: сторінка не знайдена.")
         return
