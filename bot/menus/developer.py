@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import json
+from typing import Optional
 from pathlib import Path
 from datetime import datetime # NEW IMPORT
 from aiogram import Dispatcher
@@ -164,11 +165,14 @@ def _developer_main_keyboard(is_main_dev: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📊 Помилки тестів", callback_data="show_test_errors")],
     ]
     # Розділяємо меню для головного розробника та інших
+    row_team = []
     if is_main_dev:
-        buttons.append([
-            InlineKeyboardButton(text="👨‍💻 Команда Dev", callback_data="dev_team_menu"),
-            InlineKeyboardButton(text="👔 Команда Керівників", callback_data="dev_manage_managers"),
-        ])
+        row_team.append(InlineKeyboardButton(text="👨‍💻 Команда Dev", callback_data="dev_team_menu"))
+    
+    # "Команда Керівників" тепер доступна всім розробникам
+    row_team.append(InlineKeyboardButton(text="👔 Команда Керівників", callback_data="dev_manage_managers"))
+    buttons.append(row_team)
+
     buttons.append([InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -236,7 +240,7 @@ async def _remember_panel(state: FSMContext, key: str, message: Message):
     )
 
 
-async def _refresh_panel_view(bot, panel_info: dict | None, builder):
+async def _refresh_panel_view(bot, panel_info: Optional[dict], builder):
     if not panel_info:
         return
     chat_id = panel_info.get("chat_id")
@@ -423,7 +427,7 @@ async def _remember_panel(state: FSMContext, key: str, message: Message):
     )
 
 
-async def _refresh_panel_view(bot, panel_info: dict | None, builder):
+async def _refresh_panel_view(bot, panel_info: Optional[dict], builder):
     if not panel_info:
         return
     chat_id = panel_info.get("chat_id")
@@ -491,7 +495,7 @@ async def _show_prompt(callback: CallbackQuery, text: str, cancel_callback: str)
     return {"chat_id": msg.chat.id, "message_id": msg.message_id}
 
 
-async def _update_prompt_message(bot, prompt_info: dict | None, text: str, cancel_callback: str):
+async def _update_prompt_message(bot, prompt_info: Optional[dict], text: str, cancel_callback: str):
     if not prompt_info:
         return
     kb = _cancel_keyboard(cancel_callback)
@@ -975,7 +979,7 @@ async def developer_process_days_reset(message: Message, state: FSMContext):
 
 async def developer_manage_managers_menu(callback: CallbackQuery, state: FSMContext):
     """Об'єднане меню керівників."""
-    if not await _ensure_developer(callback, require_main=True):
+    if not await _ensure_developer(callback):
         return
     text, kb = await _build_managers_team_view()
     msg = await _edit_or_answer(callback.message, text, reply_markup=kb)
@@ -985,7 +989,7 @@ async def developer_manage_managers_menu(callback: CallbackQuery, state: FSMCont
 
 async def developer_request_add_manager(callback: CallbackQuery, state: FSMContext):
     """Starts the process of adding a manager by requesting their ID."""
-    if not await _ensure_developer(callback, require_main=True):
+    if not await _ensure_developer(callback):
         return
     await state.set_state(DeveloperStates.waiting_add_manager_id)
     await _edit_or_answer(
@@ -1429,7 +1433,7 @@ async def developer_finish_shop_selection(callback: CallbackQuery, state: FSMCon
 
 async def developer_remove_manager_menu(callback: CallbackQuery, state: FSMContext):
     """Меню видалення керівника."""
-    if not await _ensure_developer(callback, require_main=True):
+    if not await _ensure_developer(callback):
         return
     
     hrs = await get_all_kerivnyky()
@@ -1453,7 +1457,7 @@ async def developer_remove_manager_menu(callback: CallbackQuery, state: FSMConte
 
 async def developer_remove_manager(callback: CallbackQuery, state: FSMContext):
     """Видалення керівника."""
-    if not await _ensure_developer(callback, require_main=True):
+    if not await _ensure_developer(callback):
         return
     
     try:
@@ -1469,7 +1473,7 @@ async def developer_remove_manager(callback: CallbackQuery, state: FSMContext):
 
 async def manager_cancel_add(callback: CallbackQuery, state: FSMContext):
     """Скасування додавання керівника."""
-    if not await _ensure_developer(callback, require_main=True):
+    if not await _ensure_developer(callback):
         return
     await state.set_state(None)
     await state.update_data(mgr_prompt=None)
