@@ -2,6 +2,7 @@
 This file contains all the handlers for the bot.
 """
 from aiogram import Dispatcher, types
+from typing import List, Optional
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, FSInputFile, InputMediaPhoto, Message, ErrorEvent
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
@@ -391,7 +392,7 @@ def _build_snippet(text: str, limit: int = 240) -> str:
         return clean
     return textwrap.shorten(clean, width=limit, placeholder="…")
 
-def _validate_invite_payload(role: str | None, city: str | None) -> tuple[bool, str | None]:
+def _validate_invite_payload(role: Optional[str], city: Optional[str]) -> tuple[bool, Optional[str]]:
     if not is_valid_role(role):
         return False, (
             "⚠️ <b>Помилка реєстрації!</b>\n\n"
@@ -558,7 +559,7 @@ async def show_manager_main_menu(
         allow_edit=allow_edit,
     )
 
-async def _load_day_materials(role: str | None, day: int) -> List[dict]:
+async def _load_day_materials(role: Optional[str], day: int) -> List[dict]:
     normalized_role = role or "ALL"
     materials = await get_materials_for_day(normalized_role, day)
     return sorted(materials, key=lambda m: m.get("order_index", 0))
@@ -618,7 +619,7 @@ def _format_material_text(material: dict) -> str:
 
 async def _show_material_entry(
     callback: CallbackQuery,
-    role: str | None,
+    role: Optional[str],
     day: int,
     target_order: int,
     materials: Optional[List[dict]] = None,

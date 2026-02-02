@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 import pytz
 
@@ -42,7 +42,7 @@ def parse_day_input(day_input: str, max_day: int = DAYS_TOTAL) -> List[int]:
         return []
 
 
-def _format_last_activity(value: str | None) -> str:
+def _format_last_activity(value: Optional[str]) -> str:
     if not value:
         return "Невідомо"
     try:

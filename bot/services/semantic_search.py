@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import List, Optional
 from pathlib import Path
 from typing import List, TypedDict
 
@@ -30,17 +31,17 @@ META_PATH = INDEX_DIR / "meta.json"
 DEFAULT_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 _INDEX = None
-_META: List[dict] | None = None
+_META: Optional[List[dict]] = None
 _MODEL = None
 _MODEL_NAME = DEFAULT_MODEL_NAME
 _LOCK = asyncio.Lock()
 
 
 class SemanticSearchResult(TypedDict, total=False):
-    material_id: int | None
-    day: int | None
-    role: str | None
-    block_type: str | None
+    material_id: Optional[int]
+    day: Optional[int]
+    role: Optional[str]
+    block_type: Optional[str]
     score: float
     preview: str
 

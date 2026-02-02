@@ -1,4 +1,5 @@
 import aiosqlite
+from typing import Optional
 from datetime import datetime, timedelta
 import pytz
 from bot.config import TIMEZONE
@@ -356,7 +357,7 @@ async def mark_day3_question_sent(user_id: int) -> None:
         await db.execute("UPDATE users SET day3_question_sent = 1 WHERE user_id = ?", (user_id,))
         await db.commit()
 
-async def get_user_by_username(username: str) -> dict | None:
+async def get_user_by_username(username: str) -> Optional[dict]:
     """Отримує детальну інформацію про користувача за його username.
     
     Пошук не чутливий до регістру.
@@ -372,7 +373,7 @@ async def get_user_by_username(username: str) -> dict | None:
         user = await cursor.fetchone()
         return dict(user) if user else None
 
-async def log_reminder(intern_id: int, source: str, sender_id: int | None = None) -> None:
+async def log_reminder(intern_id: int, source: str, sender_id: Optional[int] = None) -> None:
     """Logs a reminder sent to an intern."""
     now = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
     async with aiosqlite.connect(DB_PATH) as db:

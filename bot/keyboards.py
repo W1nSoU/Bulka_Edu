@@ -1,3 +1,4 @@
+from typing import Optional
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from bot.services.learning_progress import DayStatus
 
@@ -129,8 +130,8 @@ def get_pagination_keyboard(
     total_pages: int,
     content_identifier: str,
     day: int,
-    final_button: InlineKeyboardButton | None = None,
-) -> InlineKeyboardMarkup | None:
+    final_button: Optional[InlineKeyboardButton] = None,
+) -> Optional[InlineKeyboardMarkup]:
     """
     Generates a pagination keyboard.
     If a final_button is provided, it's added on the last page.

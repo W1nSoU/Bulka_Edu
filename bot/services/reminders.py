@@ -58,7 +58,7 @@ async def send_intern_reminder(
     intern_id: int,
     *,
     source: str,
-    sender_id: int | None = None,
+    sender_id: Optional[int] = None,
 ) -> bool:
     """Send reminder to an intern from manager/HR/auto source."""
     intern = await get_user_details(intern_id)

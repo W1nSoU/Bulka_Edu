@@ -2,6 +2,8 @@
 Global dictionaries and helpers for Bulka roles/cities/content types.
 """
 
+from typing import Optional
+
 AVAILABLE_ROLES = [
     "Старший продавець",
     "Продавець-консультант (каса)",
@@ -51,12 +53,12 @@ AVAILABLE_SHOPS = {
 CONTENT_TYPES = ["comic", "info", "text"]
 
 
-def is_valid_role(role: str | None) -> bool:
+def is_valid_role(role: Optional[str]) -> bool:
     """Return True if the role exists in the directory."""
     return bool(role) and role in AVAILABLE_ROLES
 
 
-def is_valid_city(city: str | None) -> bool:
+def is_valid_city(city: Optional[str]) -> bool:
     """Return True if the city exists in the directory."""
     return bool(city) and city in AVAILABLE_CITIES
 

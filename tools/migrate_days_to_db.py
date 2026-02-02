@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
+from typing import Optional
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -61,8 +62,8 @@ def _flatten_materials(
     raw: Any,
     day: int,
     *,
-    forced_role: str | None = None,
-    forced_type: str | None = None,
+    forced_role: Optional[str] = None,
+    forced_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Перетворює довільні структури у список словників матеріалів."""
     results: List[Dict[str, Any]] = []
