@@ -171,8 +171,9 @@ def _developer_main_keyboard(is_main_dev: bool) -> InlineKeyboardMarkup:
     ]
     # Розділяємо меню для головного розробника та інших
     row_team = []
-    if is_main_dev:
-        row_team.append(InlineKeyboardButton(text="👨‍💻 Команда Dev", callback_data="dev_team_menu"))
+    
+    # "Команда Dev" тепер доступна всім розробникам
+    row_team.append(InlineKeyboardButton(text="👨‍💻 Команда Dev", callback_data="dev_team_menu"))
     
     # "Команда Керівників" тепер доступна всім розробникам
     row_team.append(InlineKeyboardButton(text="👔 Команда Керівників", callback_data="dev_manage_managers"))
@@ -555,16 +556,18 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
     lines = [f"{title} (Всього: {total_users}, Сторінка {page + 1}/{total_pages})", ""]
     
     for idx, user in enumerate(paginated_users, start=start_offset + 1):
-        display_role = await get_display_role(user['user_id'])
+        # Отримуємо конкретну посаду з БД
+        job_title = user.get('role') or "Не вказано"
         user_full_name = user.get('full_name', 'Без імені')
         user_username = user.get('username', 'немає')
+        current_block = user.get('current_block', 1)
         
         # Витягуємо короткий номер магазину (наприклад, B-19)
         shop_full = user.get('shop', '') or ''
         shop_short = shop_full.split(' ')[0] if shop_full else 'Не вказано'
         
         lines.append(f"<b>{idx}. {user_full_name}</b> (ID: <code>{user['user_id']}</code>)")
-        lines.append(f"   @{user_username} | Роль: <b>{display_role}</b> | {shop_short}")
+        lines.append(f"   @{user_username} | Посада: <b>{job_title}</b> | {shop_short} | {current_block} день")
         lines.append("───────────────")
 
     pagination_buttons = []
@@ -2093,6 +2096,12 @@ async def developer_material_fix_start(callback: CallbackQuery, state: FSMContex
         InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_pag:{material_id}:{day}:{page}:{content_type}")
     ]])
     
+    # Delete previous message to avoid issues (caption limits) and clean up
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
     # If photo_files, show the photo to be fixed
     if content_type == "photo_files":
         photo_id = pages[page].get("photo")
@@ -2101,15 +2110,20 @@ async def developer_material_fix_start(callback: CallbackQuery, state: FSMContex
             caption=f"🛠 <b>Виправлення фото {page + 1}</b>\n\n{prompt_text}",
             reply_markup=kb
         )
-        # Delete previous message if it was a menu
-        try: await callback.message.delete()
-        except: pass
     else:
-        await _edit_or_answer(
-            callback.message,
+        # Text content: send as text message to allow long content (up to 4096 chars)
+        # Check text length to avoid limits even for text messages
+        full_text = (
             f"🛠 <b>Виправлення сторінки {page + 1}</b>\n\n"
             f"Поточний текст:\n<pre>{current_text}</pre>\n\n"
-            f"{prompt_text}",
+            f"{prompt_text}"
+        )
+        if len(full_text) > 4096:
+            # If too long, split or truncate (basic truncation for prompt)
+            full_text = full_text[:4000] + "\n...(текст скорочено для відображення)..."
+            
+        await callback.message.answer(
+            full_text,
             reply_markup=kb
         )
     await callback.answer()
