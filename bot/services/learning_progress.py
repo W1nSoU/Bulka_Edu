@@ -52,8 +52,6 @@ def _status_from_row(
         return DayStatus.OPEN
     if row and row.get("manual_open"):
         return DayStatus.OPEN
-    if prev_completed:
-        return DayStatus.OPEN
     return DayStatus.CLOSED
 
 

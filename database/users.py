@@ -163,6 +163,30 @@ async def get_manager_interns(manager_id):
 
         return [dict(intern) for intern in interns]
 
+async def get_all_active_users(days=3):
+    """Отримує список всіх активних користувачів (активні протягом останніх N днів)"""
+    cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM users WHERE last_activity >= ? ORDER BY last_activity DESC",
+            (cutoff_date,)
+        )
+        users = await cursor.fetchall()
+        return [dict(user) for user in users]
+
+async def get_all_inactive_users(days=3):
+    """Отримує список всіх неактивних користувачів (не активні більше N днів)"""
+    cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM users WHERE last_activity < ? ORDER BY last_activity ASC",
+            (cutoff_date,)
+        )
+        users = await cursor.fetchall()
+        return [dict(user) for user in users]
+
 async def get_inactive_interns_for_manager(manager_id, days=1):
     """Отримує список стажерів, які не були активні вказану кількість днів"""
     cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -417,7 +441,16 @@ async def get_reminder_history(limit: int = 50, offset: int = 0) -> list[dict]:
             
         return history_records
 
-async def get_users_by_full_name(full_name: str) -> list[dict]:
+async def get_users_by_city(city: str) -> list[dict]:
+    """Retrieves a list of users filtered by city."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM users WHERE city = ? ORDER BY last_activity DESC",
+            (city,)
+        )
+        users = await cursor.fetchall()
+        return [dict(user) for user in users]
     """Retrieves a list of users matching a full name (case-insensitive).
     
     Пошук не чутливий до регістру та знаходить часткові збіги.

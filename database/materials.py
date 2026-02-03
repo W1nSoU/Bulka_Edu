@@ -21,8 +21,30 @@ async def init_materials_db():
             UNIQUE (role, day, content_type, order_index)
         )
         ''')
+        
+        # Перевіряємо та додаємо колонку is_enabled
+        cursor = await db.execute("PRAGMA table_info(materials)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        if 'is_enabled' not in columns:
+            await db.execute("ALTER TABLE materials ADD COLUMN is_enabled BOOLEAN DEFAULT 1")
+            
         await db.commit()
     # print(f"База матеріалів ініціалізована за шляхом: {DB_PATH}")
+
+
+async def toggle_test_status(role: str, day: int, is_enabled: bool) -> bool:
+    """Вмикає або вимикає тест для ролі та дня."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE materials 
+            SET is_enabled = ? 
+            WHERE (role = ? OR role = 'ALL') AND day = ? AND content_type = 'test'
+            """,
+            (is_enabled, role, day)
+        )
+        await db.commit()
+        return True
 
 
 async def add_or_update_material(

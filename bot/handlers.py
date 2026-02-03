@@ -51,7 +51,7 @@ from bot.services.semantic_search import semantic_search
 from bot.services.groq_ai import search_with_ai, is_groq_configured
 from bot.services.logger import get_logger
 from bot.services.test_error_monitoring_service import get_test_error_statistics
-from database.materials import get_materials_for_day, search_materials as search_materials_db, get_all_materials, get_material_by_id, get_material_by_role_day_type
+from database.materials import get_materials_for_day, search_materials as search_materials_db, get_all_materials, get_material_by_id, get_material_by_role_day_type, get_test_by_role_and_day
 from bot.constants import is_valid_role, is_valid_city
 from typing import List, Optional, cast
 from bot.utils.paginator import split_text
@@ -617,6 +617,21 @@ def _format_material_text(material: dict) -> str:
         lines.append(f"🔗 {resource_url}")
     return "\n".join(lines).strip()
 
+async def _get_day_completion_button(user_id: int, day: int) -> InlineKeyboardButton:
+    """Returns the appropriate button for finishing the day content (Test or Complete)."""
+    user_details = await get_user_details(user_id)
+    role = user_details.get("role", "ALL") if user_details else "ALL"
+    
+    test_material = await get_test_by_role_and_day(role, day)
+    is_test_enabled = True
+    if test_material:
+        is_test_enabled = bool(test_material.get("is_enabled", 1))
+    
+    if is_test_enabled:
+        return InlineKeyboardButton(text="➡️ До тесту", callback_data=_build_test_callback(day))
+    else:
+        return InlineKeyboardButton(text="✅ Завершити день", callback_data=f"complete_day_{day}")
+
 async def _show_material_entry(
     callback: CallbackQuery,
     role: Optional[str],
@@ -685,7 +700,7 @@ async def _show_material_entry(
         if resource_url:
             pages[-1]["text"] = f"{pages[-1].get('text', '')}\n\n🔗 {resource_url}".strip()
             
-        final_button = InlineKeyboardButton(text="➡️ До тесту", callback_data=_build_test_callback(day))
+        final_button = await _get_day_completion_button(callback.from_user.id, day)
         
         # Display first page (0)
         keyboard = get_pagination_keyboard(0, len(pages), str(material.get('id')), day, final_button)
@@ -930,7 +945,7 @@ async def _handle_pagination(callback: CallbackQuery):
         if resource_url:
             pages[-1]["text"] = f"{pages[-1].get('text', '')}\n\n🔗 {resource_url}".strip()
 
-        final_button = InlineKeyboardButton(text="➡️ До тесту", callback_data=_build_test_callback(day))
+        final_button = await _get_day_completion_button(callback.from_user.id, day)
         
         if 0 <= page < len(pages):
             keyboard = get_pagination_keyboard(page, len(pages), str(material_id), day, final_button)
@@ -999,7 +1014,12 @@ async def day_content(callback: CallbackQuery):
             if ctype in grouped_materials:
                 text, cb = type_button_payload(day, ctype)
                 buttons.append([InlineKeyboardButton(text=text, callback_data=cb)])
-        buttons.append([InlineKeyboardButton(text="📝 Тести", callback_data=_build_test_callback(day))])
+        
+        test_button = await _get_day_completion_button(user_id, day)
+        if "test" in test_button.callback_data:
+             test_button.text = "📝 Тести"
+        buttons.append([test_button])
+        
         buttons.append([InlineKeyboardButton(text="⬅️ Повернутися до блоків навчання", callback_data="continue_learning")])
 
         if callback.message:
