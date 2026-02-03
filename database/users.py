@@ -451,6 +451,8 @@ async def get_users_by_city(city: str) -> list[dict]:
         )
         users = await cursor.fetchall()
         return [dict(user) for user in users]
+
+async def get_users_by_full_name(full_name: str) -> list[dict]:
     """Retrieves a list of users matching a full name (case-insensitive).
     
     Пошук не чутливий до регістру та знаходить часткові збіги.
