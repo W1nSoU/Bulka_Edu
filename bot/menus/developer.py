@@ -309,18 +309,18 @@ async def _build_managers_team_view(page: int = 0):
         ])
         return "👔 <b>Команда керівників</b>\n\nПоки що немає", kb
 
-    page_size = 10
-    total_users = len(all_hrs)
-    total_pages = (total_users + page_size - 1) // page_size
+    items_per_page = 10
+    total_count = len(all_hrs)
+    pages_total = (total_count + items_per_page - 1) // items_per_page
     
     if page < 0: page = 0
-    if page >= total_pages and total_pages > 0: page = total_pages - 1
+    if page >= pages_total and pages_total > 0: page = pages_total - 1
     
-    start = page * page_size
-    end = start + page_size
+    start = page * items_per_page
+    end = start + items_per_page
     paginated_hrs = all_hrs[start:end]
     
-    lines = [f"👔 <b>Команда керівників</b> (Всього: {total_users}, Сторінка {page + 1}/{total_pages})", ""]
+    lines = [f"👔 <b>Команда керівників</b> (Всього: {total_count}, Стор. {page + 1}/{pages_total})", ""]
     
     for idx, hr in enumerate(paginated_hrs, start=start + 1):
         name, username = await _format_identity(
@@ -359,7 +359,7 @@ async def _build_managers_team_view(page: int = 0):
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"dev_mgr_page:{page - 1}"))
-    if page < total_pages - 1:
+    if page < pages_total - 1:
         nav_row.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"dev_mgr_page:{page + 1}"))
     
     buttons = []
@@ -611,28 +611,34 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
              pass
         return
 
-    if page < 0: page = 0
-    if page >= total_pages and total_pages > 0: page = total_pages - 1
+    # Розрахунок пагінації
+    items_per_page = 8
+    total_count = len(users)
+    pages_total = (total_count + items_per_page - 1) // items_per_page
+    
+    # Корекція поточної сторінки
+    curr_page = page
+    if curr_page < 0: curr_page = 0
+    if curr_page >= pages_total and pages_total > 0: curr_page = pages_total - 1
 
-    page_size = 8
-    start_offset = page * page_size
-    end_offset = start_offset + page_size
+    start_offset = curr_page * items_per_page
+    end_offset = start_offset + items_per_page
     paginated_users = users[start_offset:end_offset]
 
-    lines = [f"{title} (Всього: {total_users}, Сторінка {page + 1}/{total_pages})", ""]
+    lines = [f"{title} (Всього: {total_count}, Стор. {curr_page + 1}/{pages_total})", ""]
     
     for idx, user in enumerate(paginated_users, start=start_offset + 1):
-        # Отримуємо конкретну посаду з БД
+        # Отримуємо дані
         job_title = user.get('role') or "Не вказано"
         user_full_name = user.get('full_name', 'Без імені')
         user_username = user.get('username', 'немає')
         current_block = user.get('current_block', 1)
         
-        # Витягуємо короткий номер магазину (наприклад, B-19)
+        # Магазин
         shop_full = user.get('shop', '') or ''
         shop_short = shop_full.split(' ')[0] if shop_full else 'Не вказано'
         
-        # Екрануємо дані з БД
+        # Екранування
         e_full_name = html.escape(user_full_name)
         e_username = html.escape(user_username)
         e_job = html.escape(job_title)
@@ -642,12 +648,13 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
         lines.append(f"   @{e_username} | Посада: <b>{e_job}</b> | {e_shop} | {current_block} день")
         lines.append("───────────────")
 
+    # Формування кнопок
     pagination_buttons = []
     row = []
-    if page > 0:
-        row.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"dev_users_pag:{mode}:{page - 1}"))
-    if page < total_pages - 1:
-        row.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"dev_users_pag:{mode}:{page + 1}"))
+    if curr_page > 0:
+        row.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"dev_users_pag:{mode}:{curr_page - 1}"))
+    if curr_page < pages_total - 1:
+        row.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"dev_users_pag:{mode}:{curr_page + 1}"))
     if row:
         pagination_buttons.append(row)
 
