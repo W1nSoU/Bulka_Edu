@@ -1,6 +1,8 @@
 import asyncio
 import sys
 import json
+import aiosqlite
+import html
 from typing import Optional
 from pathlib import Path
 from datetime import datetime # NEW IMPORT
@@ -345,7 +347,12 @@ async def _build_managers_team_view(page: int = 0):
         
         abbr = city_abbr.get(city, "??")
         
-        lines.append(f"{idx}. {name} | {username} | {shops_str} | {abbr}")
+        # Екрануємо дані з БД
+        e_name = html.escape(name)
+        e_username = html.escape(username)
+        e_shops = html.escape(shops_str)
+        
+        lines.append(f"{idx}. {e_name} | {e_username} | {e_shops} | {abbr}")
         lines.append("───────────────")
     
     # Кнопки навігації
@@ -381,7 +388,10 @@ async def _build_dev_team_view() -> tuple[str, InlineKeyboardMarkup]:
             name, username = await _format_identity(
                 dev["uid"], dev.get("full_name"), dev.get("username")
             )
-            lines.append(f"{idx}. {name} | {username} | ID: <code>{dev['uid']}</code>")
+            # Екрануємо дані з БД
+            e_name = html.escape(name)
+            e_username = html.escape(username)
+            lines.append(f"{idx}. {e_name} | {e_username} | ID: <code>{dev['uid']}</code>")
             lines.append("───────────────")
     
     kb = InlineKeyboardMarkup(
@@ -622,8 +632,14 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
         shop_full = user.get('shop', '') or ''
         shop_short = shop_full.split(' ')[0] if shop_full else 'Не вказано'
         
-        lines.append(f"<b>{idx}. {user_full_name}</b> (ID: <code>{user['user_id']}</code>)")
-        lines.append(f"   @{user_username} | Посада: <b>{job_title}</b> | {shop_short} | {current_block} день")
+        # Екрануємо дані з БД
+        e_full_name = html.escape(user_full_name)
+        e_username = html.escape(user_username)
+        e_job = html.escape(job_title)
+        e_shop = html.escape(shop_short)
+        
+        lines.append(f"<b>{idx}. {e_full_name}</b> (ID: <code>{user['user_id']}</code>)")
+        lines.append(f"   @{e_username} | Посада: <b>{e_job}</b> | {e_shop} | {current_block} день")
         lines.append("───────────────")
 
     pagination_buttons = []
@@ -3951,8 +3967,12 @@ async def developer_reminder_history_menu(callback: CallbackQuery):
         else:
             by_whom = source.capitalize()
             
-        lines.append(f"{icon} <b>{sent_at}</b> → {intern_name}")
-        lines.append(f"   <i>Від: {by_whom}</i>")
+        # Екрануємо дані з БД
+        e_intern_name = html.escape(intern_name)
+        e_by_whom = html.escape(by_whom)
+        
+        lines.append(f"{icon} <b>{sent_at}</b> → {e_intern_name}")
+        lines.append(f"   <i>Від: {e_by_whom}</i>")
         lines.append("───────────────")
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -4017,7 +4037,7 @@ async def developer_dropout_report(callback: CallbackQuery):
     active_dist = data['active_distribution']
     
     lines = [
-        "📉 <b>Воронка відсіву (АКТИВНІ < 3 дн)</b>",
+        "📉 <b>Воронка відсіву (АКТИВНІ до 3 дн)</b>",
         f"Активних стажерів: <b>{active_total}</b>",
         ""
     ]
@@ -4049,7 +4069,8 @@ async def developer_dropout_report(callback: CallbackQuery):
             lines.append(f"День {day}: <b>{count}</b> ({percent:.1f}%)")
             lines.append(f"<code>{bar}</code>")
     
-    lines.append("\n<i>* Секція 'Активні' не враховує тих, хто не заходив у бот ≥ 3 дні.</i>")
+    footer = "* Секція 'Активні' не враховує тих, хто не заходив у бот ≥ 3 дні."
+    lines.append(f"\n<i>{html.escape(footer)}</i>")
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Оновити", callback_data="dev_analytics_funnel")],

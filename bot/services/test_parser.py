@@ -1,4 +1,5 @@
 import re
+import html
 from typing import List, Dict, Optional, Tuple
 
 def parse_test_input(text: str) -> Tuple[List[Dict], List[str]]:
@@ -105,15 +106,17 @@ def format_test_display(questions: List[Dict]) -> str:
     """Formats the parsed test back to string for display."""
     output = []
     for i, q in enumerate(questions, 1):
-        output.append(f"<b>{i}. {q['question']}</b>")
+        q_text = html.escape(q['question'])
+        output.append(f"<b>{i}. {q_text}</b>")
         for j, opt in enumerate(q['options']):
+            opt_text = html.escape(opt)
             marker = " ✅" if j == q['correct_index'] else ""
             # Convert index to letter (0->a, 1->b)
             letter = chr(ord('a') + j)
             # Make correct answer bold
             if j == q['correct_index']:
-                output.append(f"{letter}. <b>{opt}</b>{marker}")
+                output.append(f"{letter}. <b>{opt_text}</b>{marker}")
             else:
-                output.append(f"{letter}. {opt}")
+                output.append(f"{letter}. {opt_text}")
         output.append("")
     return "\n".join(output)
