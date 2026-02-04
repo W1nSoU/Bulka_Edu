@@ -305,11 +305,15 @@ async def menu_days(callback: CallbackQuery):
     except Exception as e:
         print(f"Не вдалося відповісти на callback: {e}")
     
+    # Перевіряємо чи увімкнено зміст для цієї ролі
+    syllabus = await get_material_by_role_day_type(user_details.get('role', 'ALL'), 0, "syllabus")
+    is_syl_enabled = bool(syllabus.get('is_enabled', 1)) if syllabus else True
+
     if callback.message:
         await _show_text_menu(
             callback.message,
             "Оберіть день для навчання:",
-            learning_menu_keyboard(day_overview),
+            learning_menu_keyboard(day_overview, syllabus_enabled=is_syl_enabled),
             allow_edit=True,
             allow_caption_edit=False,
         )
@@ -1096,12 +1100,13 @@ async def show_syllabus(callback: CallbackQuery):
     # Syllabus stored as day=0, type='syllabus'
     material = await get_material_by_role_day_type(role, 0, "syllabus")
 
-    if not material or not material.get("content"):
+    if not material or not material.get("content") or not material.get("is_enabled", 1):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ В головне меню", callback_data="main_menu")]
         ])
+        msg = "Зміст для вашої посади ще не додано або він тимчасово вимкнений."
         if callback.message:
-            await callback.message.edit_text("Зміст для вашої посади ще не додано.", reply_markup=kb)
+            await callback.message.edit_text(msg, reply_markup=kb)
         await callback.answer()
         return
 
@@ -1961,9 +1966,13 @@ async def developer_profile_handler(callback: CallbackQuery):
     all_managers = await get_all_managers()
     all_materials = await get_all_materials()
     
+    # Safely get names with fallback if user_details is None
+    full_name = user_details.get('full_name', 'Без імені') if user_details else callback.from_user.full_name or "Без імені"
+    username = user_details.get('username', 'немає') if user_details else callback.from_user.username or "немає"
+
     text = (
         f"🛠️ <b>Профіль розробника</b> 🛠️\n\n"
-        f"👤 <b>{user_details.get('full_name', 'Без імені')}</b> (@{user_details.get('username', 'немає')})\n\n"
+        f"👤 <b>{full_name}</b> (@{username})\n\n"
         f"📊 <b>Статистика системи:</b>\n"
         f"— Всього користувачів: <b>{len(all_users)}</b>\n"
         f"— Всього керівників: <b>{len(all_managers)}</b>\n"
@@ -2410,10 +2419,22 @@ async def show_test_error_statistics(callback: CallbackQuery):
             day = error['day']
             question_idx = error['question_idx']
             count = error['error_count']
-            # last_reset = datetime.fromisoformat(error['last_reset_at']).strftime('%Y-%m-%d')
             
-            text_lines.append(f"<b>{idx}. {role}</b> (День {day})")
-            text_lines.append(f"   ❓ Питання №{question_idx + 1}: ❌ <b>{count}</b> помилок")
+            text_lines.append(f"<b>{idx}. {role}</b>")
+            text_lines.append(f"   └ 📅 День {day} | ❓ Питання №{question_idx + 1}")
+            text_lines.append(f"   └ ❌ Кількість помилок: <b>{count}</b>")
+            text_lines.append("───────────────")
+        
+        # Додаємо інформацію про останнє скидання
+        if sorted_errors:
+            last_reset = sorted_errors[0].get('last_reset_at')
+            if last_reset:
+                try:
+                    dt = datetime.fromisoformat(last_reset).strftime('%d.%m.%Y')
+                    text_lines.append(f"\n<i>* Статистика збирається з {dt}</i>")
+                    text_lines.append("<i>* Скидання відбувається автоматично 1-го числа кожного місяця.</i>")
+                except:
+                    pass
             text_lines.append("")
             
         text = "\n".join(text_lines)
@@ -2472,8 +2493,13 @@ async def global_error_handler(event: ErrorEvent):
     
     if isinstance(exception, TelegramBadRequest):
         error_message = str(exception).lower()
-        # Suppress "query is too old" (timeout) and "message is not modified" (harmless edit)
-        if "query is too old" in error_message or "message is not modified" in error_message:
+        # Suppress harmless Telegram API exceptions
+        if any(msg in error_message for msg in [
+            "query is too old", 
+            "message is not modified",
+            "message can't be deleted for everyone",
+            "message to delete not found"
+        ]):
             return
 
     # For other errors, we allow the default logger to handle them or log them here if needed.

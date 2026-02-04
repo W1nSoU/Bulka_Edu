@@ -90,7 +90,7 @@ async def start_bot():
     print_status("✅", "База керівників")
     await init_materials_db() # New initialization call
     print_status("✅", "База матеріалів")
-    await perform_quarterly_reset_if_due()
+    await perform_monthly_reset_if_due()
     print_status("✅", "Перевірено та оновлено статистику помилок тестів (якщо потрібно)")
     await load_all_progress()
     print_status("✅", "Прогрес завантажено")

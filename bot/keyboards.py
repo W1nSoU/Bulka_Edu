@@ -60,7 +60,7 @@ def manager_menu_keyboard():
         [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")]
     ])
 
-def learning_menu_keyboard(day_statuses):
+def learning_menu_keyboard(day_statuses, syllabus_enabled=True):
     kb_rows = []
     syllabus_unlocked = False
     
@@ -80,10 +80,12 @@ def learning_menu_keyboard(day_statuses):
         if day == 5 and status != DayStatus.CLOSED:
             syllabus_unlocked = True
     
-    if syllabus_unlocked:
-        kb_rows.append([InlineKeyboardButton(text="📚 Зміст", callback_data="show_syllabus")])
-    else:
-        kb_rows.append([InlineKeyboardButton(text="🔒 Зміст", callback_data="syllabus_locked")])
+    # Показуємо зміст лише якщо він увімкнений адміном
+    if syllabus_enabled:
+        if syllabus_unlocked:
+            kb_rows.append([InlineKeyboardButton(text="📚 Зміст", callback_data="show_syllabus")])
+        else:
+            kb_rows.append([InlineKeyboardButton(text="🔒 Зміст", callback_data="syllabus_locked")])
         
     kb_rows.append([InlineKeyboardButton(text="В головне меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=kb_rows)

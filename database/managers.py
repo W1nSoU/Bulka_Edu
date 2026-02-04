@@ -14,20 +14,26 @@ async def init_managers_db():
             process TEXT,
             full_name TEXT,
             username TEXT,
-            shops TEXT
+            shops TEXT,
+            city TEXT
         )
         ''')
         
-        # Add `shops` column if it does not exist
-        try:
-            await db.execute("SELECT shops FROM managers LIMIT 1")
-        except aiosqlite.OperationalError:
+        # Перевіряємо та додаємо колонки, якщо вони не існують
+        cursor = await db.execute("PRAGMA table_info(managers)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        
+        if 'shops' not in columns:
             await db.execute("ALTER TABLE managers ADD COLUMN shops TEXT")
             print("Added `shops` column to `managers` table.")
+            
+        if 'city' not in columns:
+            await db.execute("ALTER TABLE managers ADD COLUMN city TEXT")
+            print("Added `city` column to `managers` table.")
 
         await db.commit()
 
-async def add_manager(uid, process, full_name=None, username=None, shops: list = None):
+async def add_manager(uid, process, full_name=None, username=None, shops: list = None, city: str = None):
     """
     Додає керівника вручну за UID та посадою.
     Якщо full_name та username не передані, вони підтягуються з таблиці users.
@@ -50,11 +56,11 @@ async def add_manager(uid, process, full_name=None, username=None, shops: list =
         full_name = full_name if full_name else ""
 
         await managers_db.execute(
-            "INSERT OR REPLACE INTO managers (uid, username, full_name, process, shops) VALUES (?, ?, ?, ?, ?)",
-            (uid, username, full_name, process, shops_json)
+            "INSERT OR REPLACE INTO managers (uid, username, full_name, process, shops, city) VALUES (?, ?, ?, ?, ?, ?)",
+            (uid, username, full_name, process, shops_json, city)
         )
         await managers_db.commit()
-        print(f"Керівник доданий/оновлений: {uid}, @{username}, {full_name}, {process}")
+        print(f"Керівник доданий/оновлений: {uid}, @{username}, {full_name}, {process}, {city}")
 
 async def get_manager_by_uid(uid):
     async with aiosqlite.connect(MANAGERS_DB_PATH) as db:

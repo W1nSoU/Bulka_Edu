@@ -46,34 +46,37 @@ async def get_daily_stats():
             "active_users": active_users
         }
 
-async def get_dropout_funnel():
+async def get_dropout_funnel(active_days: int = 3):
     """
     Calculates the distribution of users by their current learning block.
-    This helps identify where users drop out.
+    Returns data for ALL users and separately for ACTIVE users.
     """
+    now = datetime.now(pytz.timezone(TIMEZONE))
+    cutoff = (now - timedelta(days=active_days)).strftime("%Y-%m-%d %H:%M:%S")
+    
     async with aiosqlite.connect(DB_PATH) as db:
-        # We assume regular users have roles, or we can just filter out known admins if needed.
-        # For now, we take all users.
-        
-        # Group by current_block
+        # 1. Загальна статистика (всі користувачі)
         cursor = await db.execute(
-            """
-            SELECT current_block, COUNT(*) 
-            FROM users 
-            GROUP BY current_block 
-            ORDER BY current_block
-            """
+            "SELECT current_block, COUNT(*) FROM users GROUP BY current_block"
         )
-        rows = await cursor.fetchall()
+        total_dist = {row[0]: row[1] for row in await cursor.fetchall()}
         
-        # Get total users count to calculate percentages
         cursor = await db.execute("SELECT COUNT(*) FROM users")
-        total_users = (await cursor.fetchone())[0]
+        total_count = (await cursor.fetchone())[0]
         
-        # Format: {block_num: count}
-        distribution = {row[0]: row[1] for row in rows}
+        # 2. Активна статистика (тільки ті, хто заходив останні 3 дні)
+        cursor = await db.execute(
+            "SELECT current_block, COUNT(*) FROM users WHERE last_activity >= ? GROUP BY current_block",
+            (cutoff,)
+        )
+        active_dist = {row[0]: row[1] for row in await cursor.fetchall()}
+        
+        cursor = await db.execute("SELECT COUNT(*) FROM users WHERE last_activity >= ?", (cutoff,))
+        active_count = (await cursor.fetchone())[0]
         
         return {
-            "total_users": total_users,
-            "distribution": distribution
+            "total_users": total_count,
+            "total_distribution": total_dist,
+            "active_users": active_count,
+            "active_distribution": active_dist
         }

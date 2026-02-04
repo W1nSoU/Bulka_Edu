@@ -30,8 +30,8 @@ async def reset_test_error_statistics():
         )
         await db.commit()
 
-async def should_perform_quarterly_reset() -> bool:
-    """Checks if a quarterly reset is due."""
+async def should_perform_monthly_reset() -> bool:
+    """Checks if a monthly reset is due (if it's the 1st day of the month and last reset was in a previous month)."""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("SELECT last_reset_at FROM test_errors ORDER BY last_reset_at DESC LIMIT 1")
         last_reset_row = await cursor.fetchone()
@@ -40,17 +40,26 @@ async def should_perform_quarterly_reset() -> bool:
             return False 
 
         last_reset_str = last_reset_row[0]
-        last_reset_dt = datetime.fromisoformat(last_reset_str)
+        try:
+            last_reset_dt = datetime.fromisoformat(last_reset_str)
+        except ValueError:
+            # Handle cases where CURRENT_TIMESTAMP might not be perfectly ISO format if manually inserted
+            return True
 
-        three_months_ago = datetime.now() - timedelta(days=90) 
+        now = datetime.now()
         
-        return last_reset_dt < three_months_ago
+        # Перевіряємо чи сьогодні 1-ше число
+        if now.day != 1:
+            return False
+            
+        # Якщо сьогодні 1-ше число, перевіряємо чи останній запуск був в іншому місяці або році
+        return (last_reset_dt.month != now.month) or (last_reset_dt.year != now.year)
 
-async def perform_quarterly_reset_if_due():
+async def perform_monthly_reset_if_due():
     """
-    Performs a quarterly reset of test error statistics if due.
+    Performs a monthly reset of test error statistics if due.
     """
-    if await should_perform_quarterly_reset():
+    if await should_perform_monthly_reset():
         await reset_test_error_statistics()
 
 async def get_intern_incomplete_open_test_days() -> list[tuple[int, int]]:
