@@ -628,13 +628,19 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
     lines = [f"{title} (Всього: {total_count}, Стор. {curr_page + 1}/{pages_total})", ""]
     
     for idx, user in enumerate(paginated_users, start=start_offset + 1):
-        # Отримуємо дані
-        job_title = user.get('role') or "Не вказано"
+        # Визначаємо роль та посаду
+        display_role = await get_display_role(user['user_id'])
+        
+        if display_role in ["Dev", "Керівник"]:
+            job_title = display_role
+        else:
+            job_title = user.get('role') or "Не вказано"
+            
         user_full_name = user.get('full_name', 'Без імені')
         user_username = user.get('username', 'немає')
         current_block = user.get('current_block', 1)
         
-        # Магазин
+        # Витягуємо короткий номер магазину (наприклад, B-19)
         shop_full = user.get('shop', '') or ''
         shop_short = shop_full.split(' ')[0] if shop_full else 'Не вказано'
         
@@ -644,8 +650,14 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
         e_job = html.escape(job_title)
         e_shop = html.escape(shop_short)
         
+        # Формуємо рядок: день показуємо тільки якщо це не Dev/Керівник
+        if display_role in ["Dev", "Керівник"]:
+            info_line = f"   @{e_username} | Посада: <b>{e_job}</b> | {e_shop}"
+        else:
+            info_line = f"   @{e_username} | Посада: <b>{e_job}</b> | {e_shop} | {current_block} день"
+            
         lines.append(f"<b>{idx}. {e_full_name}</b> (ID: <code>{user['user_id']}</code>)")
-        lines.append(f"   @{e_username} | Посада: <b>{e_job}</b> | {e_shop} | {current_block} день")
+        lines.append(info_line)
         lines.append("───────────────")
 
     # Формування кнопок

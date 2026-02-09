@@ -2498,7 +2498,8 @@ async def global_error_handler(event: ErrorEvent):
             "query is too old", 
             "message is not modified",
             "message can't be deleted for everyone",
-            "message to delete not found"
+            "message to delete not found",
+            "canceled by new editmessagemedia request"
         ]):
             return
 
@@ -2538,7 +2539,7 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(manager_intern_profile_handler, lambda c: c.data.startswith("manager_intern_profile_"))
     dp.callback_query.register(manager_intern_learning_menu, lambda c: c.data.startswith("manager_intern_learning_"))
     dp.callback_query.register(manager_intern_day_action, lambda c: c.data.startswith("manager_day:"))
-    dp.callback_query.register(manager_remind_intern_callback, lambda c: c.data.startswith("remind_intern_"))
+    dp.callback_query.register(manager_remind_intern_callback, lambda c: c.data and c.data.startswith("remind_") and c.data.split("_")[-1].isdigit())
     
     from bot.menus.manager import register_manager_handlers
     register_manager_handlers(dp)

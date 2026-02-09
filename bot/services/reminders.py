@@ -205,11 +205,8 @@ async def send_daily_test_failure_report_to_manager(bot: Bot, manager_id: int, i
     for intern_id, day_num in intern_failures:
         intern_details = await get_user_details(intern_id)
         intern_name = intern_details.get("full_name") or intern_details.get("username", f"ID {intern_id}")
-        intern_role = intern_details.get("role", "Невідома посада")
-        intern_city = intern_details.get("city", "Не вказано")
         
         text_lines.append(f"\n  • <b>{intern_name}</b> (День {day_num})")
-        text_lines.append(f"    Посада: {intern_role}, Місто: {intern_city}")
 
         buttons.append([InlineKeyboardButton(
             text=f"📅 Прогрес {intern_name} (День {day_num})",
