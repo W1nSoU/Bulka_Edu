@@ -21,7 +21,8 @@ import re # NEW IMPORT
 from database.users import (
     register_user, update_progress, get_user_progress, set_intern_extra,
     get_user_details, get_manager_interns, get_inactive_interns_for_manager, get_interns_in_progress_for_manager,
-    can_start_conversation, create_conversation, close_conversation, MAX_OPEN_CONVERSATIONS
+    can_start_conversation, create_conversation, close_conversation, MAX_OPEN_CONVERSATIONS,
+    log_support_request
 )
 from database.managers import get_manager_by_uid
 from database.tokens import get_token_data, use_token
@@ -266,6 +267,7 @@ async def all_available_tests_completed(user_id):
 
 async def menu_days(callback: CallbackQuery):
     user_id = callback.from_user.id
+    user_details = None
     
     user_details = await get_user_details(user_id)
     is_privileged = await is_privileged_user(user_id)
@@ -1845,6 +1847,7 @@ async def process_support_message(message: types.Message, state: FSMContext):
         if message.bot:
             await message.bot.send_message(manager_id, manager_message, reply_markup=kb)
             await create_conversation(user_id, manager_id)
+            await log_support_request(user_id) # Log for analytics
             await message.answer(
                 "<b>✅ Ваше повідомлення успішно надіслано керівнику!</b>\nОчікуйте на відповідь.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -2505,8 +2508,10 @@ async def global_error_handler(event: ErrorEvent):
 
     # For other errors, we allow the default logger to handle them or log them here if needed.
     from bot.services.logger import get_logger
+    import traceback
     logger = get_logger()
-    logger.error(f"Global error handler caught: {exception}", exc_info=True)
+    tb = traceback.format_exc()
+    logger.error(f"Global error handler caught: {exception}\n{tb}", exc_info=False)
 
 def register_handlers(dp: Dispatcher):
     # Register global error handler

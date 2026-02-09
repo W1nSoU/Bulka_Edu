@@ -14,6 +14,7 @@ from bot.middleware import AccessMiddleware
 from bot.services.reminders import auto_reminder_loop, manager_daily_report_loop
 from bot.services.logger import setup_bot_logger, get_logger
 from bot.services.health import token_cleanup_loop, health_monitor_loop
+from bot.services.reports import auto_monthly_report_sender # New import
 from bot.services.groq_ai import is_groq_configured, get_groq_status
 from bot.services.test_error_monitoring_service import perform_monthly_reset_if_due, get_intern_incomplete_open_test_days, group_test_failures_by_manager
 from bot.services.reminders import send_daily_test_failure_report_to_manager # New import
@@ -124,6 +125,9 @@ async def start_bot():
     
     scheduler.add_job(health_monitor_loop, "interval", minutes=5, args=(bot,), id="health_monitor")
     print_status("  ✓", "Моніторинг здоров'я (кожні 5 хвилин)")
+    
+    scheduler.add_job(auto_monthly_report_sender, "cron", day="last", hour=23, minute=0, args=(bot,), id="monthly_report_sender")
+    print_status("  ✓", "Автоматичний місячний звіт (останній день місяця, 23:00)")
     
     # Запускаємо scheduler
     scheduler.start()

@@ -178,15 +178,17 @@ async def manager_by_city_menu(callback: CallbackQuery):
     if not await _ensure_manager(callback):
         return
     interns = await get_manager_interns(callback.from_user.id)
-    cities = sorted(list(set(i.get('city') for i in interns if i.get('city'))))
+    cities_in_db = set(i.get('city') for i in interns if i.get('city'))
     
-    if not cities:
+    buttons = []
+    for i, city in enumerate(AVAILABLE_CITIES):
+        if city in cities_in_db:
+            buttons.append([InlineKeyboardButton(text=city, callback_data=f"mgr_filter_city:{i}")])
+    
+    if not buttons:
         await callback.answer("Міста не вказані у стажерів.", show_alert=True)
         return
 
-    buttons = []
-    for city in cities:
-        buttons.append([InlineKeyboardButton(text=city, callback_data=f"mgr_filter_city:{city}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")])
     
     await _edit_menu_message(callback.message, "🏙️ Оберіть місто:", InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -195,7 +197,13 @@ async def manager_by_city_menu(callback: CallbackQuery):
 async def manager_filter_city(callback: CallbackQuery):
     if not await _ensure_manager(callback):
         return
-    city = callback.data.split(":", 1)[1]
+    try:
+        city_idx = int(callback.data.split(":", 1)[1])
+        city = AVAILABLE_CITIES[city_idx]
+    except (ValueError, IndexError):
+        await callback.answer("Помилка вибору міста.", show_alert=True)
+        return
+
     interns = await get_manager_interns(callback.from_user.id)
     filtered = [i for i in interns if i.get('city') == city]
     await _list_interns_generic(callback, filtered, f"🏙️ <b>Стажери: {city}</b>", "📭 Немає стажерів у цьому місті.")
@@ -204,15 +212,18 @@ async def manager_by_role_menu(callback: CallbackQuery):
     if not await _ensure_manager(callback):
         return
     interns = await get_manager_interns(callback.from_user.id)
-    roles = sorted(list(set(i.get('role') for i in interns if i.get('role'))))
+    roles_in_db = set(i.get('role') for i in interns if i.get('role'))
     
-    if not roles:
+    buttons = []
+    for i, role in enumerate(AVAILABLE_ROLES):
+        if role in roles_in_db:
+            label = role[:30] + "..." if len(role) > 30 else role
+            buttons.append([InlineKeyboardButton(text=label, callback_data=f"mgr_filter_role:{i}")])
+    
+    if not buttons:
         await callback.answer("Посади не вказані у стажерів.", show_alert=True)
         return
 
-    buttons = []
-    for role in roles:
-        buttons.append([InlineKeyboardButton(text=role, callback_data=f"mgr_filter_role:{role}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")])
     
     await _edit_menu_message(callback.message, "💼 Оберіть посаду:", InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -221,7 +232,13 @@ async def manager_by_role_menu(callback: CallbackQuery):
 async def manager_filter_role(callback: CallbackQuery):
     if not await _ensure_manager(callback):
         return
-    role = callback.data.split(":", 1)[1]
+    try:
+        role_idx = int(callback.data.split(":", 1)[1])
+        role = AVAILABLE_ROLES[role_idx]
+    except (ValueError, IndexError):
+        await callback.answer("Помилка вибору посади.", show_alert=True)
+        return
+
     interns = await get_manager_interns(callback.from_user.id)
     filtered = [i for i in interns if i.get('role') == role]
     await _list_interns_generic(callback, filtered, f"💼 <b>Стажери: {role}</b>", "📭 Немає стажерів на цій посаді.")
@@ -238,20 +255,29 @@ async def manager_report(callback: CallbackQuery):
 
     # Simple stats
     total = len(interns)
-    active_list = await get_interns_in_progress_for_manager(callback.from_user.id)
-    active = len(active_list)
-    completed = total - active # Approximate
     
-    # Inactive > 3 days
+    # Ті, хто закінчили (пройшли всі дні)
+    completed_list = []
+    for i in interns:
+        progress = await get_user_progress(i['user_id'])
+        if sum(1 for p in progress if p.get('completed')) >= DAYS_TOTAL:
+            completed_list.append(i)
+    completed = len(completed_list)
+    
+    # Ті, хто ще в процесі (total - completed)
+    # Але ми їх ділимо на активних та неактивних за останні 3 дні
+    active_list = await get_interns_in_progress_for_manager(callback.from_user.id, active_only=True)
+    active = len(active_list)
+    
     inactive_list = await get_inactive_interns_for_manager(callback.from_user.id, days=3)
     inactive = len(inactive_list)
     
     report_text = (
         "📊 <b>Загальний звіт по стажерах</b>\n\n"
         f"👥 Всього: <b>{total}</b>\n"
-        f"🚀 Активні: <b>{active}</b>\n"
-        f"🎉 Завершили: <b>{completed}</b>\n"
-        f"😴 Неактивні (>3 днів): <b>{inactive}</b>\n\n"
+        f"🚀 Активні (< 3 дн.): <b>{active}</b>\n"
+        f"🎉 Завершили навчання: <b>{completed}</b>\n"
+        f"😴 Неактивні (≥ 3 дн.): <b>{inactive}</b>\n\n"
     )
     
     await _edit_menu_message(

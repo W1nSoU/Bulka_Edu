@@ -94,5 +94,15 @@ async def init_db():
         )
         ''')
         
+        # Таблиця для логування запитів до керівників (для звітності)
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS support_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+        ''')
+        
         await db.commit()
     # print(f"База даних ініціалізована за шляхом: {DB_PATH}")

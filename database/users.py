@@ -194,48 +194,68 @@ async def get_all_inactive_users(days=3):
         users = await cursor.fetchall()
         return [dict(user) for user in users]
 
-async def get_inactive_interns_for_manager(manager_id, days=1):
-    """Отримує список стажерів, які не були активні вказану кількість днів"""
-    cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+async def get_interns_in_progress_for_manager(manager_id, active_only=True):
+    """
+    Отримує список стажерів, які не завершили навчання.
+    Якщо active_only=True, повертає лише тих, хто був активний останні 3 дні.
+    """
+    from bot.config import DAYS_TOTAL
+    cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        
+        # Базовий запит для стажерів цього керівника
+        query = "SELECT * FROM users WHERE manager_id = ?"
+        if active_only:
+            query += " AND last_activity >= ?"
+            params = (manager_id, cutoff_date)
+        else:
+            params = (manager_id,)
+            
+        cursor = await db.execute(query, params)
+        interns = await cursor.fetchall()
+        
+        in_progress = []
+        for intern in interns:
+            # Перевіряємо чи завершено навчання
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM progress WHERE user_id = ? AND completed = 1",
+                (intern['user_id'],)
+            )
+            completed_days = (await cursor.fetchone())[0]
+            
+            if completed_days < DAYS_TOTAL:
+                in_progress.append(dict(intern))
+        
+        return in_progress
+
+async def get_inactive_interns_for_manager(manager_id, days=3):
+    """Отримує список стажерів, які не завершили навчання ТА не були активні вказану кількість днів"""
+    from bot.config import DAYS_TOTAL
+    cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Тільки ті, хто не заходив давно
         cursor = await db.execute(
             "SELECT * FROM users WHERE manager_id = ? AND last_activity < ? ORDER BY last_activity ASC",
             (manager_id, cutoff_date)
         )
         interns = await cursor.fetchall()
-        return [dict(intern) for intern in interns]
-
-async def get_interns_in_progress_for_manager(manager_id):
-    """Отримує список стажерів, які не завершили всі дні навчання"""
-    from bot.config import DAYS_TOTAL  # Імпортуємо тут, щоб уникнути циклічного імпорту
-    
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        # Знаходимо стажерів цього керівника
-        cursor = await db.execute(
-            "SELECT u.* FROM users u WHERE u.manager_id = ?",
-            (manager_id,)
-        )
-        interns = await cursor.fetchall()
         
-        # Готуємо список стажерів, які ще навчаються
-        in_progress = []
-        
+        inactive = []
         for intern in interns:
-            # Рахуємо кількість завершених днів для кожного стажера
             cursor = await db.execute(
-                "SELECT COUNT(*) as completed_days FROM progress WHERE user_id = ? AND completed = 1",
+                "SELECT COUNT(*) FROM progress WHERE user_id = ? AND completed = 1",
                 (intern['user_id'],)
             )
-            result = await cursor.fetchone()
-            completed_days = result['completed_days']
+            completed_days = (await cursor.fetchone())[0]
             
-            # Якщо завершених днів менше загальної кількості - стажер ще в процесі
             if completed_days < DAYS_TOTAL:
-                in_progress.append(dict(intern))
+                inactive.append(dict(intern))
         
-        return in_progress
+        return inactive
 
 async def update_last_activity(user_id):
     """Оновлює час останньої активності користувача"""
@@ -386,6 +406,16 @@ async def mark_day3_question_sent(user_id: int) -> None:
     """Позначає, що питання 3-го дня було надіслано."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET day3_question_sent = 1 WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+async def log_support_request(user_id: int) -> None:
+    """Logs a support request from an intern to the database."""
+    now = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO support_logs (user_id, created_at) VALUES (?, ?)",
+            (user_id, now)
+        )
         await db.commit()
 
 async def get_user_by_username(username: str) -> Optional[dict]:

@@ -59,6 +59,7 @@ from database.materials import (
 from database.tokens import get_token_stats, cleanup_expired_tokens
 from database.analytics import get_daily_stats, get_dropout_funnel
 from bot.services.health import get_health_status
+from bot.services.reports import get_report_data, generate_xlsx_report # NEW IMPORT
 from bot.services.test_parser import parse_test_input, format_test_display
 from bot.services.learning_progress import get_days_overview, DayStatus
 from bot.services.access import get_display_role # Import get_display_role
@@ -89,6 +90,10 @@ class DeveloperStates(StatesGroup):
     waiting_material_parts = State() # New state for multi-message input
     waiting_test_input = State() # State for editing tests
     waiting_fix_page = State() # New state for fixing a specific page content
+    waiting_complement_type = State() # Start/End/Between
+    waiting_insert_start_idx = State() # First page index
+    waiting_insert_end_idx = State() # Second page index
+    waiting_complement_content = State() # New content to add
     # Стани для оповіщення про зміни
     waiting_notify_decision = State()
     waiting_notify_message = State()
@@ -169,7 +174,10 @@ def _developer_main_keyboard(is_main_dev: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📜 Історія нагадувань", callback_data="dev_reminder_history"),
             InlineKeyboardButton(text="📊 Аналітика", callback_data="dev_analytics_menu"),
         ],
-        [InlineKeyboardButton(text="📊 Помилки тестів", callback_data="show_test_errors")],
+        [
+            InlineKeyboardButton(text="📊 XLSX звіт", callback_data="dev_xlsx_menu"),
+            InlineKeyboardButton(text="📊 Помилки тестів", callback_data="show_test_errors")
+        ],
     ]
     # Розділяємо меню для головного розробника та інших
     row_team = []
@@ -2133,6 +2141,8 @@ async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
     buttons = []
         
     buttons.append([InlineKeyboardButton(text="➕ Додати навчання", callback_data=f"dev_mat_edit|{content_type}")])
+    if material:
+        buttons.append([InlineKeyboardButton(text="➕ Доповнити", callback_data=f"dev_mat_complement|{content_type}")])
     buttons.append([InlineKeyboardButton(text="🔍 Повний перегляд", callback_data=f"dev_mat_full_view|{content_type}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_mat_day|{day}")])
     
@@ -2142,6 +2152,192 @@ async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     await callback.answer()
+
+async def developer_material_complement_menu(callback: CallbackQuery, state: FSMContext):
+    """Shows the menu to choose how to complement the material."""
+    if not await _ensure_developer(callback): return
+    
+    try:
+        _, content_type = callback.data.split("|", 1)
+    except:
+        return await callback.answer("Помилка формату.")
+
+    if content_type != "text":
+        return await callback.answer("Доповнення поки доступне лише для текстових матеріалів.", show_alert=True)
+
+    data = await state.get_data()
+    material_id = data.get("edit_material_id")
+    if not material_id:
+        return await callback.answer("Матеріал не знайдено.")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔝 На початок", callback_data="dev_comp_type:start")],
+        [InlineKeyboardButton(text="↔️ Вставити між сторінками", callback_data="dev_comp_type:between")],
+        [InlineKeyboardButton(text="🔚 В кінець", callback_data="dev_comp_type:end")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_mat_type|{content_type}")]
+    ])
+
+    await _edit_or_answer(
+        callback.message,
+        "➕ <b>Доповнення матеріалу</b>\n\nОберіть, куди саме ви хочете додати нову сторінку:",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+async def developer_material_complement_start(callback: CallbackQuery, state: FSMContext):
+    """Processes the chosen complement type."""
+    comp_type = callback.data.split(":")[1]
+    await state.update_data(complement_type=comp_type)
+    
+    if comp_type == "between":
+        await _edit_or_answer(
+            callback.message,
+            "🔢 <b>Вставка між сторінками</b>\n\nВведіть номер <b>першої</b> сторінки (наприклад, 19):",
+            reply_markup=_cancel_keyboard("dev_mat_menu_back") # Simplified back
+        )
+        await state.set_state(DeveloperStates.waiting_insert_start_idx)
+    else:
+        # For start/end, go directly to content request
+        prompt = "🔝 Надішліть контент, який стане <b>першою</b> сторінкою:" if comp_type == "start" else "🔚 Надішліть контент, який буде додано в <b>кінець</b>:"
+        await _edit_or_answer(callback.message, prompt, reply_markup=_cancel_keyboard("dev_mat_menu_back"))
+        await state.set_state(DeveloperStates.waiting_complement_content)
+    
+    await callback.answer()
+
+async def developer_process_insert_start_idx(message: Message, state: FSMContext):
+    if not message.text or not message.text.isdigit():
+        return await message.answer("❌ Будь ласка, введіть число (номер сторінки).")
+    
+    await state.update_data(insert_start_val=int(message.text))
+    await message.answer("🔢 Тепер введіть номер <b>другої</b> сторінки (наприклад, 20):")
+    await state.set_state(DeveloperStates.waiting_insert_end_idx)
+
+async def developer_process_insert_end_idx(message: Message, state: FSMContext):
+    if not message.text or not message.text.isdigit():
+        return await message.answer("❌ Будь ласка, введіть число.")
+    
+    data = await state.get_data()
+    start_idx = data.get("insert_start_val")
+    end_idx = int(message.text)
+    
+    if end_idx != start_idx + 1:
+        await message.answer(f"⚠️ Ви вказали {start_idx} та {end_idx}. Зазвичай вставляють між сусідніми сторінками (наприклад, {start_idx} та {start_idx+1}).\n\nАле я продовжу. Нова сторінка стане номером {end_idx}, а стара {end_idx} та наступні посунуться.")
+    
+    await state.update_data(target_insert_pos=end_idx - 1) # 0-based index
+    await message.answer(f"📝 Надішліть контент (текст/фото), який потрібно вставити між {start_idx} та {end_idx} сторінками:")
+    await state.set_state(DeveloperStates.waiting_complement_content)
+
+async def developer_process_complement_content(message: Message, state: FSMContext):
+    data = await state.get_data()
+    comp_type = data.get("complement_type")
+    material_id = data.get("edit_material_id")
+    day = data.get("edit_day")
+    role = data.get("edit_role")
+    
+    material = await get_material_by_id(material_id)
+    if not material:
+        await message.answer("❌ Помилка: матеріал не знайдено.")
+        return await state.clear()
+
+    pages = parse_material_content(material.get("content", "[]"))
+    
+    # Prepare new page
+    new_page = {"text": message.caption or message.text or ""}
+    if message.photo:
+        new_page["photo"] = message.photo[-1].file_id
+
+    # Logic for insertion
+    if comp_type == "start":
+        pages.insert(0, new_page)
+        target_page = 0
+    elif comp_type == "end":
+        pages.append(new_page)
+        target_page = len(pages) - 1
+    elif comp_type == "between":
+        pos = data.get("target_insert_pos", 0)
+        if pos < 0: pos = 0
+        if pos > len(pages): pos = len(pages)
+        pages.insert(pos, new_page)
+        target_page = pos
+    
+    # Save to DB
+    new_content_json = json.dumps(pages, ensure_ascii=False)
+    await update_material_content(material_id, new_content_json)
+    
+    await message.answer(f"✅ Матеріал успішно доповнено! Нова сторінка додана на позицію {target_page + 1}.")
+    
+    # Redirect to view
+    kb = _get_dev_pagination_keyboard(target_page, len(pages), material_id, day, "text")
+    if message.photo:
+        await message.answer_photo(new_page["photo"], caption=new_page["text"], reply_markup=kb)
+    else:
+        await message.answer(new_page["text"], reply_markup=kb)
+        
+    await state.clear()
+
+async def developer_material_delete_request(callback: CallbackQuery):
+    """Asks for confirmation before deleting a page."""
+    if not await _ensure_developer(callback): return
+    
+    try:
+        parts = callback.data.split(":")
+        mid_str, day_str, page_str, ctype = parts[1], parts[2], parts[3], parts[4]
+        page = int(page_str)
+    except:
+        return await callback.answer("Помилка даних.")
+
+    suffix = f"{mid_str}:{day_str}:{page_str}:{ctype}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Так, видалити", callback_data=f"dev_mat_del_conf:{suffix}")],
+        [InlineKeyboardButton(text="❌ Ні, назад", callback_data=f"dev_pag:{suffix}")]
+    ])
+
+    await _edit_or_answer(
+        callback.message,
+        f"❓ <b>Ви дійсно бажаєте видалити сторінку №{page + 1}?</b>\n\nЦю дію неможливо буде скасувати.",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+async def developer_material_delete_confirm(callback: CallbackQuery):
+    """Performs the actual deletion of a page."""
+    if not await _ensure_developer(callback): return
+    
+    try:
+        # callback.data format: dev_mat_del_conf:mid:day:page:ctype
+        _, mid_str, day_str, page_str, ctype = callback.data.split(":")
+        material_id = int(mid_str)
+        day = int(day_str)
+        page = int(page_str)
+    except:
+        return await callback.answer("Помилка видалення.")
+
+    material = await get_material_by_id(material_id)
+    if not material:
+        return await callback.answer("Матеріал не знайдено.")
+
+    pages = parse_material_content(material.get("content", "[]"))
+    
+    if 0 <= page < len(pages):
+        pages.pop(page)
+        
+        # Save updated content
+        new_content_json = json.dumps(pages, ensure_ascii=False)
+        await update_material_content(material_id, new_content_json)
+        
+        await callback.answer("✅ Сторінку видалено!", show_alert=True)
+        
+        if not pages:
+            # If no pages left, go back to material view
+            await developer_materials_view(callback, None)
+        else:
+            # Show the new page at the same index (or the last one if we deleted the end)
+            new_page_idx = page if page < len(pages) else len(pages) - 1
+            # Mock callback to trigger pagination view
+            callback.data = f"dev_pag:{material_id}:{day}:{new_page_idx}:{ctype}"
+            await developer_pagination_handler(callback)
+    else:
+        await callback.answer("Помилка: сторінка вже не існує.")
 
 async def developer_material_fix_start(callback: CallbackQuery, state: FSMContext):
     """Starts the process of fixing a specific page of material."""
@@ -2278,6 +2474,12 @@ async def developer_process_fix_page(message: Message, state: FSMContext):
     await state.clear()
 
 
+async def developer_material_menu_back(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    ctype = data.get("edit_type", "text")
+    await state.set_state(None)
+    await developer_materials_view(callback, state) # Go back to material view
+
 def _get_dev_pagination_keyboard(current_page, total_pages, material_id, day, content_type):
     buttons = []
     
@@ -2297,6 +2499,8 @@ def _get_dev_pagination_keyboard(current_page, total_pages, material_id, day, co
     
     # "Fix" button on every page
     buttons.append([InlineKeyboardButton(text="🛠 Виправити", callback_data=f"dev_mat_fix:{material_id}:{day}:{current_page}")])
+    # "Delete" button on every page
+    buttons.append([InlineKeyboardButton(text="🗑 Видалити сторінку", callback_data=f"dev_mat_del_req:{material_id}:{day}:{current_page}:{content_type}")])
 
     # Action buttons: on the last page OR if there is only 1 page
     if current_page == total_pages - 1:
@@ -3943,6 +4147,66 @@ async def developer_user_delete_perform(callback: CallbackQuery, state: FSMConte
     await _edit_or_answer(callback.message, "Користувача видалено.", reply_markup=_users_menu_keyboard())
 
 
+# ==================== XLSX Reports ====================
+
+async def developer_xlsx_menu(callback: CallbackQuery):
+    """Меню формування XLSX звіту."""
+    if not await _ensure_developer(callback):
+        return
+    
+    now = datetime.now(pytz.timezone(TIMEZONE))
+    text = (
+        "📊 <b>Звітність у форматі XLSX</b>\n"
+        "───────────────────\n"
+        f"📅 Поточний період: <b>{now.strftime('01.%m.%Y')} — {now.strftime('%d.%m.%Y')}</b>\n\n"
+        "Звіт містить наступні метрики по містах та магазинах:\n"
+        "• Кількість нових стажерів\n"
+        "• Кількість активних стажерів\n"
+        "• Кількість відсіву (не завершили)\n"
+        "• Частота запитів до керівників\n"
+        "───────────────────\n"
+        "<i>💡 Ви можете отримати звіт за поточний місяць прямо зараз.</i>"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📥 Надіслати поточний звіт", callback_data="dev_xlsx_send_current")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")],
+    ])
+    
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await callback.answer()
+
+async def developer_send_current_report(callback: CallbackQuery):
+    """Генерує та надсилає поточний XLSX звіт."""
+    if not await _ensure_developer(callback):
+        return
+    
+    await callback.answer("⏳ Генерую звіт...", show_alert=False)
+    
+    now = datetime.now(pytz.timezone(TIMEZONE))
+    # З 1-го числа поточного місяця
+    start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    try:
+        data = await get_report_data(start_date, now)
+        if not data:
+            await callback.answer("❌ За цей період ще немає даних для звіту.", show_alert=True)
+            return
+            
+        xlsx_file = generate_xlsx_report(data, start_date, now)
+        
+        filename = f"Bulka_Report_{start_date.strftime('%Y-%m')}.xlsx"
+        from aiogram.types import BufferedInputFile
+        
+        await callback.message.answer_document(
+            document=BufferedInputFile(xlsx_file.getvalue(), filename=filename),
+            caption=f"📊 <b>Поточний звіт</b> ({start_date.strftime('%d.%m')} - {now.strftime('%d.%m')})"
+        )
+    except Exception as e:
+        from bot.services.logger import get_logger
+        get_logger().error(f"Failed to generate XLSX report: {e}", exc_info=True)
+        await callback.answer("❌ Помилка при генерації звіту.", show_alert=True)
+
 # ==================== Reminder History ====================
 
 async def developer_reminder_history_menu(callback: CallbackQuery):
@@ -4111,6 +4375,10 @@ def register_developer_menu_handlers(dp: Dispatcher):
     # Reminder History
     dp.callback_query.register(developer_reminder_history_menu, lambda c: c.data == "dev_reminder_history")
 
+    # XLSX Reports
+    dp.callback_query.register(developer_xlsx_menu, lambda c: c.data == "dev_xlsx_menu")
+    dp.callback_query.register(developer_send_current_report, lambda c: c.data == "dev_xlsx_send_current")
+
     # Users
     dp.callback_query.register(developer_users_menu, lambda c: c.data == "dev_users_menu")
     dp.callback_query.register(developer_list_users, lambda c: c.data == "dev_users_list")
@@ -4167,7 +4435,18 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_materials_full_view, lambda c: c.data and c.data.startswith("dev_mat_full_view|"))
     dp.callback_query.register(developer_pagination_handler, lambda c: c.data and c.data.startswith("dev_pag:")) # NEW
     dp.callback_query.register(developer_material_fix_start, lambda c: c.data and c.data.startswith("dev_mat_fix:"))
+    dp.callback_query.register(developer_material_delete_request, lambda c: c.data and c.data.startswith("dev_mat_del_req:"))
+    dp.callback_query.register(developer_material_delete_confirm, lambda c: c.data and c.data.startswith("dev_mat_del_conf:"))
     dp.message.register(developer_process_fix_page, DeveloperStates.waiting_fix_page)
+    
+    # Complement handlers
+    dp.callback_query.register(developer_material_complement_menu, lambda c: c.data and c.data.startswith("dev_mat_complement|"))
+    dp.callback_query.register(developer_material_complement_start, lambda c: c.data and c.data.startswith("dev_comp_type:"))
+    dp.message.register(developer_process_insert_start_idx, DeveloperStates.waiting_insert_start_idx)
+    dp.message.register(developer_process_insert_end_idx, DeveloperStates.waiting_insert_end_idx)
+    dp.message.register(developer_process_complement_content, DeveloperStates.waiting_complement_content)
+    dp.callback_query.register(developer_material_menu_back, lambda c: c.data == "dev_mat_menu_back")
+    
     dp.callback_query.register(developer_materials_edit_start, lambda c: c.data and c.data.startswith("dev_mat_edit|"))
     dp.message.register(developer_process_material_parts, DeveloperStates.waiting_material_parts)
     dp.message.register(developer_process_material_video, DeveloperStates.waiting_material_video)
