@@ -7,6 +7,7 @@ import pytz
 from typing import List, Dict, Any
 from io import BytesIO
 import openpyxl
+from aiogram import Bot
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
 from database import DB_PATH
