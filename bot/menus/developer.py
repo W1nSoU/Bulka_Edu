@@ -4151,8 +4151,18 @@ async def developer_user_delete_perform(callback: CallbackQuery, state: FSMConte
 
 async def developer_xlsx_menu(callback: CallbackQuery):
     """Меню формування XLSX звіту."""
+    try:
+        await callback.answer()
+    except:
+        pass
+        
+    logger = get_logger()
+    logger.info(f"Button 'XLSX report' clicked by user {callback.from_user.id}")
+    
     if not await _ensure_developer(callback):
         return
+    
+    logger.debug(f"User {callback.from_user.id} passed developer check for XLSX menu")
     
     now = datetime.now(pytz.timezone(TIMEZONE))
     text = (
@@ -4178,6 +4188,9 @@ async def developer_xlsx_menu(callback: CallbackQuery):
 
 async def developer_send_current_report(callback: CallbackQuery):
     """Генерує та надсилає поточний XLSX звіт."""
+    logger = get_logger()
+    logger.info(f"User {callback.from_user.id} requested current XLSX report")
+    
     if not await _ensure_developer(callback):
         return
     
@@ -4365,19 +4378,11 @@ async def developer_dropout_report(callback: CallbackQuery):
 
 
 def register_developer_menu_handlers(dp: Dispatcher):
-    dp.callback_query.register(developer_menu_callback, lambda c: c.data == "developer_menu")
-
-    # Analytics
-    dp.callback_query.register(developer_analytics_menu, lambda c: c.data == "dev_analytics_menu")
-    dp.callback_query.register(developer_daily_digest, lambda c: c.data == "dev_analytics_digest")
-    dp.callback_query.register(developer_dropout_report, lambda c: c.data == "dev_analytics_funnel")
-
-    # Reminder History
-    dp.callback_query.register(developer_reminder_history_menu, lambda c: c.data == "dev_reminder_history")
-
-    # XLSX Reports
+    # XLSX Reports (Priority)
     dp.callback_query.register(developer_xlsx_menu, lambda c: c.data == "dev_xlsx_menu")
     dp.callback_query.register(developer_send_current_report, lambda c: c.data == "dev_xlsx_send_current")
+
+    dp.callback_query.register(developer_menu_callback, lambda c: c.data == "developer_menu")
 
     # Users
     dp.callback_query.register(developer_users_menu, lambda c: c.data == "dev_users_menu")
