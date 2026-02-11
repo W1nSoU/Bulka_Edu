@@ -77,6 +77,12 @@ class BotLogger:
         """Info рівень логування."""
         self.logger.info(message, **kwargs)
     
+    def info_alert(self, message: str):
+        """Надсилає інформаційне сповіщення в Telegram групу."""
+        self.logger.info(f"ALERT: {message}")
+        if self._bot and DEV_CHAT_ID:
+            asyncio.create_task(self._send_telegram_alert(f"ℹ️ <b>INFO</b> | {message}", is_critical=False))
+    
     def warning(self, message: str, **kwargs):
         """Warning рівень логування."""
         self.logger.warning(message, **kwargs)

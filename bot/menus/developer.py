@@ -118,7 +118,7 @@ async def _ensure_developer(callback: CallbackQuery, require_main: bool = False)
         is_dev = is_dev and user_id == MAIN_DEVELOPER_ID
     
     if not is_dev:
-        await callback.answer("⛔️ Доступ заборонено. Ця дія доступна лише головному розробнику.", show_alert=True)
+        await callback.answer("⛔️ Доступ заборонено. Ви не маєте ролі Developer.", show_alert=True)
         return False
     return True
 
@@ -4151,14 +4151,15 @@ async def developer_user_delete_perform(callback: CallbackQuery, state: FSMConte
 
 async def developer_xlsx_menu(callback: CallbackQuery):
     """Меню формування XLSX звіту."""
+    logger = get_logger()
+    # Це сповіщення прийде прямо у ваш чат (групу)
+    logger.info_alert(f"Натиснуто кнопку '📊 XLSX звіт' користувачем {callback.from_user.id} (@{callback.from_user.username or 'no_username'})")
+    
     try:
         await callback.answer()
     except:
         pass
         
-    logger = get_logger()
-    logger.info(f"Button 'XLSX report' clicked by user {callback.from_user.id}")
-    
     if not await _ensure_developer(callback):
         return
     

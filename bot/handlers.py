@@ -2494,6 +2494,11 @@ async def global_error_handler(event: ErrorEvent):
     """
     exception = event.exception
     
+    # Log incoming callback data if available for debugging
+    if hasattr(event, 'update') and event.update.callback_query:
+        from bot.services.logger import get_logger
+        get_logger().debug(f"DEBUG: Incoming callback: {event.update.callback_query.data}")
+    
     if isinstance(exception, TelegramBadRequest):
         error_message = str(exception).lower()
         # Suppress harmless Telegram API exceptions
@@ -2517,6 +2522,12 @@ def register_handlers(dp: Dispatcher):
     # Register global error handler
     dp.error.register(global_error_handler)
 
+    # 1. Developer & Admin menus (Priority)
+    register_developer_menu_handlers(dp)
+    from bot.menus.manager import register_manager_handlers
+    register_manager_handlers(dp)
+
+    # 2. Main handlers
     dp.message.register(start_menu, Command("start"))
     dp.message.register(process_registration_full_name, RegistrationStates.waiting_for_full_name)
     dp.callback_query.register(menu_days, lambda c: c.data == "continue_learning")
@@ -2546,10 +2557,6 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(manager_intern_day_action, lambda c: c.data.startswith("manager_day:"))
     dp.callback_query.register(manager_remind_intern_callback, lambda c: c.data and c.data.startswith("remind_") and c.data.split("_")[-1].isdigit())
     
-    from bot.menus.manager import register_manager_handlers
-    register_manager_handlers(dp)
-    register_developer_menu_handlers(dp)
-
     dp.callback_query.register(remind_topic_self_callback, lambda c: c.data == "remind_topic_self")
     dp.callback_query.register(remind_topic_global_callback, lambda c: c.data == "remind_topic_global")
     dp.callback_query.register(remind_role_select_callback, lambda c: c.data and c.data.startswith("remind_role_select:"))
