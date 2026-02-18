@@ -77,22 +77,22 @@ class BotLogger:
         """Info рівень логування."""
         self.logger.info(message, **kwargs)
     
-    def info_alert(self, message: str):
-        """Надсилає інформаційне сповіщення в Telegram групу."""
-        self.logger.info(f"ALERT: {message}")
+    def info_alert(self, message: str, exc_info: bool = False, is_critical: bool = False):
+        """Надсилає інформаційне/технічне сповіщення в Telegram групу."""
+        self.logger.info(message, exc_info=exc_info) # Логуємо як info
         if self._bot and DEV_CHAT_ID:
-            asyncio.create_task(self._send_telegram_alert(f"ℹ️ <b>INFO</b> | {message}", is_critical=False))
+            asyncio.create_task(self._send_telegram_alert(message, is_critical=is_critical, exc_info=exc_info, is_info=True))
     
     def warning(self, message: str, **kwargs):
         """Warning рівень логування."""
         self.logger.warning(message, **kwargs)
     
-    def error(self, message: str, exc_info: bool = False, send_alert: bool = True, **kwargs):
+    def error(self, message: str, exc_info: bool = True, send_alert: bool = True, **kwargs):
         """Error рівень логування. Автоматично надсилає стислий алерт."""
         self.logger.error(message, exc_info=exc_info, **kwargs)
         
         if send_alert and DEV_CHAT_ID and self._bot:
-            asyncio.create_task(self._send_telegram_alert(message, is_critical=False))
+            asyncio.create_task(self._send_telegram_alert(message, is_critical=False, exc_info=exc_info))
     
     def critical(self, message: str, exc_info: bool = True, send_alert: bool = True, **kwargs):
         """
@@ -102,28 +102,36 @@ class BotLogger:
         self.logger.critical(message, exc_info=exc_info, **kwargs)
         
         if send_alert and DEV_CHAT_ID and self._bot:
-            asyncio.create_task(self._send_telegram_alert(message, is_critical=True))
+            asyncio.create_task(self._send_telegram_alert(message, is_critical=True, exc_info=exc_info))
     
-    async def _send_telegram_alert(self, message: str, is_critical: bool = False):
+    async def _send_telegram_alert(self, message: str, is_critical: bool = False, exc_info: bool = False, is_info: bool = False):
         """Надсилає алерт в Telegram чат розробників."""
         if not DEV_CHAT_ID or not self._bot:
             return
         
         try:
-            # Безпечна конвертація ID (обробка дефолтного "-. ")
-            chat_id_str = str(DEV_CHAT_ID).strip()
-            # Беремо першу частину до пробілу, якщо там є коментарі або сміття
-            chat_id_str = chat_id_str.split()[0]
+            chat_id_str = str(DEV_CHAT_ID).strip().split()[0]
             if not chat_id_str or chat_id_str == "-.":
                 return
             chat_id_int = int(chat_id_str)
 
-            header = "🚨 <b>CRITICAL</b>" if is_critical else "⚠️ <b>Error</b>"
+            if is_critical:
+                header = "🚨 <b>CRITICAL</b>"
+            elif is_info:
+                header = "ℹ️ <b>INFO</b>"
+            else:
+                header = "⚠️ <b>Error</b>"
             
             alert_text = (
                 f"{header} | {self._get_timestamp()}\n"
                 f"{message[:2000]}"
             )
+            
+            # Додаємо traceback, якщо є
+            if exc_info:
+                tb_message = traceback.format_exc()
+                alert_text += f"\n<pre>{tb_message[-1000:]}</pre>" # Обрізаємо для довжини
+            
             await self._bot.send_message(
                 chat_id=chat_id_int,
                 text=alert_text,

@@ -118,7 +118,10 @@ async def _ensure_developer(callback: CallbackQuery, require_main: bool = False)
         is_dev = is_dev and user_id == MAIN_DEVELOPER_ID
     
     if not is_dev:
-        await callback.answer("⛔️ Доступ заборонено. Ви не маєте ролі Developer.", show_alert=True)
+        try:
+            await callback.answer("⛔️ Доступ заборонено. Ви не маєте ролі Developer.", show_alert=True)
+        except Exception:
+            pass
         return False
     return True
 
@@ -4152,18 +4155,18 @@ async def developer_user_delete_perform(callback: CallbackQuery, state: FSMConte
 async def developer_xlsx_menu(callback: CallbackQuery):
     """Меню формування XLSX звіту."""
     logger = get_logger()
-    # Це сповіщення прийде прямо у ваш чат (групу)
     logger.info_alert(f"Натиснуто кнопку '📊 XLSX звіт' користувачем {callback.from_user.id} (@{callback.from_user.username or 'no_username'})")
     
     try:
         await callback.answer()
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to answer callback in developer_xlsx_menu: {e}", exc_info=True)
         
     if not await _ensure_developer(callback):
+        logger.warning(f"User {callback.from_user.id} FAILED developer check for XLSX menu")
         return
     
-    logger.debug(f"User {callback.from_user.id} passed developer check for XLSX menu")
+    logger.debug(f"User {callback.from_user.id} PASSED developer check")
     
     now = datetime.now(pytz.timezone(TIMEZONE))
     text = (
@@ -4174,7 +4177,7 @@ async def developer_xlsx_menu(callback: CallbackQuery):
         "• Кількість нових стажерів\n"
         "• Кількість активних стажерів\n"
         "• Кількість відсіву (не завершили)\n"
-        "• Частота запитів до керівників\n"
+        "• Частка запитів до керівників\n"
         "───────────────────\n"
         "<i>💡 Ви можете отримати звіт за поточний місяць прямо зараз.</i>"
     )
@@ -4184,29 +4187,42 @@ async def developer_xlsx_menu(callback: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")],
     ])
     
-    await _edit_or_answer(callback.message, text, reply_markup=kb)
-    await callback.answer()
+    try:
+        await _edit_or_answer(callback.message, text, reply_markup=kb)
+        logger.debug(f"XLSX menu displayed successfully for user {callback.from_user.id}")
+    except Exception as e:
+        logger.error(f"Failed to display XLSX menu: {e}", exc_info=True)
+        try:
+            await callback.message.answer(text, reply_markup=kb)
+        except Exception as e2:
+            logger.error(f"Fallback also failed: {e2}", exc_info=True)
 
 async def developer_send_current_report(callback: CallbackQuery):
     """Генерує та надсилає поточний XLSX звіт."""
     logger = get_logger()
-    logger.info(f"User {callback.from_user.id} requested current XLSX report")
+    logger.info_alert(f"Натиснуто кнопку '📥 Надіслати поточний звіт' користувачем {callback.from_user.id} (@{callback.from_user.username or 'no_username'})")
     
     if not await _ensure_developer(callback):
         return
     
-    await callback.answer("⏳ Генерую звіт...", show_alert=False)
+    try:
+        await callback.answer("⏳ Генерую звіт...", show_alert=False)
+    except Exception as e:
+        logger.error(f"Failed to answer callback in developer_send_current_report: {e}", exc_info=True)
     
     now = datetime.now(pytz.timezone(TIMEZONE))
     # З 1-го числа поточного місяця
     start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     
     try:
+        logger.debug(f"Getting report data from {start_date} to {now}")
         data = await get_report_data(start_date, now)
         if not data:
-            await callback.answer("❌ За цей період ще немає даних для звіту.", show_alert=True)
+            await callback.message.answer("❌ За цей період ще немає даних для звіту.")
+            logger.info_alert(f"Звіт для {callback.from_user.id} не згенеровано: немає даних.")
             return
-            
+        
+        logger.debug(f"Generating XLSX report with {len(data)} records")
         xlsx_file = generate_xlsx_report(data, start_date, now)
         
         filename = f"Bulka_Report_{start_date.strftime('%Y-%m')}.xlsx"
@@ -4216,10 +4232,13 @@ async def developer_send_current_report(callback: CallbackQuery):
             document=BufferedInputFile(xlsx_file.getvalue(), filename=filename),
             caption=f"📊 <b>Поточний звіт</b> ({start_date.strftime('%d.%m')} - {now.strftime('%d.%m')})"
         )
+        logger.info_alert(f"Звіт успішно надіслано користувачу {callback.from_user.id}.")
     except Exception as e:
-        from bot.services.logger import get_logger
-        get_logger().error(f"Failed to generate XLSX report: {e}", exc_info=True)
-        await callback.answer("❌ Помилка при генерації звіту.", show_alert=True)
+        logger.error(f"Помилка генерації або надсилання XLSX звіту: {e}", exc_info=True)
+        try:
+            await callback.message.answer("❌ Помилка при генерації звіту.")
+        except Exception:
+            pass
 
 # ==================== Reminder History ====================
 
