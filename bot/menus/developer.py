@@ -3,6 +3,7 @@ import sys
 import json
 import aiosqlite
 import html
+import pytz
 from typing import Optional
 from pathlib import Path
 from datetime import datetime # NEW IMPORT
@@ -11,7 +12,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramBadRequest
-from bot.config import MAIN_DEVELOPER_ID, DAYS_TOTAL
+from bot.config import MAIN_DEVELOPER_ID, DAYS_TOTAL, TIMEZONE
 from bot.services.logger import get_logger
 from bot.services.semantic_search import build_and_reset_embeddings
 from database.users import (
@@ -3917,9 +3918,6 @@ async def developer_health_status(callback: CallbackQuery):
     scheduler_icon = "✅" if status["scheduler_healthy"] else "❌"
     reminder_icon = "✅" if status["reminder_healthy"] else "❌"
     
-    from datetime import datetime
-    import pytz
-    from bot.config import TIMEZONE
     from bot.services.health import health_check
     
     now = datetime.now(pytz.timezone(TIMEZONE))
