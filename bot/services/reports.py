@@ -157,14 +157,19 @@ def generate_xlsx_report(data: List[Dict[str, Any]], start_date: datetime, end_d
     # Автоматична ширина колонок
     for col in ws.columns:
         max_length = 0
-        column = col[0].column_letter
+        column = None
         for cell in col:
-            try:
-                if len(str(cell.value)) > max_length:
-                    max_length = len(str(cell.value))
-            except:
-                pass
-        ws.column_dimensions[column].width = max_length + 2
+            # Пропускаємо MergedCell
+            if hasattr(cell, 'column_letter'):
+                if column is None:
+                    column = cell.column_letter
+                try:
+                    if cell.value and len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+        if column:
+            ws.column_dimensions[column].width = max(max_length + 2, 10)
 
     # Зберігаємо в буфер
     output = BytesIO()
