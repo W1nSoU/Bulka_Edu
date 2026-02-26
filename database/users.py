@@ -180,15 +180,16 @@ async def get_all_active_users(days=3):
         return [dict(user) for user in users]
 
 async def get_all_inactive_users(days=3):
-    """Отримує список неактивних стажерів (виключаючи Dev/Керівників)"""
+    """Отримує список неактивних стажерів"""
     cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        query = f"""
-            SELECT u.* FROM users u 
-            WHERE u.last_activity < ? 
-            AND NOT EXISTS (SELECT 1 FROM managers m WHERE m.uid = u.user_id)
-            ORDER BY u.last_activity ASC
+        # Фільтруємо лише стажерів за їх роллю в таблиці users
+        query = """
+            SELECT * FROM users 
+            WHERE role = 'Стажер' 
+            AND last_activity < ? 
+            ORDER BY last_activity ASC
         """
         cursor = await db.execute(query, (cutoff_date,))
         users = await cursor.fetchall()

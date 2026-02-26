@@ -136,11 +136,20 @@ async def _finish_test_successfully(callback: CallbackQuery, state: FSMContext, 
         [InlineKeyboardButton(text="⬅️ Повернутися до блоків навчання", callback_data="continue_learning")]
     ])
     
-    await callback.message.edit_text(
+    success_text = (
         f"🎉 <b>Вітаємо! Тест за День {day} пройдено.</b>\n\n"
-        "Ваш прогрес збережено. Ви можете переходити до наступного дня.",
-        reply_markup=kb
+        "Ваш прогрес збережено. Ви можете переходити до наступного дня."
     )
+
+    if callback.message:
+        try:
+            if callback.message.photo:
+                await callback.message.edit_caption(caption=success_text, reply_markup=kb)
+            else:
+                await callback.message.edit_text(text=success_text, reply_markup=kb)
+        except Exception:
+            await callback.message.answer(success_text, reply_markup=kb)
+            
     await state.clear()
 
 async def complete_day_handler(callback: CallbackQuery, state: FSMContext):

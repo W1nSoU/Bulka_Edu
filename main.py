@@ -165,9 +165,17 @@ async def start_bot():
             skip_updates=True,
             allowed_updates=["message", "callback_query"]
         )
+    except KeyboardInterrupt:
+        print("\n🛑 Бот зупинений вручну")
     except Exception as e:
         logger.critical(f"Bot polling error: {e}", send_alert=True)
         raise
+    finally:
+        await bot.session.close()
+        print("💤 Сесія бота закрита")
 
 if __name__ == "__main__":
-    asyncio.run(start_bot())
+    try:
+        asyncio.run(start_bot())
+    except KeyboardInterrupt:
+        pass

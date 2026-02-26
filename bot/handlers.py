@@ -2511,6 +2511,13 @@ async def global_error_handler(event: ErrorEvent):
         ]):
             return
 
+    # Suppress Windows-specific network errors (WinError 64)
+    error_str = str(exception).lower()
+    if "winerror 64" in error_str or "specified network name is no longer available" in error_str:
+        from bot.services.logger import get_logger
+        get_logger().debug(f"Network transient error suppressed: {exception}")
+        return
+
     # For other errors, we allow the default logger to handle them or log them here if needed.
     from bot.services.logger import get_logger
     import traceback
