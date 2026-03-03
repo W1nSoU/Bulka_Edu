@@ -2511,9 +2511,16 @@ async def global_error_handler(event: ErrorEvent):
         ]):
             return
 
-    # Suppress Windows-specific network errors (WinError 64)
+    # Suppress Windows-specific network errors (WinError 64, 121) and timeouts
     error_str = str(exception).lower()
-    if "winerror 64" in error_str or "specified network name is no longer available" in error_str:
+    if any(msg in error_str for msg in [
+        "winerror 64", 
+        "winerror 121", 
+        "specified network name is no longer available", 
+        "semaphore timeout period has expired",
+        "request timeout error",
+        "timeouterror"
+    ]):
         from bot.services.logger import get_logger
         get_logger().debug(f"Network transient error suppressed: {exception}")
         return

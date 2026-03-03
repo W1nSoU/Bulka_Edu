@@ -2681,12 +2681,15 @@ async def developer_materials_edit_start(callback: CallbackQuery, state: FSMCont
 
 async def developer_process_material_parts(message: Message, state: FSMContext):
     """Collects multiple messages for material content until 'Готово' is received."""
-    text = (message.text or message.caption or "").strip()
+    raw_text = (message.text or message.caption or "").strip()
+    # Cleaner check for 'готово' (handles dots, spaces, case)
+    is_done = raw_text.lower().rstrip('.! ') == 'готово'
+    
     data = await state.get_data()
     material_parts = data.get("material_parts", [])
     confirmation_msg_id = data.get("text_confirmation_msg_id")
 
-    if text.lower() == 'готово':
+    if is_done:
         if not material_parts:
             await message.answer("❌ Ви нічого не надіслали. Ввеведіть контент або скасуйте редагування.")
             return
@@ -2703,7 +2706,7 @@ async def developer_process_material_parts(message: Message, state: FSMContext):
         await _finalize_material_update(message, state, full_content)
     else:
         # Store as object with text and optional photo
-        page = {"text": text}
+        page = {"text": raw_text}
         if message.photo:
             page["photo"] = message.photo[-1].file_id
             
@@ -3223,7 +3226,7 @@ async def developer_process_video_uploads(message: Message, state: FSMContext):
             sent_msg = await message.answer(new_text)
             await state.update_data(video_confirmation_msg_id=sent_msg.message_id)
 
-    elif message.text and message.text.lower() == 'готово':
+    elif message.text and message.text.lower().rstrip('.! ') == 'готово':
         if not video_file_ids:
             await message.answer("❌ Ви не надіслали жодного відео. Надішліть відео або скасуйте редагування.")
             return
@@ -3478,7 +3481,7 @@ async def developer_process_photo_uploads(message: Message, state: FSMContext):
             sent_msg = await message.answer(new_text)
             await state.update_data(photo_confirmation_msg_id=sent_msg.message_id)
 
-    elif message.text and message.text.lower() == 'готово':
+    elif message.text and message.text.lower().rstrip('.! ') == 'готово':
         if not photo_file_ids:
             await message.answer("❌ Ви не надіслали жодного фото. Надішліть фото або скасуйте редагування.")
             return

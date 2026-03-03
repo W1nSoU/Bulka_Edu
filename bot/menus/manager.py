@@ -275,9 +275,9 @@ async def manager_report(callback: CallbackQuery):
     report_text = (
         "📊 <b>Загальний звіт по стажерах</b>\n\n"
         f"👥 Всього: <b>{total}</b>\n"
-        f"🚀 Активні (< 3 дн.): <b>{active}</b>\n"
+        f"🚀 Активні (менше 3 дн.): <b>{active}</b>\n"
         f"🎉 Завершили навчання: <b>{completed}</b>\n"
-        f"😴 Неактивні (≥ 3 дн.): <b>{inactive}</b>\n\n"
+        f"😴 Неактивні (3 дні і більше): <b>{inactive}</b>\n\n"
     )
     
     await _edit_menu_message(

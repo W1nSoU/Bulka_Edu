@@ -122,15 +122,20 @@ class BotLogger:
             else:
                 header = "⚠️ <b>Error</b>"
             
+            # Обрізаємо повідомлення до того, як воно потрапить в HTML
+            safe_message = html.escape(message[:1800])
+            if len(message) > 1800:
+                safe_message += "..."
+
             alert_text = (
                 f"{header} | {self._get_timestamp()}\n"
-                f"{message[:2000]}"
+                f"{safe_message}"
             )
             
-            # Додаємо traceback, якщо є
+            # Додаємо traceback окремо в тег pre
             if exc_info:
-                tb_message = traceback.format_exc()
-                alert_text += f"\n<pre>{tb_message[-1000:]}</pre>" # Обрізаємо для довжини
+                tb_message = html.escape(traceback.format_exc()[-1000:])
+                alert_text += f"\n\n<b>Traceback:</b>\n<pre>{tb_message}</pre>"
             
             await self._bot.send_message(
                 chat_id=chat_id_int,

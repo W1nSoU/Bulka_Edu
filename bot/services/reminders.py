@@ -307,7 +307,7 @@ async def auto_reminder_loop(bot: Bot) -> None:
 
 
 async def send_manager_lagging_report(bot: Bot, manager_id: int, interns: list) -> bool:
-    """Sends a daily report to manager about lagging interns."""
+    """Sends a daily report to manager about lagging interns. Retries on network errors."""
     if not interns:
         return False
         
@@ -322,13 +322,24 @@ async def send_manager_lagging_report(bot: Bot, manager_id: int, interns: list) 
         [InlineKeyboardButton(text="👌 Зрозуміло", callback_data="mgr_dismiss_report")]
     ])
     
-    try:
-        await bot.send_message(manager_id, text, reply_markup=kb, parse_mode="HTML")
-        return True
-    except Exception as e:
-        from bot.services.logger import get_logger
-        get_logger().error(f"Failed to send lagging report to manager {manager_id}: {e}", exc_info=True)
-        return False
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            await bot.send_message(manager_id, text, reply_markup=kb, parse_mode="HTML")
+            return True
+        except Exception as e:
+            error_str = str(e).lower()
+            # Якщо це мережевий збій Windows — пробуємо ще раз
+            if attempt < max_retries - 1 and any(msg in error_str for msg in ["winerror 64", "winerror 121", "semaphore", "network name"]):
+                from bot.services.logger import get_logger
+                get_logger().debug(f"Attempt {attempt+1} failed for manager {manager_id} (network error). Retrying in 2s...")
+                await asyncio.sleep(2)
+                continue
+                
+            from bot.services.logger import get_logger
+            get_logger().error(f"Failed to send lagging report to manager {manager_id}: {e}", exc_info=True)
+            return False
+    return False
 
 
 async def manager_daily_report_loop(bot: Bot) -> None:

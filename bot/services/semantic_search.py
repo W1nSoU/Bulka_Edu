@@ -177,9 +177,15 @@ async def build_and_reset_embeddings():
         print("⚠️ No text-based materials found to build index.")
         return
 
-    model = SentenceTransformer(DEFAULT_MODEL_NAME)
-    embeddings = model.encode(documents, convert_to_numpy=True, normalize_embeddings=True)
-    embeddings = embeddings.astype("float32")
+    # Use a separate thread for heavy CPU work to avoid blocking the bot's event loop
+    loop = asyncio.get_event_loop()
+    
+    def _run_encoding():
+        model = SentenceTransformer(DEFAULT_MODEL_NAME)
+        embeddings = model.encode(documents, convert_to_numpy=True, normalize_embeddings=True)
+        return embeddings.astype("float32")
+
+    embeddings = await loop.run_in_executor(None, _run_encoding)
 
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatIP(dimension)
