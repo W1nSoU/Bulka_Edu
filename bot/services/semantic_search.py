@@ -34,7 +34,14 @@ _INDEX = None
 _META: Optional[List[dict]] = None
 _MODEL = None
 _MODEL_NAME = DEFAULT_MODEL_NAME
-_LOCK = asyncio.Lock()
+_LOCK: Optional[asyncio.Lock] = None
+
+
+def _get_lock() -> asyncio.Lock:
+    global _LOCK
+    if _LOCK is None:
+        _LOCK = asyncio.Lock()
+    return _LOCK
 
 
 class SemanticSearchResult(TypedDict, total=False):
@@ -92,7 +99,7 @@ async def semantic_search(query: str, limit: int = 5) -> List[SemanticSearchResu
     if not normalized_query or limit <= 0:
         return []
 
-    async with _LOCK:
+    async with _get_lock():
         await _load_resources()
 
     if not _INDEX or _META is None or _MODEL is None:
@@ -125,7 +132,7 @@ async def semantic_search(query: str, limit: int = 5) -> List[SemanticSearchResu
 async def reset_semantic_search_index():
     """Forces the next search to reload the index from disk."""
     global _INDEX, _META, _MODEL
-    async with _LOCK:
+    async with _get_lock():
         _INDEX = None
         _META = None
         _MODEL = None

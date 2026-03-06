@@ -132,6 +132,12 @@ async def delete_user(user_id):
         await db.execute("DELETE FROM progress WHERE user_id = ?", (user_id,))
         await db.commit()
 
+async def update_user_role(user_id: int, new_role: str) -> None:
+    """Оновлює статус користувача (status), не змінюючи посаду (role)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET status = ? WHERE user_id = ?", (new_role, user_id))
+        await db.commit()
+
 async def get_user_details(user_id):
     """Отримує детальну інформацію про користувача"""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -168,12 +174,11 @@ async def get_all_active_users(days=3):
     cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        # Використовуємо NOT EXISTS для перевірки, що користувача немає в таблиці managers (де лежать Dev та Керівники)
-        query = f"""
-            SELECT u.* FROM users u 
-            WHERE u.last_activity >= ? 
-            AND NOT EXISTS (SELECT 1 FROM managers m WHERE m.uid = u.user_id)
-            ORDER BY u.last_activity DESC
+        query = """
+            SELECT * FROM users
+            WHERE role = 'Стажер'
+            AND (last_activity >= ? OR last_activity IS NULL)
+            ORDER BY last_activity DESC
         """
         cursor = await db.execute(query, (cutoff_date,))
         users = await cursor.fetchall()
@@ -195,6 +200,34 @@ async def get_all_inactive_users(days=3):
         users = await cursor.fetchall()
         return [dict(user) for user in users]
 
+async def get_all_interns() -> list:
+    """Повертає всіх стажерів — користувачів з users, які не є керівниками/HR/Dev і не стали Працівниками."""
+    async with aiosqlite.connect(MANAGERS_DB_PATH) as mdb:
+        cur = await mdb.execute("SELECT uid FROM managers")
+        privileged_ids = {row[0] for row in await cur.fetchall()}
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT user_id FROM hr_users")
+        hr_ids = {row[0] for row in await cur.fetchall()}
+
+    privileged_ids |= hr_ids
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM users WHERE (status IS NULL OR status != 'Працівник') ORDER BY full_name ASC")
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows if r["user_id"] not in privileged_ids]
+
+async def get_all_workers() -> list:
+    """Повертає всіх працівників (status = 'Працівник'), сортуючи за ПІБ."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM users WHERE status = 'Працівник' ORDER BY full_name ASC"
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
 async def get_interns_in_progress_for_manager(manager_id, active_only=True):
     """
     Отримує список стажерів, які не завершили навчання.
@@ -209,7 +242,7 @@ async def get_interns_in_progress_for_manager(manager_id, active_only=True):
         # Базовий запит для стажерів цього керівника
         query = "SELECT * FROM users WHERE manager_id = ?"
         if active_only:
-            query += " AND last_activity >= ?"
+            query += " AND (last_activity >= ? OR last_activity IS NULL)"
             params = (manager_id, cutoff_date)
         else:
             params = (manager_id,)

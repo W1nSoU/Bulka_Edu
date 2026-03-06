@@ -5,10 +5,11 @@ from aiogram.fsm.context import FSMContext
 from bot.state import TestStates, initialize_user_progress, user_progress
 from bot.services.testing_service import get_test_data, render_test_question
 from database.users import update_progress, get_user_details
-from bot.services.reminders import notify_manager_test_failed
+from bot.services.reminders import notify_manager_test_failed, notify_manager_training_completed
 import aiosqlite
 from database import DB_PATH
 from datetime import datetime
+from bot.config import DAYS_TOTAL
 
 async def start_test_handler(callback: CallbackQuery, state: FSMContext):
     """Starts the test for the given day."""
@@ -132,6 +133,13 @@ async def _finish_test_successfully(callback: CallbackQuery, state: FSMContext, 
     
     await callback.answer("Тест успішно пройдено! 🎉", show_alert=True)
     
+    # Notify manager if this was the last training day
+    if day >= DAYS_TOTAL:
+        try:
+            await notify_manager_training_completed(callback.bot, user_id)
+        except Exception:
+            pass
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Повернутися до блоків навчання", callback_data="continue_learning")]
     ])

@@ -22,6 +22,8 @@ from database.users import (
     get_users_by_full_name, # NEW
     get_all_active_users,
     get_all_inactive_users,
+    get_all_interns,
+    get_all_workers,
     get_users_by_city,
     delete_user,
     register_user,
@@ -492,6 +494,10 @@ async def developer_remove_dev(callback: CallbackQuery, state: FSMContext):
 def _users_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
+            InlineKeyboardButton(text="🎓 Стажери", callback_data="dev_users_interns"),
+            InlineKeyboardButton(text="👷 Працівники", callback_data="dev_users_workers"),
+        ],
+        [
             InlineKeyboardButton(text="🚀 Активні стажери", callback_data="dev_users_active"),
             InlineKeyboardButton(text="😴 Неактивні", callback_data="dev_users_inactive"),
         ],
@@ -614,7 +620,7 @@ async def developer_users_menu(callback: CallbackQuery):
     await callback.answer()
 
 
-async def _developer_show_users_list(callback: CallbackQuery, users: list, title: str, mode: str, page: int = 0):
+async def _developer_show_users_list(callback: CallbackQuery, users: list, title: str, mode: str, page: int = 0, show_day: bool = True):
     if not users:
         await _edit_or_answer(callback.message, f"{title}\n\nСписок порожній.", reply_markup=_users_menu_keyboard())
         try:
@@ -662,8 +668,8 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
         e_job = html.escape(job_title)
         e_shop = html.escape(shop_short)
         
-        # Формуємо рядок: день показуємо тільки якщо це не Dev/Керівник
-        if display_role in ["Dev", "Керівник"]:
+        # Формуємо рядок: день показуємо тільки якщо show_day=True і це не Dev/Керівник/Працівник
+        if not show_day or display_role in ["Dev", "Керівник"] or user.get("status") == "Працівник":
             info_line = f"   @{e_username} | Посада: <b>{e_job}</b> | {e_shop}"
         else:
             info_line = f"   @{e_username} | Посада: <b>{e_job}</b> | {e_shop} | {current_block} день"
@@ -681,6 +687,11 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
         row.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"dev_users_pag:{mode}:{curr_page + 1}"))
     if row:
         pagination_buttons.append(row)
+
+    if mode == "interns":
+        pagination_buttons.append([InlineKeyboardButton(text="📥 Вивантажити список", callback_data="dev_interns_export_xlsx")])
+    elif mode == "workers":
+        pagination_buttons.append([InlineKeyboardButton(text="📥 Вивантажити список", callback_data="dev_workers_export_xlsx")])
 
     pagination_buttons.append([InlineKeyboardButton(text="⬅️ До меню користувачів", callback_data="dev_users_menu")])
     
@@ -708,6 +719,143 @@ async def developer_inactive_users(callback: CallbackQuery, page: int = 0):
     if not await _ensure_developer(callback): return
     users = await get_all_inactive_users(days=3)
     await _developer_show_users_list(callback, users, "😴 <b>Неактивні стажери</b>", "inactive", page)
+
+async def developer_list_interns(callback: CallbackQuery, page: int = 0):
+    if not await _ensure_developer(callback): return
+    users = await get_all_interns()
+    await _developer_show_users_list(callback, users, "🎓 <b>Стажери</b>", "interns", page, show_day=True)
+
+async def developer_list_workers(callback: CallbackQuery, page: int = 0):
+    if not await _ensure_developer(callback): return
+    users = await get_all_workers()
+    await _developer_show_users_list(callback, users, "👷 <b>Працівники</b>", "workers", page, show_day=False)
+
+async def developer_interns_export_xlsx(callback: CallbackQuery):
+    """Вивантажує список усіх стажерів у xlsx з колонками Ім'я / День / Магазин / Керівник."""
+    if not await _ensure_developer(callback): return
+
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from aiogram.types import BufferedInputFile
+
+    users = await get_all_interns()
+
+    # Збираємо імена керівників одним проходом (кешуємо щоб не дублювати запити)
+    manager_cache: dict = {}
+    for user in users:
+        mid = user.get("manager_id")
+        if mid and mid not in manager_cache:
+            mgr = await get_manager_by_uid(mid)
+            if mgr:
+                manager_cache[mid] = mgr.get("full_name") or mgr.get("username") or str(mid)
+            else:
+                # Fallback: developer може бути тільки в таблиці users
+                fallback = await get_user_details(mid)
+                manager_cache[mid] = (fallback.get("full_name") or fallback.get("username") or str(mid)) if fallback else str(mid)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Стажери"
+
+    # Заголовки
+    headers = ["Ім'я", "День", "Магазин", "Керівник"]
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(fill_type="solid", fgColor="4472C4")
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    # Дані
+    for row_idx, user in enumerate(users, start=2):
+        shop_full = user.get("shop") or ""
+        shop_short = shop_full.split(" ")[0] if shop_full else "—"
+        manager_name = manager_cache.get(user.get("manager_id"), "—")
+        ws.cell(row=row_idx, column=1, value=user.get("full_name") or user.get("username") or "—")
+        ws.cell(row=row_idx, column=2, value=user.get("current_block") or 1)
+        ws.cell(row=row_idx, column=3, value=shop_short)
+        ws.cell(row=row_idx, column=4, value=manager_name)
+
+    # Ширина колонок
+    ws.column_dimensions["A"].width = 35
+    ws.column_dimensions["B"].width = 8
+    ws.column_dimensions["C"].width = 12
+    ws.column_dimensions["D"].width = 30
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    await callback.message.answer_document(
+        document=BufferedInputFile(buf.getvalue(), filename="Стажери.xlsx"),
+        caption=f"📋 <b>Список стажерів</b> — {len(users)} осіб",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+async def developer_workers_export_xlsx(callback: CallbackQuery):
+    """Вивантажує список усіх працівників у xlsx з колонками Ім'я / Магазин / Керівник."""
+    if not await _ensure_developer(callback): return
+
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from aiogram.types import BufferedInputFile
+
+    users = await get_all_workers()
+
+    manager_cache: dict = {}
+    for user in users:
+        mid = user.get("manager_id")
+        if mid and mid not in manager_cache:
+            mgr = await get_manager_by_uid(mid)
+            if mgr:
+                manager_cache[mid] = mgr.get("full_name") or mgr.get("username") or str(mid)
+            else:
+                fallback = await get_user_details(mid)
+                manager_cache[mid] = (fallback.get("full_name") or fallback.get("username") or str(mid)) if fallback else str(mid)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Працівники"
+
+    headers = ["Ім'я", "Посада", "Магазин", "Керівник"]
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(fill_type="solid", fgColor="217346")
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    for row_idx, user in enumerate(users, start=2):
+        shop_full = user.get("shop") or ""
+        shop_short = shop_full.split(" ")[0] if shop_full else "—"
+        manager_name = manager_cache.get(user.get("manager_id"), "—")
+        raw_role = user.get("role") or ""
+        job_title = raw_role if raw_role and raw_role != "Працівник" else "—"
+        ws.cell(row=row_idx, column=1, value=user.get("full_name") or user.get("username") or "—")
+        ws.cell(row=row_idx, column=2, value=job_title)
+        ws.cell(row=row_idx, column=3, value=shop_short)
+        ws.cell(row=row_idx, column=4, value=manager_name)
+
+    ws.column_dimensions["A"].width = 35
+    ws.column_dimensions["B"].width = 25
+    ws.column_dimensions["C"].width = 12
+    ws.column_dimensions["D"].width = 30
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    await callback.message.answer_document(
+        document=BufferedInputFile(buf.getvalue(), filename="Працівники.xlsx"),
+        caption=f"👷 <b>Список працівників</b> — {len(users)} осіб",
+        parse_mode="HTML",
+    )
+    await callback.answer()
 
 async def developer_users_by_city_menu(callback: CallbackQuery):
     if not await _ensure_developer(callback): return
@@ -762,6 +910,10 @@ async def developer_users_pagination_handler(callback: CallbackQuery):
         await developer_active_users(callback, page)
     elif mode == "inactive":
         await developer_inactive_users(callback, page)
+    elif mode == "interns":
+        await developer_list_interns(callback, page)
+    elif mode == "workers":
+        await developer_list_workers(callback, page)
     else:
         await developer_list_users(callback, page)
 
@@ -3903,9 +4055,28 @@ async def developer_tokens_cleanup(callback: CallbackQuery):
         return
     
     count = await cleanup_expired_tokens()
-    
     await callback.answer(f"Оброблено {count} токенів", show_alert=True)
-    await developer_tokens_menu(callback)
+
+    # Оновлюємо меню зі свіжою статистикою (без повторного callback.answer)
+    stats = await get_token_stats()
+    text = (
+        "🎟 <b>УПРАВЛІННЯ ТОКЕНАМИ</b>\n"
+        "───────────────────\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"• Активні (діючі): <b>{stats.get('active', 0)}</b>\n"
+        f"• Використані: <b>{stats.get('used', 0)}</b>\n"
+        f"• Прострочені: <b>{stats.get('expired', 0)}</b>\n"
+        f"• Всього в базі: <b>{stats.get('total', 0)}</b>\n\n"
+        f"⚙️ <b>Функції:</b>\n"
+        f"🧹 <b>Очищення прострочених:</b> видаляє з бази даних усі посилання-запрошення, термін дії яких (24 години) вже закінчився і які так і не були використані.\n"
+        "───────────────────\n"
+        "<i>💡 Це допомагає підтримувати базу даних чистою та видаляти неактуальне сміття.</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧹 Очистити прострочені", callback_data="dev_tokens_cleanup")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")],
+    ])
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
 
 
 # ==================== Health Status ====================
@@ -4405,6 +4576,10 @@ def register_developer_menu_handlers(dp: Dispatcher):
     # Users
     dp.callback_query.register(developer_users_menu, lambda c: c.data == "dev_users_menu")
     dp.callback_query.register(developer_list_users, lambda c: c.data == "dev_users_list")
+    dp.callback_query.register(developer_list_interns, lambda c: c.data == "dev_users_interns")
+    dp.callback_query.register(developer_list_workers, lambda c: c.data == "dev_users_workers")
+    dp.callback_query.register(developer_interns_export_xlsx, lambda c: c.data == "dev_interns_export_xlsx")
+    dp.callback_query.register(developer_workers_export_xlsx, lambda c: c.data == "dev_workers_export_xlsx")
     
     # Active/Inactive users
     dp.callback_query.register(developer_active_users, lambda c: c.data == "dev_users_active")
@@ -4560,3 +4735,9 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_remove_manager, lambda c: c.data and c.data.startswith("mgr_remove:"))
     dp.callback_query.register(manager_cancel_add, lambda c: c.data == "mgr_cancel_add")
     dp.callback_query.register(manager_team_back, lambda c: c.data == "mgr_team_back")
+
+    # Analytics
+    dp.callback_query.register(developer_analytics_menu, lambda c: c.data == "dev_analytics_menu")
+    dp.callback_query.register(developer_daily_digest, lambda c: c.data == "dev_analytics_digest")
+    dp.callback_query.register(developer_dropout_report, lambda c: c.data == "dev_analytics_funnel")
+    dp.callback_query.register(developer_reminder_history_menu, lambda c: c.data == "dev_reminder_history")

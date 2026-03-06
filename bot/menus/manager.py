@@ -20,6 +20,7 @@ from database.users import (
     register_user,
     set_intern_extra,
     delete_user,
+    update_user_role,
     get_user_progress
 )
 from bot.services.developer_actions import get_user_days_report
@@ -655,6 +656,71 @@ async def manager_dismiss_report(callback: CallbackQuery):
         pass
     await callback.answer()
 
+async def intern_promote_handler(callback: CallbackQuery):
+    """Переводить стажера в статус Працівника."""
+    try:
+        intern_id = int(callback.data.split("_")[-1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка даних.", show_alert=True)
+        return
+
+    intern = await get_user_details(intern_id)
+    if not intern:
+        await callback.answer("Стажера не знайдено в системі.", show_alert=True)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        return
+
+    await update_user_role(intern_id, "Працівник")
+    full_name = intern.get("full_name") or intern.get("username") or f"ID {intern_id}"
+
+    # Повідомлення керівнику
+    try:
+        await callback.message.edit_text(
+            f"✅ <b>{full_name}</b> тепер має статус <b>Працівника</b>.\n\nВітаємо з новим членом команди! 🎉",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+    # Вітальне повідомлення стажеру
+    try:
+        congrats_text = (
+            "🎉 <b>Вітаємо! Ви стали Працівником Bulka!</b>\n\n"
+            "Ваш керівник підтвердив, що ви готові розпочати свій шлях у нашій команді.\n\n"
+            "🍞 Ласкаво просимо до родини Bulka — тут починається ваша справжня кар'єра!\n\n"
+            "<i>Бажаємо вам натхнення, зростання та яскравих успіхів!</i> 🌟"
+        )
+        await callback.bot.send_message(intern_id, congrats_text, parse_mode="HTML")
+    except Exception:
+        pass
+
+    await callback.answer("Статус оновлено ✅")
+
+async def intern_dismiss_handler(callback: CallbackQuery):
+    """Видаляє стажера з системи після завершення навчання."""
+    try:
+        intern_id = int(callback.data.split("_")[-1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка даних.", show_alert=True)
+        return
+
+    intern = await get_user_details(intern_id)
+    full_name = intern.get("full_name") or intern.get("username") or f"ID {intern_id}" if intern else f"ID {intern_id}"
+
+    await delete_user(intern_id)
+
+    try:
+        await callback.message.edit_text(
+            f"❌ <b>{full_name}</b> видалено з системи.",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+    await callback.answer("Видалено ❌")
+
 # --- Register ---
 def register_manager_handlers(dp: Dispatcher):
     dp.callback_query.register(manager_menu, lambda c: c.data == "manager_menu")
@@ -662,6 +728,10 @@ def register_manager_handlers(dp: Dispatcher):
     # Daily Report Actions
     dp.callback_query.register(manager_remind_all_lagging, lambda c: c.data == "mgr_remind_all_lagging")
     dp.callback_query.register(manager_dismiss_report, lambda c: c.data == "mgr_dismiss_report")
+
+    # Training completion — promote / dismiss
+    dp.callback_query.register(intern_promote_handler, lambda c: c.data and c.data.startswith("intern_promote_"))
+    dp.callback_query.register(intern_dismiss_handler, lambda c: c.data and c.data.startswith("intern_dismiss_"))
     
     # Lists
     dp.callback_query.register(manager_active_interns, lambda c: c.data == "mgr_active")

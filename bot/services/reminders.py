@@ -395,4 +395,41 @@ __all__ = [
     "send_intern_reminder",
     "send_day3_question",
     "notify_manager_test_failed",
+    "notify_manager_training_completed",
 ]
+
+async def notify_manager_training_completed(bot: Bot, intern_id: int) -> bool:
+    """
+    Надсилає керівнику повідомлення про завершення навчання стажером.
+    Кнопки: ✅ «Так, готовий» (переводить у Працівника) та ❌ «Видалити».
+    """
+    intern = await get_user_details(intern_id)
+    if not intern:
+        return False
+
+    manager_id = intern.get("manager_id")
+    if not manager_id:
+        return False
+
+    full_name = intern.get("full_name") or intern.get("username") or f"ID {intern_id}"
+
+    text = (
+        f"🎓 <b>Стажер {full_name} завершив навчання!</b>\n\n"
+        f"Як гадаєте, чи готовий він розпочати свій шлях та кар'єру в Bulka?\n\n"
+        f"<i>Натискаючи, ви підтверджуєте перехід стажера в статус Працівника.</i>"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Так, готовий", callback_data=f"intern_promote_{intern_id}"),
+            InlineKeyboardButton(text="❌ Видалити", callback_data=f"intern_dismiss_{intern_id}"),
+        ]
+    ])
+
+    try:
+        await bot.send_message(manager_id, text, reply_markup=kb, parse_mode="HTML")
+        return True
+    except Exception as exc:
+        from bot.services.logger import get_logger
+        get_logger().error(f"Failed to notify manager {manager_id} about intern {intern_id} completion: {exc}")
+        return False

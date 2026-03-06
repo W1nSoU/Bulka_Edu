@@ -9,3 +9,17 @@ data/
 .env
 # Ignore local environment variables
 *.log
+
+# Security secrets
+security_functions/.master_secret
+security_functions/master_keys.db
+private_server/.env
+private_server/activation_log.db
+security_functions/.license
+security_functions/.salt
+security_functions/guard.log
+security_functions/.chksum
+# _destruct.py is intentionally committed — it's part of the protection
+dist/
+build/
+*.spec.bak

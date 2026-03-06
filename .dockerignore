@@ -1,0 +1,27 @@
+.git
+.gitignore
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.DS_Store
+*.db
+*.log
+
+# Security secrets — NEVER in image
+security_functions/.license
+security_functions/.salt
+security_functions/.master_secret
+security_functions/.chksum
+security_functions/master_keys.db
+security_functions/guard.log
+private_server/.env
+private_server/activation_log.db
+
+# Dev / test
+test_*.py
+diagnose_health.py
+Plans/
+*.md
+img/

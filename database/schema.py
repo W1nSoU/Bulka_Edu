@@ -56,6 +56,12 @@ async def init_db():
             await db.execute("ALTER TABLE users ADD COLUMN day3_question_sent BOOLEAN DEFAULT 0")
         if 'shop' not in columns:
             await db.execute("ALTER TABLE users ADD COLUMN shop TEXT DEFAULT NULL")
+        if 'status' not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT NULL")
+        # Міграція: старі записи де role='Працівник' → перенести в status
+        await db.execute(
+            "UPDATE users SET status = 'Працівник' WHERE role = 'Працівник' AND (status IS NULL OR status = '')"
+        )
 
         # Таблиця для відстеження розмов "стажер-керівник"
         await db.execute('''

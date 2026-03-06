@@ -7,3 +7,8 @@ httpx
 openpyxl
 sentence-transformers
 faiss-cpu
+cryptography
+psutil
+fastapi
+uvicorn[standard]
+pyinstaller

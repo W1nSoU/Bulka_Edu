@@ -6,6 +6,7 @@
 import logging
 import sys
 import asyncio
+import html
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
