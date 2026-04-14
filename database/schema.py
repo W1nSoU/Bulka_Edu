@@ -58,6 +58,8 @@ async def init_db():
             await db.execute("ALTER TABLE users ADD COLUMN shop TEXT DEFAULT NULL")
         if 'status' not in columns:
             await db.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT NULL")
+        if 'worker_since' not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN worker_since TIMESTAMP")
         # Міграція: старі записи де role='Працівник' → перенести в status
         await db.execute(
             "UPDATE users SET status = 'Працівник' WHERE role = 'Працівник' AND (status IS NULL OR status = '')"
@@ -107,6 +109,23 @@ async def init_db():
             user_id INTEGER NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+        ''')
+
+        # Історія ключових подій навчального процесу
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS training_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL, -- added | promoted | rejected
+            event_at TIMESTAMP NOT NULL,
+            actor_id INTEGER,
+            full_name TEXT,
+            username TEXT,
+            city TEXT,
+            role TEXT,
+            manager_id INTEGER,
+            UNIQUE(user_id, event_type)
         )
         ''')
         

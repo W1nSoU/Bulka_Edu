@@ -6,6 +6,9 @@ from bot.config import TIMEZONE
 from . import DB_PATH
 from database.managers import MANAGERS_DB_PATH, get_manager_by_uid
 
+def _now_str() -> str:
+    return datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
+
 async def register_user(user_id, username=None, full_name=None):
     """Реєструє нового користувача або оновлює дані існуючого"""
     now = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
@@ -124,6 +127,14 @@ async def set_intern_extra(user_id, manager_id, role, city, shop=None):
         )
         await db.commit()
         # print(f"Оновлено дані стажера: {user_id}, керівник: {manager_id}, посада: {role}, місто: {city}, магазин: {shop}")
+    await log_training_event(
+        user_id=user_id,
+        event_type="added",
+        actor_id=manager_id,
+        city=city,
+        role=role,
+        manager_id=manager_id,
+    )
 
 async def delete_user(user_id):
     """Видаляє користувача та його прогрес з бази"""
@@ -132,11 +143,41 @@ async def delete_user(user_id):
         await db.execute("DELETE FROM progress WHERE user_id = ?", (user_id,))
         await db.commit()
 
-async def update_user_role(user_id: int, new_role: str) -> None:
+async def update_user_role(user_id: int, new_role: str, actor_id: Optional[int] = None) -> None:
     """Оновлює статус користувача (status), не змінюючи посаду (role)."""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET status = ? WHERE user_id = ?", (new_role, user_id))
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT user_id, username, full_name, city, role, manager_id, status FROM users WHERE user_id = ?",
+            (user_id,),
+        )
+        user = await cursor.fetchone()
+        if not user:
+            return
+        if user["status"] == new_role:
+            return
+
+        if new_role == "Працівник":
+            now = _now_str()
+            await db.execute(
+                "UPDATE users SET status = ?, worker_since = COALESCE(worker_since, ?) WHERE user_id = ?",
+                (new_role, now, user_id),
+            )
+        else:
+            await db.execute("UPDATE users SET status = ? WHERE user_id = ?", (new_role, user_id))
         await db.commit()
+
+    if new_role == "Працівник":
+        await log_training_event(
+            user_id=user_id,
+            event_type="promoted",
+            actor_id=actor_id,
+            full_name=user["full_name"],
+            username=user["username"],
+            city=user["city"],
+            role=user["role"],
+            manager_id=user["manager_id"],
+        )
 
 async def get_user_details(user_id):
     """Отримує детальну інформацію про користувача"""
@@ -159,7 +200,7 @@ async def get_manager_interns(manager_id):
 
         cursor = await db.execute(
 
-            "SELECT * FROM users WHERE manager_id = ? ORDER BY last_activity DESC",
+            "SELECT * FROM users WHERE manager_id = ? AND (status IS NULL OR status != 'Працівник') ORDER BY last_activity DESC",
 
             (manager_id,)
 
@@ -172,45 +213,57 @@ async def get_manager_interns(manager_id):
 async def get_all_active_users(days=3):
     """Отримує список активних стажерів (виключаючи Dev/Керівників)"""
     cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    privileged_ids = await _get_privileged_user_ids()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         query = """
             SELECT * FROM users
-            WHERE role = 'Стажер'
+            WHERE (status IS NULL OR status != 'Працівник')
             AND (last_activity >= ? OR last_activity IS NULL)
             ORDER BY last_activity DESC
         """
         cursor = await db.execute(query, (cutoff_date,))
         users = await cursor.fetchall()
-        return [dict(user) for user in users]
+        return [dict(user) for user in users if user["user_id"] not in privileged_ids]
 
 async def get_all_inactive_users(days=3):
     """Отримує список неактивних стажерів"""
+    from bot.config import DAYS_TOTAL
     cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    privileged_ids = await _get_privileged_user_ids()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        # Фільтруємо лише стажерів за їх роллю в таблиці users
         query = """
             SELECT * FROM users 
-            WHERE role = 'Стажер' 
+            WHERE (status IS NULL OR status != 'Працівник')
             AND last_activity < ? 
+            AND user_id NOT IN (
+                SELECT user_id
+                FROM progress
+                WHERE completed = 1
+                GROUP BY user_id
+                HAVING COUNT(day) >= ?
+            )
             ORDER BY last_activity ASC
         """
-        cursor = await db.execute(query, (cutoff_date,))
+        cursor = await db.execute(query, (cutoff_date, DAYS_TOTAL))
         users = await cursor.fetchall()
-        return [dict(user) for user in users]
+        return [dict(user) for user in users if user["user_id"] not in privileged_ids]
 
-async def get_all_interns() -> list:
-    """Повертає всіх стажерів — користувачів з users, які не є керівниками/HR/Dev і не стали Працівниками."""
+async def _get_privileged_user_ids() -> set[int]:
     async with aiosqlite.connect(MANAGERS_DB_PATH) as mdb:
         cur = await mdb.execute("SELECT uid FROM managers")
         privileged_ids = {row[0] for row in await cur.fetchall()}
 
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT user_id FROM hr_users")
-        hr_ids = {row[0] for row in await cur.fetchall()}
+        privileged_ids |= {row[0] for row in await cur.fetchall()}
 
-    privileged_ids |= hr_ids
+    return privileged_ids
+
+async def get_all_interns() -> list:
+    """Повертає всіх стажерів — користувачів з users, які не є керівниками/HR/Dev і не стали Працівниками."""
+    privileged_ids = await _get_privileged_user_ids()
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -240,7 +293,7 @@ async def get_interns_in_progress_for_manager(manager_id, active_only=True):
         db.row_factory = aiosqlite.Row
         
         # Базовий запит для стажерів цього керівника
-        query = "SELECT * FROM users WHERE manager_id = ?"
+        query = "SELECT * FROM users WHERE manager_id = ? AND (status IS NULL OR status != 'Працівник')"
         if active_only:
             query += " AND (last_activity >= ? OR last_activity IS NULL)"
             params = (manager_id, cutoff_date)
@@ -273,7 +326,7 @@ async def get_inactive_interns_for_manager(manager_id, days=3):
         db.row_factory = aiosqlite.Row
         # Тільки ті, хто не заходив давно
         cursor = await db.execute(
-            "SELECT * FROM users WHERE manager_id = ? AND last_activity < ? ORDER BY last_activity ASC",
+            "SELECT * FROM users WHERE manager_id = ? AND (status IS NULL OR status != 'Працівник') AND last_activity < ? ORDER BY last_activity ASC",
             (manager_id, cutoff_date)
         )
         interns = await cursor.fetchall()
@@ -290,6 +343,37 @@ async def get_inactive_interns_for_manager(manager_id, days=3):
                 inactive.append(dict(intern))
         
         return inactive
+
+async def get_inactive_interns_for_auto_delete(days: int = 3) -> list[dict]:
+    """
+    Повертає стажерів для автоматичного видалення:
+    неактивні >= days, не є Працівниками, мають керівника, не завершили навчання.
+    """
+    from bot.config import DAYS_TOTAL
+    cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    privileged_ids = await _get_privileged_user_ids()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT * FROM users
+            WHERE manager_id IS NOT NULL
+              AND (status IS NULL OR status != 'Працівник')
+              AND last_activity IS NOT NULL
+              AND last_activity < ?
+              AND user_id NOT IN (
+                    SELECT user_id
+                    FROM progress
+                    WHERE completed = 1
+                    GROUP BY user_id
+                    HAVING COUNT(day) >= ?
+              )
+            ORDER BY last_activity ASC
+            """,
+            (cutoff_date, DAYS_TOTAL),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows if r["user_id"] not in privileged_ids]
 
 async def update_last_activity(user_id):
     """Оновлює час останньої активності користувача"""
@@ -539,3 +623,39 @@ async def get_users_by_full_name(full_name: str) -> list[dict]:
         users = await cursor.fetchall()
         return [dict(user) for user in users]
 
+async def log_training_event(
+    user_id: int,
+    event_type: str,
+    actor_id: Optional[int] = None,
+    *,
+    event_at: Optional[str] = None,
+    full_name: Optional[str] = None,
+    username: Optional[str] = None,
+    city: Optional[str] = None,
+    role: Optional[str] = None,
+    manager_id: Optional[int] = None,
+) -> None:
+    """
+    Логує події навчального процесу для аналітики.
+    event_type: added | promoted | rejected
+    """
+    event_at = event_at or _now_str()
+    if full_name is None or username is None or city is None or role is None or manager_id is None:
+        user = await get_user_details(user_id)
+        if user:
+            full_name = full_name if full_name is not None else user.get("full_name")
+            username = username if username is not None else user.get("username")
+            city = city if city is not None else user.get("city")
+            role = role if role is not None else user.get("role")
+            manager_id = manager_id if manager_id is not None else user.get("manager_id")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO training_events
+            (user_id, event_type, event_at, actor_id, full_name, username, city, role, manager_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, event_type, event_at, actor_id, full_name, username, city, role, manager_id),
+        )
+        await db.commit()

@@ -4,6 +4,7 @@ import json
 import aiosqlite
 import html
 import pytz
+import calendar
 from typing import Optional
 from pathlib import Path
 from datetime import datetime # NEW IMPORT
@@ -28,6 +29,8 @@ from database.users import (
     delete_user,
     register_user,
     get_reminder_history,
+    get_user_progress,
+    update_user_role,
 )
 from database.hr import (
     is_developer_user,
@@ -60,9 +63,17 @@ from database.materials import (
     toggle_test_status,
 )
 from database.tokens import get_token_stats, cleanup_expired_tokens
-from database.analytics import get_daily_stats, get_dropout_funnel
+from database.analytics import (
+    get_daily_stats,
+    get_dropout_funnel,
+    get_training_added_interns,
+    get_training_added_cities,
+    get_training_left_inactive,
+    get_training_promoted,
+    get_training_rejected,
+)
 from bot.services.health import get_health_status
-from bot.services.reports import get_report_data, generate_xlsx_report # NEW IMPORT
+from bot.services.reports import get_report_data, get_report_details, generate_xlsx_report # NEW IMPORT
 from bot.services.test_parser import parse_test_input, format_test_display
 from bot.services.learning_progress import get_days_overview, DayStatus
 from bot.services.access import get_display_role # Import get_display_role
@@ -502,6 +513,7 @@ def _users_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="😴 Неактивні", callback_data="dev_users_inactive"),
         ],
         [InlineKeyboardButton(text="🏙️ За містом", callback_data="dev_users_by_city")],
+        [InlineKeyboardButton(text="✅ Перевести завершених у працівники", callback_data="dev_users_bulk_promote")],
         [InlineKeyboardButton(text="📋 Список користувачів", callback_data="dev_users_list")],
         [InlineKeyboardButton(text="🔍 Пошук", callback_data="dev_users_search")],
         [InlineKeyboardButton(text="❌ Видалити", callback_data="dev_users_delete")],
@@ -648,9 +660,14 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
     for idx, user in enumerate(paginated_users, start=start_offset + 1):
         # Визначаємо роль та посаду
         display_role = await get_display_role(user['user_id'])
+        is_worker = user.get("status") == "Працівник"
         
         if display_role in ["Dev", "Керівник"]:
             job_title = display_role
+        elif is_worker:
+            job_title = user.get('role') or "Не вказано"
+        elif mode == "all":
+            job_title = "Стажер"
         else:
             job_title = user.get('role') or "Не вказано"
             
@@ -669,8 +686,9 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
         e_shop = html.escape(shop_short)
         
         # Формуємо рядок: день показуємо тільки якщо show_day=True і це не Dev/Керівник/Працівник
-        if not show_day or display_role in ["Dev", "Керівник"] or user.get("status") == "Працівник":
-            info_line = f"   @{e_username} | Посада: <b>{e_job}</b> | {e_shop}"
+        if not show_day or display_role in ["Dev", "Керівник"] or is_worker:
+            status_label = " | Статус: <b>Завершено</b>" if is_worker else ""
+            info_line = f"   @{e_username} | Посада: <b>{e_job}</b> | {e_shop}{status_label}"
         else:
             info_line = f"   @{e_username} | Посада: <b>{e_job}</b> | {e_shop} | {current_block} день"
             
@@ -729,6 +747,35 @@ async def developer_list_workers(callback: CallbackQuery, page: int = 0):
     if not await _ensure_developer(callback): return
     users = await get_all_workers()
     await _developer_show_users_list(callback, users, "👷 <b>Працівники</b>", "workers", page, show_day=False)
+
+async def developer_bulk_promote_completed_interns(callback: CallbackQuery):
+    """Масово переводить завершених стажерів у працівники."""
+    if not await _ensure_developer(callback):
+        return
+
+    interns = await get_all_interns()
+    promoted_count = 0
+
+    for intern in interns:
+        progress = await get_user_progress(intern["user_id"])
+        completed_days = sum(1 for p in progress if p.get("completed"))
+        if completed_days >= DAYS_TOTAL:
+            await update_user_role(intern["user_id"], "Працівник", actor_id=callback.from_user.id)
+            promoted_count += 1
+
+    if promoted_count == 0:
+        text = (
+            "✅ <b>Масовий перехід завершено.</b>\n\n"
+            "Не знайдено стажерів, яких потрібно перевести у працівники."
+        )
+    else:
+        text = (
+            "✅ <b>Масовий перехід завершено.</b>\n\n"
+            f"У статус <b>Працівник</b> переведено: <b>{promoted_count}</b>"
+        )
+
+    await _edit_or_answer(callback.message, text, reply_markup=_users_menu_keyboard())
+    await callback.answer("Готово ✅")
 
 async def developer_interns_export_xlsx(callback: CallbackQuery):
     """Вивантажує список усіх стажерів у xlsx з колонками Ім'я / День / Магазин / Керівник."""
@@ -4324,6 +4371,34 @@ async def developer_user_delete_perform(callback: CallbackQuery, state: FSMConte
 
 # ==================== XLSX Reports ====================
 
+def _subtract_months(dt: datetime, months: int) -> datetime:
+    """Повертає дату, зсунуту на `months` місяців назад."""
+    year = dt.year
+    month = dt.month - months
+    while month <= 0:
+        month += 12
+        year -= 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def _report_range_start(now: datetime, months: int) -> datetime:
+    # 1 місяць = поточний місяць з 1-го числа
+    # 2+ місяці = з 1-го числа місяця, що був N-1 місяців тому
+    anchor = _subtract_months(now, max(months - 1, 0))
+    return anchor.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _period_label(months: int) -> str:
+    mapping = {
+        1: "Останній місяць",
+        2: "Останні 2 місяці",
+        3: "Останні 3 місяці",
+        6: "Останні 6 місяців",
+        12: "Останній рік",
+    }
+    return mapping.get(months, f"Останні {months} місяців")
+
 async def developer_xlsx_menu(callback: CallbackQuery):
     """Меню формування XLSX звіту."""
     logger = get_logger()
@@ -4339,21 +4414,29 @@ async def developer_xlsx_menu(callback: CallbackQuery):
         return
     
     now = datetime.now(pytz.timezone(TIMEZONE))
+    default_months = 1
+    start_date = _report_range_start(now, default_months)
     text = (
         "📊 <b>Звітність у форматі XLSX</b>\n"
         "───────────────────\n"
-        f"📅 Поточний період: <b>{now.strftime('01.%m.%Y')} — {now.strftime('%d.%m.%Y')}</b>\n\n"
+        f"📅 Період за замовчуванням: <b>{_period_label(default_months)}</b>\n"
+        f"   <b>{start_date.strftime('%d.%m.%Y')} — {now.strftime('%d.%m.%Y')}</b>\n\n"
         "Звіт містить наступні метрики по містах та магазинах:\n"
         "• Кількість нових стажерів\n"
         "• Кількість активних стажерів\n"
         "• Кількість відсіву (не завершили)\n"
         "• Частка запитів до керівників\n"
+        "• Детальні списки ПІБ: додались / відсіялись / стали працівниками / відхилені\n"
         "───────────────────\n"
-        "<i>💡 Ви можете отримати звіт за поточний місяць прямо зараз.</i>"
+        "<i>💡 Оберіть період для формування звіту.</i>"
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📥 Надіслати поточний звіт", callback_data="dev_xlsx_send_current")],
+        [InlineKeyboardButton(text="📥 За останній місяць", callback_data="dev_xlsx_send_period:1")],
+        [InlineKeyboardButton(text="📥 За 2 місяці", callback_data="dev_xlsx_send_period:2")],
+        [InlineKeyboardButton(text="📥 За 3 місяці", callback_data="dev_xlsx_send_period:3")],
+        [InlineKeyboardButton(text="📥 За пів року", callback_data="dev_xlsx_send_period:6")],
+        [InlineKeyboardButton(text="📥 За рік", callback_data="dev_xlsx_send_period:12")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")],
     ])
     
@@ -4368,6 +4451,20 @@ async def developer_xlsx_menu(callback: CallbackQuery):
 
 async def developer_send_current_report(callback: CallbackQuery):
     """Генерує та надсилає поточний XLSX звіт."""
+    await _developer_send_xlsx_report(callback, months=1)
+
+
+async def developer_send_period_report(callback: CallbackQuery):
+    """Генерує та надсилає XLSX звіт за обраний період."""
+    try:
+        months = int((callback.data or "").split(":")[1])
+    except (IndexError, ValueError):
+        months = 1
+    await _developer_send_xlsx_report(callback, months=months)
+
+
+async def _developer_send_xlsx_report(callback: CallbackQuery, months: int):
+    """Спільна логіка генерації XLSX за обраний період."""
     logger = get_logger()
     logger.debug(f"XLSX report generation requested by user {callback.from_user.id}")
     
@@ -4380,26 +4477,30 @@ async def developer_send_current_report(callback: CallbackQuery):
         logger.error(f"Failed to answer callback in developer_send_current_report: {e}", exc_info=True)
     
     now = datetime.now(pytz.timezone(TIMEZONE))
-    # З 1-го числа поточного місяця
-    start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    start_date = _report_range_start(now, months)
     
     try:
         logger.debug(f"Getting report data from {start_date} to {now}")
         data = await get_report_data(start_date, now)
-        if not data:
+        details = await get_report_details(start_date, now)
+        has_details = any(details.get(k) for k in ("added", "dropped", "promoted", "rejected"))
+        if not data and not has_details:
             await callback.message.answer("❌ За цей період ще немає даних для звіту.")
             logger.debug(f"No data for report for user {callback.from_user.id}")
             return
         
         logger.debug(f"Generating XLSX report with {len(data)} records")
-        xlsx_file = generate_xlsx_report(data, start_date, now)
+        xlsx_file = generate_xlsx_report(data, start_date, now, details)
         
-        filename = f"Bulka_Report_{start_date.strftime('%Y-%m')}.xlsx"
+        filename = f"Bulka_Report_{months}m_{start_date.strftime('%Y%m%d')}_{now.strftime('%Y%m%d')}.xlsx"
         from aiogram.types import BufferedInputFile
         
         await callback.message.answer_document(
             document=BufferedInputFile(xlsx_file.getvalue(), filename=filename),
-            caption=f"📊 <b>Поточний звіт</b> ({start_date.strftime('%d.%m')} - {now.strftime('%d.%m')})"
+            caption=(
+                f"📊 <b>{_period_label(months)}</b>\n"
+                f"{start_date.strftime('%d.%m.%Y')} - {now.strftime('%d.%m.%Y')}"
+            ),
         )
         logger.debug(f"Report sent to user {callback.from_user.id}")
     except Exception as e:
@@ -4479,6 +4580,7 @@ async def developer_analytics_menu(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📅 Щоденний дайджест", callback_data="dev_analytics_digest")],
         [InlineKeyboardButton(text="📉 Воронка відсіву", callback_data="dev_analytics_funnel")],
+        [InlineKeyboardButton(text="🎓 Навчальний процес", callback_data="dev_training_menu")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")]
     ])
     
@@ -4566,10 +4668,309 @@ async def developer_dropout_report(callback: CallbackQuery):
     await callback.answer()
 
 
+def _range_days_from_token(token: str) -> Optional[int]:
+    if token == "7":
+        return 7
+    if token == "30":
+        return 30
+    return None
+
+
+def _safe_name(row: dict) -> str:
+    return row.get("full_name") or (f"@{row.get('username')}" if row.get("username") else f"ID {row.get('user_id')}")
+
+
+async def developer_training_menu(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🆕 Додані стажери", callback_data="dev_training_added:all")],
+        [InlineKeyboardButton(text="😴 Залишили навчання", callback_data="dev_training_left")],
+        [InlineKeyboardButton(text="👷 Стали працівниками", callback_data="dev_training_promoted:all")],
+        [InlineKeyboardButton(text="❌ Відхилені стажери", callback_data="dev_training_rejected:all")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_analytics_menu")],
+    ])
+    await _edit_or_answer(callback.message, "🎓 <b>Навчальний процес</b>\nОберіть розділ:", reply_markup=kb)
+    await callback.answer()
+
+
+async def _render_training_added(
+    callback: CallbackQuery,
+    range_token: str,
+    city: Optional[str] = None,
+    city_idx: Optional[int] = None,
+):
+    range_days = _range_days_from_token(range_token)
+    rows = await get_training_added_interns(range_days=range_days, city=city)
+    filter_label = {"7": "останні 7 дн.", "30": "останні 30 дн.", "all": "весь час"}.get(range_token, "весь час")
+    city_label = f" | Місто: <b>{html.escape(city)}</b>" if city else ""
+
+    lines = [
+        f"🆕 <b>Додані стажери</b> ({filter_label}){city_label}",
+        f"Всього: <b>{len(rows)}</b>",
+        "",
+    ]
+    for idx, row in enumerate(rows[:200], start=1):
+        name = html.escape(_safe_name(row))
+        city_v = html.escape(row.get("city") or "—")
+        role_v = html.escape(row.get("role") or "—")
+        lines.append(f"{idx}. {name} — {city_v} | {role_v} | {row.get('event_at')}")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="7 дн", callback_data="dev_training_added:7"),
+            InlineKeyboardButton(text="30 дн", callback_data="dev_training_added:30"),
+            InlineKeyboardButton(text="Весь час", callback_data="dev_training_added:all"),
+        ],
+        [InlineKeyboardButton(text="🏙️ За містом", callback_data=f"dev_training_added_city_menu:{range_token}")],
+        [
+            InlineKeyboardButton(
+                text="📥 Вивантажити",
+                callback_data=f"dev_training_added_export:{range_token}:{city_idx if city_idx is not None else 'all'}",
+            )
+        ],
+        [InlineKeyboardButton(text="⬅️ Навчальний процес", callback_data="dev_training_menu")],
+    ])
+    await _edit_or_answer(callback.message, "\n".join(lines), reply_markup=kb)
+
+
+async def developer_training_added(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    parts = (callback.data or "").split(":")
+    token = parts[1] if len(parts) > 1 else "all"
+    await _render_training_added(callback, token)
+    await callback.answer()
+
+
+async def developer_training_added_city_menu(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    parts = (callback.data or "").split(":")
+    token = parts[1] if len(parts) > 1 else "all"
+    cities = await get_training_added_cities()
+    if not cities:
+        await callback.answer("У подіях немає міст для фільтра.", show_alert=True)
+        return
+
+    rows = [[InlineKeyboardButton(text=city, callback_data=f"dev_training_added_city:{token}:{idx}")] for idx, city in enumerate(cities)]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_training_added:{token}")])
+    await _edit_or_answer(
+        callback.message,
+        "🏙️ <b>Фільтр доданих стажерів за містом</b>\nОберіть місто:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+async def developer_training_added_city(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) < 4:
+        await callback.answer("Некоректний фільтр.", show_alert=True)
+        return
+    token = parts[2]
+    try:
+        city_idx = int(parts[3])
+    except ValueError:
+        await callback.answer("Некоректне місто.", show_alert=True)
+        return
+
+    cities = await get_training_added_cities()
+    if city_idx < 0 or city_idx >= len(cities):
+        await callback.answer("Місто не знайдено.", show_alert=True)
+        return
+
+    await _render_training_added(callback, token, city=cities[city_idx], city_idx=city_idx)
+    await callback.answer()
+
+
+async def developer_training_added_export(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    parts = (callback.data or "").split(":")
+    token = parts[1] if len(parts) > 1 else "all"
+    city_token = parts[2] if len(parts) > 2 else "all"
+
+    city: Optional[str] = None
+    if city_token != "all":
+        try:
+            city_idx = int(city_token)
+            cities = await get_training_added_cities()
+            if 0 <= city_idx < len(cities):
+                city = cities[city_idx]
+        except ValueError:
+            city = None
+
+    rows = await get_training_added_interns(range_days=_range_days_from_token(token), city=city)
+    await _export_training_events_xlsx(callback, rows, "Додані_стажери.xlsx", "Додані стажери")
+    await callback.answer()
+
+
+async def developer_training_left(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    rows = await get_training_left_inactive(days=3)
+    lines = [
+        "😴 <b>Залишили навчання</b> (неактивні ≥ 3 днів)",
+        f"Всього: <b>{len(rows)}</b>",
+        "",
+    ]
+    for idx, row in enumerate(rows[:200], start=1):
+        name = html.escape(_safe_name(row))
+        if row.get("deleted"):
+            lines.append(
+                f"{idx}. {name} — неактивний з <b>{row.get('inactive_since') or '—'}</b> | "
+                f"статус: <b>Видалено</b> ({row.get('deleted_at') or '—'})"
+            )
+        else:
+            lines.append(f"{idx}. {name} — неактивний з <b>{row.get('inactive_since') or '—'}</b> | статус: <b>Неактивний</b>")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Оновити", callback_data="dev_training_left")],
+        [InlineKeyboardButton(text="⬅️ Навчальний процес", callback_data="dev_training_menu")],
+    ])
+    await _edit_or_answer(callback.message, "\n".join(lines), reply_markup=kb)
+    await callback.answer()
+
+
+async def _render_training_promoted(callback: CallbackQuery, token: str):
+    rows = await get_training_promoted(range_days=_range_days_from_token(token))
+    filter_label = {"7": "останні 7 дн.", "30": "останні 30 дн.", "all": "весь час"}.get(token, "весь час")
+    lines = [
+        f"👷 <b>Стали працівниками</b> ({filter_label})",
+        f"Всього: <b>{len(rows)}</b>",
+        "",
+    ]
+    for idx, row in enumerate(rows[:200], start=1):
+        name = html.escape(_safe_name(row))
+        role_v = html.escape(row.get("role") or "—")
+        lines.append(f"{idx}. {name} — {role_v} | {row.get('event_at')}")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="7 дн", callback_data="dev_training_promoted:7"),
+            InlineKeyboardButton(text="30 дн", callback_data="dev_training_promoted:30"),
+            InlineKeyboardButton(text="Весь час", callback_data="dev_training_promoted:all"),
+        ],
+        [InlineKeyboardButton(text="📥 Вивантажити", callback_data=f"dev_training_promoted_export:{token}")],
+        [InlineKeyboardButton(text="⬅️ Навчальний процес", callback_data="dev_training_menu")],
+    ])
+    await _edit_or_answer(callback.message, "\n".join(lines), reply_markup=kb)
+
+
+async def developer_training_promoted(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    parts = (callback.data or "").split(":")
+    token = parts[1] if len(parts) > 1 else "all"
+    await _render_training_promoted(callback, token)
+    await callback.answer()
+
+
+async def _render_training_rejected(callback: CallbackQuery, token: str):
+    rows = await get_training_rejected(range_days=_range_days_from_token(token))
+    filter_label = {"7": "останні 7 дн.", "30": "останні 30 дн.", "all": "весь час"}.get(token, "весь час")
+    lines = [
+        f"❌ <b>Відхилені стажери</b> ({filter_label})",
+        f"Всього: <b>{len(rows)}</b>",
+        "",
+    ]
+    for idx, row in enumerate(rows[:200], start=1):
+        name = html.escape(_safe_name(row))
+        lines.append(f"{idx}. {name} — дата відхилення: <b>{row.get('event_at') or '—'}</b>")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="7 дн", callback_data="dev_training_rejected:7"),
+            InlineKeyboardButton(text="30 дн", callback_data="dev_training_rejected:30"),
+            InlineKeyboardButton(text="Весь час", callback_data="dev_training_rejected:all"),
+        ],
+        [InlineKeyboardButton(text="📥 Вивантажити", callback_data=f"dev_training_rejected_export:{token}")],
+        [InlineKeyboardButton(text="⬅️ Навчальний процес", callback_data="dev_training_menu")],
+    ])
+    await _edit_or_answer(callback.message, "\n".join(lines), reply_markup=kb)
+
+
+async def developer_training_rejected(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    parts = (callback.data or "").split(":")
+    token = parts[1] if len(parts) > 1 else "all"
+    await _render_training_rejected(callback, token)
+    await callback.answer()
+
+
+async def _export_training_events_xlsx(callback: CallbackQuery, rows: list[dict], filename: str, title: str):
+    import io
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from aiogram.types import BufferedInputFile
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = title
+
+    headers = ["Дата", "ПІБ", "Username", "Місто", "Посада", "Керівник ID", "Telegram ID"]
+    for idx, h in enumerate(headers, start=1):
+        c = ws.cell(row=1, column=idx, value=h)
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill(fill_type="solid", fgColor="305496")
+        c.alignment = Alignment(horizontal="center")
+
+    for row_idx, row in enumerate(rows, start=2):
+        ws.cell(row=row_idx, column=1, value=row.get("event_at"))
+        ws.cell(row=row_idx, column=2, value=row.get("full_name") or "—")
+        ws.cell(row=row_idx, column=3, value=row.get("username") or "—")
+        ws.cell(row=row_idx, column=4, value=row.get("city") or "—")
+        ws.cell(row=row_idx, column=5, value=row.get("role") or "—")
+        ws.cell(row=row_idx, column=6, value=row.get("manager_id") or "—")
+        ws.cell(row=row_idx, column=7, value=row.get("user_id") or "—")
+
+    ws.column_dimensions["A"].width = 20
+    ws.column_dimensions["B"].width = 35
+    ws.column_dimensions["C"].width = 20
+    ws.column_dimensions["D"].width = 15
+    ws.column_dimensions["E"].width = 25
+    ws.column_dimensions["F"].width = 14
+    ws.column_dimensions["G"].width = 14
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    await callback.message.answer_document(
+        document=BufferedInputFile(buf.getvalue(), filename=filename),
+        caption=f"📥 <b>Вивантаження</b> — {len(rows)} записів",
+        parse_mode="HTML",
+    )
+
+
+async def developer_training_promoted_export(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    parts = (callback.data or "").split(":")
+    token = parts[1] if len(parts) > 1 else "all"
+    rows = await get_training_promoted(range_days=_range_days_from_token(token))
+    await _export_training_events_xlsx(callback, rows, "Стали_працівниками.xlsx", "Стали працівниками")
+    await callback.answer("Файл готовий ✅")
+
+
+async def developer_training_rejected_export(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    parts = (callback.data or "").split(":")
+    token = parts[1] if len(parts) > 1 else "all"
+    rows = await get_training_rejected(range_days=_range_days_from_token(token))
+    await _export_training_events_xlsx(callback, rows, "Відхилені_стажери.xlsx", "Відхилені стажери")
+    await callback.answer("Файл готовий ✅")
+
+
 def register_developer_menu_handlers(dp: Dispatcher):
     # XLSX Reports (Priority)
     dp.callback_query.register(developer_xlsx_menu, lambda c: c.data == "dev_xlsx_menu")
     dp.callback_query.register(developer_send_current_report, lambda c: c.data == "dev_xlsx_send_current")
+    dp.callback_query.register(developer_send_period_report, lambda c: c.data and c.data.startswith("dev_xlsx_send_period:"))
 
     dp.callback_query.register(developer_menu_callback, lambda c: c.data == "developer_menu")
 
@@ -4580,6 +4981,7 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_list_workers, lambda c: c.data == "dev_users_workers")
     dp.callback_query.register(developer_interns_export_xlsx, lambda c: c.data == "dev_interns_export_xlsx")
     dp.callback_query.register(developer_workers_export_xlsx, lambda c: c.data == "dev_workers_export_xlsx")
+    dp.callback_query.register(developer_bulk_promote_completed_interns, lambda c: c.data == "dev_users_bulk_promote")
     
     # Active/Inactive users
     dp.callback_query.register(developer_active_users, lambda c: c.data == "dev_users_active")
@@ -4740,4 +5142,14 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_analytics_menu, lambda c: c.data == "dev_analytics_menu")
     dp.callback_query.register(developer_daily_digest, lambda c: c.data == "dev_analytics_digest")
     dp.callback_query.register(developer_dropout_report, lambda c: c.data == "dev_analytics_funnel")
+    dp.callback_query.register(developer_training_menu, lambda c: c.data == "dev_training_menu")
+    dp.callback_query.register(developer_training_added, lambda c: c.data and c.data.startswith("dev_training_added:"))
+    dp.callback_query.register(developer_training_added_city_menu, lambda c: c.data and c.data.startswith("dev_training_added_city_menu:"))
+    dp.callback_query.register(developer_training_added_city, lambda c: c.data and c.data.startswith("dev_training_added_city:"))
+    dp.callback_query.register(developer_training_added_export, lambda c: c.data and c.data.startswith("dev_training_added_export:"))
+    dp.callback_query.register(developer_training_left, lambda c: c.data == "dev_training_left")
+    dp.callback_query.register(developer_training_promoted, lambda c: c.data and c.data.startswith("dev_training_promoted:"))
+    dp.callback_query.register(developer_training_rejected, lambda c: c.data and c.data.startswith("dev_training_rejected:"))
+    dp.callback_query.register(developer_training_promoted_export, lambda c: c.data and c.data.startswith("dev_training_promoted_export:"))
+    dp.callback_query.register(developer_training_rejected_export, lambda c: c.data and c.data.startswith("dev_training_rejected_export:"))
     dp.callback_query.register(developer_reminder_history_menu, lambda c: c.data == "dev_reminder_history")

@@ -15,11 +15,14 @@ from bot.config import TIMEZONE
 from database.users import (
     get_user_details,
     get_inactive_interns_for_auto_reminder,
+    get_inactive_interns_for_auto_delete,
     touch_auto_reminder,
     get_user_progress,
     is_day3_question_sent,
     mark_day3_question_sent,
     log_reminder,
+    log_training_event,
+    delete_user,
 )
 from database.managers import get_manager_by_uid
 
@@ -277,6 +280,26 @@ async def auto_reminder_loop(bot: Bot) -> None:
         health_check.heartbeat_reminder()
         
         now = datetime.now(tz)
+
+        # 0. Автоматичне видалення стажерів з неактивністю >= 3 днів
+        to_delete = await get_inactive_interns_for_auto_delete(days=INACTIVE_DAYS_THRESHOLD)
+        deleted_count = 0
+        for intern in to_delete:
+            intern_id = intern["user_id"]
+            await log_training_event(
+                user_id=intern_id,
+                event_type="left_deleted",
+                actor_id=None,
+                full_name=intern.get("full_name"),
+                username=intern.get("username"),
+                city=intern.get("city"),
+                role=intern.get("role"),
+                manager_id=intern.get("manager_id"),
+            )
+            await delete_user(intern_id)
+            deleted_count += 1
+        if deleted_count:
+            logger.info(f"Auto-deleted inactive interns: {deleted_count}")
         
         # 1. Автоматичні нагадування неактивним (тільки стажерам)
         interns = await get_interns_for_auto_reminder(now)

@@ -21,6 +21,7 @@ from database.users import (
     set_intern_extra,
     delete_user,
     update_user_role,
+    log_training_event,
     get_user_progress
 )
 from bot.services.developer_actions import get_user_days_report
@@ -103,7 +104,14 @@ async def manager_menu(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # --- Helper to list interns ---
-async def _list_interns_generic(callback: CallbackQuery, interns: list, title: str, empty_msg: str):
+async def _list_interns_generic(
+    callback: CallbackQuery,
+    interns: list,
+    title: str,
+    empty_msg: str,
+    *,
+    mark_completed: bool = False,
+):
     if not interns:
         await _edit_menu_message(
             callback.message,
@@ -121,8 +129,9 @@ async def _list_interns_generic(callback: CallbackQuery, interns: list, title: s
         name = intern.get("full_name", "Без імені")
         uid = intern.get("user_id")
         current_block = intern.get("current_block", 1)
+        suffix = "Завершено" if mark_completed else f"День {current_block}"
         buttons.append([InlineKeyboardButton(
-            text=f"{name} (День {current_block})", 
+            text=f"{name} ({suffix})",
             callback_data=f"mgr_view_intern_{uid}"
         )])
     
@@ -158,7 +167,13 @@ async def manager_completed_interns(callback: CallbackQuery):
         if completed_count >= DAYS_TOTAL:
             completed.append(intern)
             
-    await _list_interns_generic(callback, completed, "🎉 <b>Завершили навчання:</b>", "📭 Немає стажерів, що завершили навчання.")
+    await _list_interns_generic(
+        callback,
+        completed,
+        "🎉 <b>Завершили навчання:</b>",
+        "📭 Немає стажерів, що завершили навчання.",
+        mark_completed=True,
+    )
 
 async def manager_inactive_interns(callback: CallbackQuery):
     if not await _ensure_manager(callback):
@@ -673,7 +688,7 @@ async def intern_promote_handler(callback: CallbackQuery):
             pass
         return
 
-    await update_user_role(intern_id, "Працівник")
+    await update_user_role(intern_id, "Працівник", actor_id=callback.from_user.id)
     full_name = intern.get("full_name") or intern.get("username") or f"ID {intern_id}"
 
     # Повідомлення керівнику
@@ -709,6 +724,18 @@ async def intern_dismiss_handler(callback: CallbackQuery):
 
     intern = await get_user_details(intern_id)
     full_name = intern.get("full_name") or intern.get("username") or f"ID {intern_id}" if intern else f"ID {intern_id}"
+
+    if intern:
+        await log_training_event(
+            user_id=intern_id,
+            event_type="rejected",
+            actor_id=callback.from_user.id,
+            full_name=intern.get("full_name"),
+            username=intern.get("username"),
+            city=intern.get("city"),
+            role=intern.get("role"),
+            manager_id=intern.get("manager_id"),
+        )
 
     await delete_user(intern_id)
 

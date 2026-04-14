@@ -104,11 +104,98 @@ async def get_report_data(start_date: datetime, end_date: datetime) -> List[Dict
                 
         return report_rows
 
-def generate_xlsx_report(data: List[Dict[str, Any]], start_date: datetime, end_date: datetime) -> BytesIO:
+
+async def get_report_details(start_date: datetime, end_date: datetime) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Повертає деталізацію для XLSX:
+    - хто додався
+    - хто відсіявся (автовидалені)
+    - хто став працівником
+    - хто відхилений керівником
+    """
+    start_str = start_date.strftime("%Y-%m-%d %H:%M:%S")
+    end_str = end_date.strftime("%Y-%m-%d %H:%M:%S")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        async def _fetch(event_type: str) -> List[Dict[str, Any]]:
+            cur = await db.execute(
+                """
+                SELECT user_id, full_name, username, city, role, manager_id, event_at
+                FROM training_events
+                WHERE event_type = ? AND event_at BETWEEN ? AND ?
+                ORDER BY event_at DESC
+                """,
+                (event_type, start_str, end_str),
+            )
+            return [dict(r) for r in await cur.fetchall()]
+
+        return {
+            "added": await _fetch("added"),
+            "dropped": await _fetch("left_deleted"),
+            "promoted": await _fetch("promoted"),
+            "rejected": await _fetch("rejected"),
+        }
+
+
+def _write_detail_sheet(
+    wb: openpyxl.Workbook,
+    title: str,
+    rows: List[Dict[str, Any]],
+    *,
+    color: str,
+) -> None:
+    ws = wb.create_sheet(title=title)
+    headers = ["Дата", "ПІБ", "Username", "Місто", "Посада", "Керівник ID", "Telegram ID"]
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+    center_align = Alignment(horizontal="center", vertical="center")
+    border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin'),
+    )
+
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = border
+
+    for row in rows:
+        ws.append([
+            row.get("event_at"),
+            row.get("full_name") or "—",
+            row.get("username") or "—",
+            row.get("city") or "—",
+            row.get("role") or "—",
+            row.get("manager_id") or "—",
+            row.get("user_id") or "—",
+        ])
+        for cell in ws[ws.max_row]:
+            cell.border = border
+
+    if not rows:
+        ws.append(["Немає даних за обраний період", "", "", "", "", "", ""])
+
+    widths = {"A": 20, "B": 35, "C": 20, "D": 15, "E": 25, "F": 14, "G": 14}
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+
+
+def generate_xlsx_report(
+    data: List[Dict[str, Any]],
+    start_date: datetime,
+    end_date: datetime,
+    details: Dict[str, List[Dict[str, Any]]] | None = None,
+) -> BytesIO:
     """Генерує XLSX файл у пам'яті."""
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Звіт по стажуванню"
+    ws.title = "Зведення"
     
     # Стилі
     header_font = Font(bold=True, color="FFFFFF")
@@ -171,6 +258,12 @@ def generate_xlsx_report(data: List[Dict[str, Any]], start_date: datetime, end_d
         if column:
             ws.column_dimensions[column].width = max(max_length + 2, 10)
 
+    details = details or {}
+    _write_detail_sheet(wb, "Додались (ПІБ)", details.get("added", []), color="2F5597")
+    _write_detail_sheet(wb, "Відсіялись (ПІБ)", details.get("dropped", []), color="C00000")
+    _write_detail_sheet(wb, "Стали працівниками", details.get("promoted", []), color="217346")
+    _write_detail_sheet(wb, "Відхилені", details.get("rejected", []), color="7F6000")
+
     # Зберігаємо в буфер
     output = BytesIO()
     wb.save(output)
@@ -194,11 +287,13 @@ async def auto_monthly_report_sender(bot: Bot):
     
     try:
         data = await get_report_data(start_date, now)
-        if not data:
+        details = await get_report_details(start_date, now)
+        has_details = any(details.get(k) for k in ("added", "dropped", "promoted", "rejected"))
+        if not data and not has_details:
             logger.info("ℹ️ Немає даних для автоматичного звіту.")
             return
             
-        xlsx_file = generate_xlsx_report(data, start_date, now)
+        xlsx_file = generate_xlsx_report(data, start_date, now, details)
         filename = f"Bulka_Monthly_Report_{start_date.strftime('%Y-%m')}.xlsx"
         
         devs = await get_all_developers()
