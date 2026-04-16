@@ -132,6 +132,7 @@ async def set_intern_extra(user_id, manager_id, role, city, shop=None):
         event_type="added",
         actor_id=manager_id,
         city=city,
+        shop=shop,
         role=role,
         manager_id=manager_id,
     )

@@ -215,9 +215,28 @@ async def get_training_left_inactive(days: int = 3) -> list[dict]:
 
         deleted_cur = await db.execute(
             """
-            SELECT user_id, full_name, username, city, shop, role, manager_id, event_at
-            FROM training_events
-            WHERE event_type = 'left_deleted'
+            SELECT
+                te.user_id,
+                te.full_name,
+                te.username,
+                te.city,
+                COALESCE(
+                    te.shop,
+                    (
+                        SELECT te2.shop
+                        FROM training_events te2
+                        WHERE te2.user_id = te.user_id
+                          AND te2.shop IS NOT NULL
+                          AND te2.shop != ''
+                        ORDER BY te2.event_at DESC
+                        LIMIT 1
+                    )
+                ) AS shop,
+                te.role,
+                te.manager_id,
+                te.event_at
+            FROM training_events te
+            WHERE te.event_type = 'left_deleted'
             ORDER BY event_at DESC
             """
         )
