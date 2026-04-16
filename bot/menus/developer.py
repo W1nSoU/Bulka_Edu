@@ -67,6 +67,7 @@ from database.analytics import (
     get_daily_stats,
     get_dropout_funnel,
     get_training_added_interns,
+    clear_training_added_interns,
     get_training_added_cities,
     get_training_left_inactive,
     get_training_promoted,
@@ -4645,8 +4646,8 @@ async def developer_dropout_report(callback: CallbackQuery):
     total_count = data['total_users']
     total_dist = data['total_distribution']
     
-    lines.append("📊 <b>Загальна статистика (всі)</b>")
-    lines.append(f"Всього в базі: <b>{total_count}</b>\n")
+    lines.append("📊 <b>Загальна статистика (стажери в процесі)</b>")
+    lines.append(f"Всього у процесі: <b>{total_count}</b>\n")
     
     if total_count > 0:
         for day in range(1, DAYS_TOTAL + 1):
@@ -4678,6 +4679,18 @@ def _range_days_from_token(token: str) -> Optional[int]:
 
 def _safe_name(row: dict) -> str:
     return row.get("full_name") or (f"@{row.get('username')}" if row.get("username") else f"ID {row.get('user_id')}")
+
+async def _resolve_training_added_city(city_token: str) -> Optional[str]:
+    if city_token == "all":
+        return None
+    try:
+        city_idx = int(city_token)
+    except ValueError:
+        return None
+    cities = await get_training_added_cities()
+    if 0 <= city_idx < len(cities):
+        return cities[city_idx]
+    return None
 
 
 async def developer_training_menu(callback: CallbackQuery):
@@ -4727,6 +4740,12 @@ async def _render_training_added(
             InlineKeyboardButton(
                 text="📥 Вивантажити",
                 callback_data=f"dev_training_added_export:{range_token}:{city_idx if city_idx is not None else 'all'}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🧹 Очистити",
+                callback_data=f"dev_training_added_clear_ask:{range_token}:{city_idx if city_idx is not None else 'all'}",
             )
         ],
         [InlineKeyboardButton(text="⬅️ Навчальний процес", callback_data="dev_training_menu")],
@@ -4808,6 +4827,67 @@ async def developer_training_added_export(callback: CallbackQuery):
     await callback.answer()
 
 
+async def developer_training_added_clear_ask(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    parts = (callback.data or "").split(":")
+    token = parts[1] if len(parts) > 1 else "all"
+    city_token = parts[2] if len(parts) > 2 else "all"
+    city = await _resolve_training_added_city(city_token)
+    filter_label = {"7": "останні 7 дн.", "30": "останні 30 дн.", "all": "весь час"}.get(token, "весь час")
+    city_label = f"\n🏙️ Місто: <b>{html.escape(city)}</b>" if city else ""
+
+    text = (
+        "🧹 <b>Підтвердження очищення</b>\n\n"
+        "Ви дійсно хочете очистити записи в розділі <b>Додані стажери</b> за цим фільтром?\n"
+        f"📅 Період: <b>{filter_label}</b>{city_label}\n\n"
+        "Після очищення ці записи не будуть відображатися у звіті."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Так, очистити",
+                callback_data=f"dev_training_added_clear_confirm:{token}:{city_token}",
+            ),
+            InlineKeyboardButton(
+                text="❌ Скасувати",
+                callback_data=f"dev_training_added_clear_cancel:{token}:{city_token}",
+            ),
+        ]
+    ])
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await callback.answer()
+
+
+async def developer_training_added_clear_cancel(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    parts = (callback.data or "").split(":")
+    token = parts[1] if len(parts) > 1 else "all"
+    city_token = parts[2] if len(parts) > 2 else "all"
+    city = await _resolve_training_added_city(city_token)
+    city_idx = int(city_token) if city_token != "all" and city_token.isdigit() else None
+    await _render_training_added(callback, token, city=city, city_idx=city_idx)
+    await callback.answer("Скасовано")
+
+
+async def developer_training_added_clear_confirm(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    parts = (callback.data or "").split(":")
+    token = parts[1] if len(parts) > 1 else "all"
+    city_token = parts[2] if len(parts) > 2 else "all"
+    city = await _resolve_training_added_city(city_token)
+
+    deleted_count = await clear_training_added_interns(
+        range_days=_range_days_from_token(token),
+        city=city,
+    )
+    city_idx = int(city_token) if city_token != "all" and city_token.isdigit() else None
+    await _render_training_added(callback, token, city=city, city_idx=city_idx)
+    await callback.answer(f"Очищено: {deleted_count}", show_alert=True)
+
+
 async def developer_training_left(callback: CallbackQuery):
     if not await _ensure_developer(callback):
         return
@@ -4819,13 +4899,17 @@ async def developer_training_left(callback: CallbackQuery):
     ]
     for idx, row in enumerate(rows[:200], start=1):
         name = html.escape(_safe_name(row))
+        shop = html.escape((row.get("shop") or "—").split(" ")[0])
         if row.get("deleted"):
             lines.append(
                 f"{idx}. {name} — неактивний з <b>{row.get('inactive_since') or '—'}</b> | "
-                f"статус: <b>Видалено</b> ({row.get('deleted_at') or '—'})"
+                f"магазин: <b>{shop}</b> | статус: <b>Видалено</b> ({row.get('deleted_at') or '—'})"
             )
         else:
-            lines.append(f"{idx}. {name} — неактивний з <b>{row.get('inactive_since') or '—'}</b> | статус: <b>Неактивний</b>")
+            lines.append(
+                f"{idx}. {name} — неактивний з <b>{row.get('inactive_since') or '—'}</b> | "
+                f"магазин: <b>{shop}</b> | статус: <b>Неактивний</b>"
+            )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Оновити", callback_data="dev_training_left")],
@@ -4835,20 +4919,37 @@ async def developer_training_left(callback: CallbackQuery):
     await callback.answer()
 
 
-async def _render_training_promoted(callback: CallbackQuery, token: str):
+async def _render_training_promoted(callback: CallbackQuery, token: str, page: int = 0):
     rows = await get_training_promoted(range_days=_range_days_from_token(token))
     filter_label = {"7": "останні 7 дн.", "30": "останні 30 дн.", "all": "весь час"}.get(token, "весь час")
+    items_per_page = 20
+    pages_total = max((len(rows) + items_per_page - 1) // items_per_page, 1)
+    curr_page = max(0, min(page, pages_total - 1))
+    start = curr_page * items_per_page
+    end = start + items_per_page
+    page_rows = rows[start:end]
+
     lines = [
         f"👷 <b>Стали працівниками</b> ({filter_label})",
-        f"Всього: <b>{len(rows)}</b>",
+        f"Всього: <b>{len(rows)}</b> | Стор. <b>{curr_page + 1}/{pages_total}</b>",
         "",
     ]
-    for idx, row in enumerate(rows[:200], start=1):
+    for idx, row in enumerate(page_rows, start=start + 1):
         name = html.escape(_safe_name(row))
         role_v = html.escape(row.get("role") or "—")
         lines.append(f"{idx}. {name} — {role_v} | {row.get('event_at')}")
 
+    nav_row = []
+    if curr_page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"dev_training_promoted_page:{token}:{curr_page - 1}"))
+    if curr_page < pages_total - 1:
+        nav_row.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"dev_training_promoted_page:{token}:{curr_page + 1}"))
+
+    kb_rows = []
+    if nav_row:
+        kb_rows.append(nav_row)
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        *kb_rows,
         [
             InlineKeyboardButton(text="7 дн", callback_data="dev_training_promoted:7"),
             InlineKeyboardButton(text="30 дн", callback_data="dev_training_promoted:30"),
@@ -4866,6 +4967,22 @@ async def developer_training_promoted(callback: CallbackQuery):
     parts = (callback.data or "").split(":")
     token = parts[1] if len(parts) > 1 else "all"
     await _render_training_promoted(callback, token)
+    await callback.answer()
+
+async def developer_training_promoted_page(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) < 3:
+        await callback.answer("Некоректна сторінка.", show_alert=True)
+        return
+    token = parts[1]
+    try:
+        page = int(parts[2])
+    except ValueError:
+        await callback.answer("Некоректна сторінка.", show_alert=True)
+        return
+    await _render_training_promoted(callback, token, page=page)
     await callback.answer()
 
 
@@ -5147,8 +5264,12 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_training_added_city_menu, lambda c: c.data and c.data.startswith("dev_training_added_city_menu:"))
     dp.callback_query.register(developer_training_added_city, lambda c: c.data and c.data.startswith("dev_training_added_city:"))
     dp.callback_query.register(developer_training_added_export, lambda c: c.data and c.data.startswith("dev_training_added_export:"))
+    dp.callback_query.register(developer_training_added_clear_ask, lambda c: c.data and c.data.startswith("dev_training_added_clear_ask:"))
+    dp.callback_query.register(developer_training_added_clear_cancel, lambda c: c.data and c.data.startswith("dev_training_added_clear_cancel:"))
+    dp.callback_query.register(developer_training_added_clear_confirm, lambda c: c.data and c.data.startswith("dev_training_added_clear_confirm:"))
     dp.callback_query.register(developer_training_left, lambda c: c.data == "dev_training_left")
     dp.callback_query.register(developer_training_promoted, lambda c: c.data and c.data.startswith("dev_training_promoted:"))
+    dp.callback_query.register(developer_training_promoted_page, lambda c: c.data and c.data.startswith("dev_training_promoted_page:"))
     dp.callback_query.register(developer_training_rejected, lambda c: c.data and c.data.startswith("dev_training_rejected:"))
     dp.callback_query.register(developer_training_promoted_export, lambda c: c.data and c.data.startswith("dev_training_promoted_export:"))
     dp.callback_query.register(developer_training_rejected_export, lambda c: c.data and c.data.startswith("dev_training_rejected_export:"))

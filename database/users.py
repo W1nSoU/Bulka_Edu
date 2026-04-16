@@ -632,6 +632,7 @@ async def log_training_event(
     full_name: Optional[str] = None,
     username: Optional[str] = None,
     city: Optional[str] = None,
+    shop: Optional[str] = None,
     role: Optional[str] = None,
     manager_id: Optional[int] = None,
 ) -> None:
@@ -640,12 +641,13 @@ async def log_training_event(
     event_type: added | promoted | rejected
     """
     event_at = event_at or _now_str()
-    if full_name is None or username is None or city is None or role is None or manager_id is None:
+    if full_name is None or username is None or city is None or shop is None or role is None or manager_id is None:
         user = await get_user_details(user_id)
         if user:
             full_name = full_name if full_name is not None else user.get("full_name")
             username = username if username is not None else user.get("username")
             city = city if city is not None else user.get("city")
+            shop = shop if shop is not None else user.get("shop")
             role = role if role is not None else user.get("role")
             manager_id = manager_id if manager_id is not None else user.get("manager_id")
 
@@ -653,9 +655,9 @@ async def log_training_event(
         await db.execute(
             """
             INSERT OR IGNORE INTO training_events
-            (user_id, event_type, event_at, actor_id, full_name, username, city, role, manager_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (user_id, event_type, event_at, actor_id, full_name, username, city, shop, role, manager_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, event_type, event_at, actor_id, full_name, username, city, role, manager_id),
+            (user_id, event_type, event_at, actor_id, full_name, username, city, shop, role, manager_id),
         )
         await db.commit()

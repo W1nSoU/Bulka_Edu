@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import pytz
 from bot.config import TIMEZONE, DAYS_TOTAL
 from typing import Optional
+from database.managers import MANAGERS_DB_PATH
 
 async def get_daily_stats():
     """
@@ -56,31 +57,66 @@ async def get_dropout_funnel(active_days: int = 3):
     cutoff = (now - timedelta(days=active_days)).strftime("%Y-%m-%d %H:%M:%S")
     
     async with aiosqlite.connect(DB_PATH) as db:
-        # 1. Загальна статистика (всі користувачі)
-        cursor = await db.execute(
-            "SELECT current_block, COUNT(*) FROM users GROUP BY current_block"
+        db.row_factory = aiosqlite.Row
+
+        # Виключаємо HR/Dev (з users.db)
+        privileged_ids = set()
+        hcur = await db.execute("SELECT user_id FROM hr_users")
+        privileged_ids |= {row[0] for row in await hcur.fetchall()}
+
+        # Виключаємо тих, хто вже завершив навчання
+        ccur = await db.execute(
+            """
+            SELECT user_id
+            FROM progress
+            WHERE completed = 1
+            GROUP BY user_id
+            HAVING COUNT(day) >= ?
+            """,
+            (DAYS_TOTAL,),
         )
-        total_dist = {row[0]: row[1] for row in await cursor.fetchall()}
-        
-        cursor = await db.execute("SELECT COUNT(*) FROM users")
-        total_count = (await cursor.fetchone())[0]
-        
-        # 2. Активна статистика (тільки ті, хто заходив останні 3 дні)
-        cursor = await db.execute(
-            "SELECT current_block, COUNT(*) FROM users WHERE last_activity >= ? GROUP BY current_block",
-            (cutoff,)
+        completed_ids = {row[0] for row in await ccur.fetchall()}
+
+        ucur = await db.execute(
+            "SELECT user_id, current_block, last_activity, status, manager_id FROM users"
         )
-        active_dist = {row[0]: row[1] for row in await cursor.fetchall()}
-        
-        cursor = await db.execute("SELECT COUNT(*) FROM users WHERE last_activity >= ?", (cutoff,))
-        active_count = (await cursor.fetchone())[0]
-        
-        return {
-            "total_users": total_count,
-            "total_distribution": total_dist,
-            "active_users": active_count,
-            "active_distribution": active_dist
-        }
+        users = await ucur.fetchall()
+
+    # Виключаємо керівників (з managers.db)
+    async with aiosqlite.connect(MANAGERS_DB_PATH) as mdb:
+        mcur = await mdb.execute("SELECT uid FROM managers")
+        privileged_ids |= {row[0] for row in await mcur.fetchall()}
+
+    in_progress = []
+    for row in users:
+        user = dict(row)
+        uid = user["user_id"]
+        if uid in privileged_ids:
+            continue
+        if user.get("status") == "Працівник":
+            continue
+        if uid in completed_ids:
+            continue
+        # Меню воронки має відображати саме стажерів у процесі
+        in_progress.append(user)
+
+    total_dist: dict[int, int] = {}
+    active_dist: dict[int, int] = {}
+    active_count = 0
+    for user in in_progress:
+        day = user.get("current_block") or 1
+        total_dist[day] = total_dist.get(day, 0) + 1
+        last_activity = user.get("last_activity")
+        if last_activity and last_activity >= cutoff:
+            active_count += 1
+            active_dist[day] = active_dist.get(day, 0) + 1
+
+    return {
+        "total_users": len(in_progress),
+        "total_distribution": total_dist,
+        "active_users": active_count,
+        "active_distribution": active_dist,
+    }
 
 
 def _cutoff(range_days: Optional[int]) -> Optional[str]:
@@ -113,6 +149,24 @@ async def get_training_added_interns(range_days: Optional[int] = None, city: Opt
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+async def clear_training_added_interns(range_days: Optional[int] = None, city: Optional[str] = None) -> int:
+    """Очищає події доданих стажерів у межах фільтра. Повертає кількість видалених рядків."""
+    cutoff = _cutoff(range_days)
+    where = ["event_type = 'added'"]
+    params: list = []
+    if cutoff:
+        where.append("event_at >= ?")
+        params.append(cutoff)
+    if city:
+        where.append("city = ?")
+        params.append(city)
+
+    query = f"DELETE FROM training_events WHERE {' AND '.join(where)}"
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(query, tuple(params))
+        await db.commit()
+        return cur.rowcount or 0
+
 
 async def get_training_added_cities() -> list[str]:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -129,7 +183,7 @@ async def get_training_left_inactive(days: int = 3) -> list[dict]:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """
-            SELECT user_id, full_name, username, city, role, manager_id, last_activity
+            SELECT user_id, full_name, username, city, shop, role, manager_id, last_activity
             FROM users
             WHERE manager_id IS NOT NULL
               AND (status IS NULL OR status != 'Працівник')
@@ -161,7 +215,7 @@ async def get_training_left_inactive(days: int = 3) -> list[dict]:
 
         deleted_cur = await db.execute(
             """
-            SELECT user_id, full_name, username, city, role, manager_id, event_at
+            SELECT user_id, full_name, username, city, shop, role, manager_id, event_at
             FROM training_events
             WHERE event_type = 'left_deleted'
             ORDER BY event_at DESC

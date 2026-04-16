@@ -123,11 +123,18 @@ async def init_db():
             full_name TEXT,
             username TEXT,
             city TEXT,
+            shop TEXT,
             role TEXT,
             manager_id INTEGER,
             UNIQUE(user_id, event_type)
         )
         ''')
+
+        # Міграція training_events: додаємо колонку shop для аналітики по магазинах
+        cursor = await db.execute("PRAGMA table_info(training_events)")
+        te_columns = [row[1] for row in await cursor.fetchall()]
+        if "shop" not in te_columns:
+            await db.execute("ALTER TABLE training_events ADD COLUMN shop TEXT")
         
         await db.commit()
     # print(f"База даних ініціалізована за шляхом: {DB_PATH}")

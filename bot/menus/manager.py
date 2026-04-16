@@ -733,6 +733,7 @@ async def intern_dismiss_handler(callback: CallbackQuery):
             full_name=intern.get("full_name"),
             username=intern.get("username"),
             city=intern.get("city"),
+            shop=intern.get("shop"),
             role=intern.get("role"),
             manager_id=intern.get("manager_id"),
         )
