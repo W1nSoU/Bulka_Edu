@@ -1,25 +1,71 @@
+# ==========================================
+# Python & Virtual Environments
+# ==========================================
 __pycache__/
+*.py[cod]
+*$py.class
 *.pyc
-.idea/
 venv/
 .venv/
-.DS_Store
-*.db
-data/
-.env
-# Ignore local environment variables
-*.log
+env/
+ENV/
+env.bak/
+venv.bak/
 
-# Security secrets
+# ==========================================
+# Environment Variables & Secrets
+# ==========================================
+.env
+.env.*
+*.env
+!.env.example
+
+# Security module secrets & keys
 security_functions/.master_secret
 security_functions/master_keys.db
-private_server/.env
-private_server/activation_log.db
 security_functions/.license
 security_functions/.salt
-security_functions/guard.log
 security_functions/.chksum
-# _destruct.py is intentionally committed — it's part of the protection
+security_functions/guard.log
+private_server/.env
+private_server/activation_log.db
+
+# ==========================================
+# Databases & Storage
+# ==========================================
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# ==========================================
+# AI Agents & Assistant Configs
+# ==========================================
+.agents/
+.agent/
+
+# ==========================================
+# Logs & Diagnostics
+# ==========================================
+logs/
+*.log
+
+# ==========================================
+# OS & IDE Files
+# ==========================================
+.DS_Store
+*/.DS_Store
+**/.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ==========================================
+# PyInstaller & Build Artifacts
+# ==========================================
 dist/
 build/
 *.spec.bak
+*.egg-info/
