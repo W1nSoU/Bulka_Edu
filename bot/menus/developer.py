@@ -109,6 +109,11 @@ class DeveloperStates(StatesGroup):
     waiting_insert_start_idx = State() # First page index
     waiting_insert_end_idx = State() # Second page index
     waiting_complement_content = State() # New content to add
+    waiting_insert_mode = State() # вибір: одна сторінка чи масив
+    waiting_insert_array_content = State() # FSM цикл для вставки масиву до команди ГОТОВО
+    waiting_replace_range = State() # очікування діапазону сторінок для заміни, напр. "3-5"
+    waiting_replace_array_content = State() # FSM цикл для заміни до команди ГОТОВО
+    waiting_announce_decision = State() # рішення щодо розсилки повідомлень користувачам
     # Стани для оповіщення про зміни
     waiting_notify_decision = State()
     waiting_notify_message = State()
@@ -2347,6 +2352,7 @@ async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
     buttons.append([InlineKeyboardButton(text="➕ Додати навчання", callback_data=f"dev_mat_edit|{content_type}")])
     if material:
         buttons.append([InlineKeyboardButton(text="➕ Доповнити", callback_data=f"dev_mat_complement|{content_type}")])
+        buttons.append([InlineKeyboardButton(text="🔄 Змінити діапазон сторінок", callback_data=f"dev_mat_replace|{content_type}")])
     buttons.append([InlineKeyboardButton(text="🔍 Повний перегляд", callback_data=f"dev_mat_full_view|{content_type}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_mat_day|{day}")])
     
@@ -2401,10 +2407,14 @@ async def developer_material_complement_start(callback: CallbackQuery, state: FS
         )
         await state.set_state(DeveloperStates.waiting_insert_start_idx)
     else:
-        # For start/end, go directly to content request
-        prompt = "🔝 Надішліть контент, який стане <b>першою</b> сторінкою:" if comp_type == "start" else "🔚 Надішліть контент, який буде додано в <b>кінець</b>:"
-        await _edit_or_answer(callback.message, prompt, reply_markup=_cancel_keyboard("dev_mat_menu_back"))
-        await state.set_state(DeveloperStates.waiting_complement_content)
+        # For start/end, go directly to mode choice
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📄 Одна сторінка", callback_data="dev_ins_mode:single")],
+            [InlineKeyboardButton(text="📚 Масив сторінок", callback_data="dev_ins_mode:array")],
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_mat_menu_back")]
+        ])
+        await _edit_or_answer(callback.message, "Оберіть режим додавання:", reply_markup=kb)
+        await state.set_state(DeveloperStates.waiting_insert_mode)
     
     await callback.answer()
 
@@ -2428,8 +2438,13 @@ async def developer_process_insert_end_idx(message: Message, state: FSMContext):
         await message.answer(f"⚠️ Ви вказали {start_idx} та {end_idx}. Зазвичай вставляють між сусідніми сторінками (наприклад, {start_idx} та {start_idx+1}).\n\nАле я продовжу. Нова сторінка стане номером {end_idx}, а стара {end_idx} та наступні посунуться.")
     
     await state.update_data(target_insert_pos=end_idx - 1) # 0-based index
-    await message.answer(f"📝 Надішліть контент (текст/фото), який потрібно вставити між {start_idx} та {end_idx} сторінками:")
-    await state.set_state(DeveloperStates.waiting_complement_content)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📄 Одна сторінка", callback_data="dev_ins_mode:single")],
+        [InlineKeyboardButton(text="📚 Масив сторінок", callback_data="dev_ins_mode:array")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_mat_menu_back")]
+    ])
+    await message.answer("Оберіть режим додавання:", reply_markup=kb)
+    await state.set_state(DeveloperStates.waiting_insert_mode)
 
 async def developer_process_complement_content(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -2470,14 +2485,195 @@ async def developer_process_complement_content(message: Message, state: FSMConte
     
     await message.answer(f"✅ Матеріал успішно доповнено! Нова сторінка додана на позицію {target_page + 1}.")
     
-    # Redirect to view
-    kb = _get_dev_pagination_keyboard(target_page, len(pages), material_id, day, "text")
-    if message.photo:
-        await message.answer_photo(new_page["photo"], caption=new_page["text"], reply_markup=kb)
+    # Move to notification decision
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Оголосити зараз", callback_data="dev_notify:now")],
+        [InlineKeyboardButton(text="📥 Обʼєднати з наступним", callback_data="dev_notify:merge")],
+        [InlineKeyboardButton(text="🔇 Не оголошувати", callback_data="dev_notify:none")]
+    ])
+    await message.answer("Сповістити користувачів про зміни в матеріалі?", reply_markup=kb)
+    await state.set_state(DeveloperStates.waiting_announce_decision)
+
+async def developer_process_insert_mode(callback: CallbackQuery, state: FSMContext):
+    mode = callback.data.split(":")[1]
+    data = await state.get_data()
+    comp_type = data.get("complement_type")
+    
+    if mode == "single":
+        if comp_type == "between":
+            start_idx = data.get("insert_start_val")
+            end_idx = data.get("target_insert_pos") + 1
+            prompt = f"📝 Надішліть контент (текст/фото), який потрібно вставити між {start_idx} та {end_idx} сторінками:"
+        else:
+            prompt = "🔝 Надішліть контент, який стане <b>першою</b> сторінкою:" if comp_type == "start" else "🔚 Надішліть контент, який буде додано в <b>кінець</b>:"
+        await _edit_or_answer(callback.message, prompt, reply_markup=_cancel_keyboard("dev_mat_menu_back"))
+        await state.set_state(DeveloperStates.waiting_complement_content)
     else:
-        await message.answer(new_page["text"], reply_markup=kb)
+        await state.update_data(insert_array=[])
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ ГОТОВО (Зберегти)", callback_data="dev_ins_array_done")],
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_mat_menu_back")]
+        ])
+        await _edit_or_answer(callback.message, "📚 <b>Режим: Масив сторінок</b>\n\nНадсилайте сторінки по черзі (текст або фото). Коли закінчите, натисніть <b>ГОТОВО</b>.", reply_markup=kb)
+        await state.set_state(DeveloperStates.waiting_insert_array_content)
+    await callback.answer()
+
+async def developer_process_insert_array_content(message: Message, state: FSMContext):
+    data = await state.get_data()
+    insert_array = data.get("insert_array", [])
+    
+    new_page = {"text": message.caption or message.text or ""}
+    if message.photo:
+        new_page["photo"] = message.photo[-1].file_id
+        
+    insert_array.append(new_page)
+    await state.update_data(insert_array=insert_array)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ ГОТОВО (Зберегти)", callback_data="dev_ins_array_done")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_mat_menu_back")]
+    ])
+    await message.answer(f"✅ Додано {len(insert_array)}-ю сторінку до масиву.\nНадсилайте наступну або натисніть ГОТОВО.", reply_markup=kb)
+
+async def developer_process_insert_array_done(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    insert_array = data.get("insert_array", [])
+    if not insert_array:
+        return await callback.answer("Ви не додали жодної сторінки!", show_alert=True)
+        
+    comp_type = data.get("complement_type")
+    material_id = data.get("edit_material_id")
+    
+    material = await get_material_by_id(material_id)
+    if not material:
+        await callback.message.answer("❌ Помилка: матеріал не знайдено.")
+        return await state.clear()
+
+    pages = parse_material_content(material.get("content", "[]"))
+    
+    # Logic for insertion
+    if comp_type == "start":
+        pages = insert_array + pages
+    elif comp_type == "end":
+        pages.extend(insert_array)
+    elif comp_type == "between":
+        pos = data.get("target_insert_pos", 0)
+        if pos < 0: pos = 0
+        if pos > len(pages): pos = len(pages)
+        pages = pages[:pos] + insert_array + pages[pos:]
+    
+    # Save to DB
+    new_content_json = json.dumps(pages, ensure_ascii=False)
+    await update_material_content(material_id, new_content_json)
+    
+    await callback.message.answer(f"✅ Успішно додано {len(insert_array)} сторінок!")
+    
+    # Move to notification decision
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Оголосити зараз", callback_data="dev_notify:now")],
+        [InlineKeyboardButton(text="📥 Обʼєднати з наступним", callback_data="dev_notify:merge")],
+        [InlineKeyboardButton(text="🔇 Не оголошувати", callback_data="dev_notify:none")]
+    ])
+    await _edit_or_answer(callback.message, "Сповістити користувачів про зміни в матеріалі?", reply_markup=kb)
+    await state.set_state(DeveloperStates.waiting_announce_decision)
+    await callback.answer()
+
+async def developer_material_replace_range_start(callback: CallbackQuery, state: FSMContext):
+    """Start replacing a range of pages."""
+    if not await _ensure_developer(callback): return
+    
+    await _edit_or_answer(
+        callback.message, 
+        "🔄 <b>Заміна діапазону сторінок</b>\n\nВведіть діапазон сторінок для заміни (наприклад, '3-5' або '3 5'):", 
+        reply_markup=_cancel_keyboard("dev_mat_menu_back")
+    )
+    await state.set_state(DeveloperStates.waiting_replace_range)
+    await callback.answer()
+
+async def developer_process_replace_range(message: Message, state: FSMContext):
+    text = message.text.replace("-", " ").strip()
+    parts = text.split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return await message.answer("❌ Невірний формат. Введіть два числа, наприклад '3-5' або '3 5'.")
+        
+    start_idx, end_idx = int(parts[0]), int(parts[1])
+    if start_idx > end_idx or start_idx < 1:
+        return await message.answer("❌ Некоректний діапазон. Перше число має бути менше або дорівнювати другому і більше нуля.")
+        
+    await state.update_data(replace_start=start_idx - 1, replace_end=end_idx, replace_array=[]) # 0-based for start, end is exclusive for slicing
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ ГОТОВО (Зберегти)", callback_data="dev_rep_array_done")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_mat_menu_back")]
+    ])
+    await message.answer(f"📚 <b>Режим заміни: Масив сторінок</b>\n\nНадсилайте нові сторінки по черзі, щоб замінити сторінки з {start_idx} по {end_idx}. Коли закінчите, натисніть <b>ГОТОВО</b>.", reply_markup=kb)
+    await state.set_state(DeveloperStates.waiting_replace_array_content)
+
+async def developer_process_replace_array_content(message: Message, state: FSMContext):
+    data = await state.get_data()
+    replace_array = data.get("replace_array", [])
+    
+    new_page = {"text": message.caption or message.text or ""}
+    if message.photo:
+        new_page["photo"] = message.photo[-1].file_id
+        
+    replace_array.append(new_page)
+    await state.update_data(replace_array=replace_array)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ ГОТОВО (Зберегти)", callback_data="dev_rep_array_done")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_mat_menu_back")]
+    ])
+    await message.answer(f"✅ Додано {len(replace_array)}-ю сторінку для заміни.\nНадсилайте наступну або натисніть ГОТОВО.", reply_markup=kb)
+
+async def developer_process_replace_array_done(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    replace_array = data.get("replace_array", [])
+    
+    material_id = data.get("edit_material_id")
+    material = await get_material_by_id(material_id)
+    if not material:
+        await callback.message.answer("❌ Помилка: матеріал не знайдено.")
+        return await state.clear()
+
+    pages = parse_material_content(material.get("content", "[]"))
+    start_idx = data.get("replace_start", 0)
+    end_idx = data.get("replace_end", 0)
+    
+    if start_idx > len(pages): start_idx = len(pages)
+    if end_idx > len(pages): end_idx = len(pages)
+    
+    # Replace slice
+    pages[start_idx:end_idx] = replace_array
+    
+    # Save to DB
+    new_content_json = json.dumps(pages, ensure_ascii=False)
+    await update_material_content(material_id, new_content_json)
+    
+    await callback.message.answer(f"✅ Успішно замінено діапазон на {len(replace_array)} нових сторінок!")
+    
+    # Move to notification decision
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Оголосити зараз", callback_data="dev_notify:now")],
+        [InlineKeyboardButton(text="📥 Обʼєднати з наступним", callback_data="dev_notify:merge")],
+        [InlineKeyboardButton(text="🔇 Не оголошувати", callback_data="dev_notify:none")]
+    ])
+    await _edit_or_answer(callback.message, "Сповістити користувачів про зміни в матеріалі?", reply_markup=kb)
+    await state.set_state(DeveloperStates.waiting_announce_decision)
+    await callback.answer()
+
+async def developer_process_notify_decision(callback: CallbackQuery, state: FSMContext):
+    decision = callback.data.split(":")[1]
+    
+    if decision == "now":
+        await callback.message.answer("📢 Оголошення відправлено (у розробці)")
+    elif decision == "merge":
+        await callback.message.answer("📥 Зміни збережено для наступного оголошення (у розробці)")
+    elif decision == "none":
+        await callback.message.answer("🔇 Зміни збережено без оголошення.")
         
     await state.clear()
+    await developer_material_menu_back(callback, state)
 
 async def developer_material_delete_request(callback: CallbackQuery):
     """Asks for confirmation before deleting a page."""
@@ -5163,6 +5359,17 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.message.register(developer_process_insert_end_idx, DeveloperStates.waiting_insert_end_idx)
     dp.message.register(developer_process_complement_content, DeveloperStates.waiting_complement_content)
     dp.callback_query.register(developer_material_menu_back, lambda c: c.data == "dev_mat_menu_back")
+    
+    # Array insert and range replace handlers
+    dp.callback_query.register(developer_process_insert_mode, lambda c: c.data and c.data.startswith("dev_ins_mode:"))
+    dp.message.register(developer_process_insert_array_content, DeveloperStates.waiting_insert_array_content)
+    dp.callback_query.register(developer_process_insert_array_done, lambda c: c.data == "dev_ins_array_done")
+    
+    dp.callback_query.register(developer_material_replace_range_start, lambda c: c.data and c.data.startswith("dev_mat_replace|"))
+    dp.message.register(developer_process_replace_range, DeveloperStates.waiting_replace_range)
+    dp.message.register(developer_process_replace_array_content, DeveloperStates.waiting_replace_array_content)
+    dp.callback_query.register(developer_process_replace_array_done, lambda c: c.data == "dev_rep_array_done")
+    dp.callback_query.register(developer_process_notify_decision, lambda c: c.data and c.data.startswith("dev_notify:"))
     
     dp.callback_query.register(developer_materials_edit_start, lambda c: c.data and c.data.startswith("dev_mat_edit|"))
     dp.message.register(developer_process_material_parts, DeveloperStates.waiting_material_parts)
