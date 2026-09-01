@@ -55,19 +55,57 @@ def _status_from_row(
     return DayStatus.CLOSED
 
 
-async def get_day_status(user_id: int, day: int) -> DayStatus:
-    overview = await get_days_overview(user_id)
+async def get_day_status(
+    user_id: int, day: int, role: Optional[str] = None
+) -> DayStatus:
+    """
+    Повертає статус конкретного дня для користувача.
+
+    Args:
+        user_id: Telegram ID користувача.
+        day: Номер дня.
+        role: Посада користувача (для отримання правильної кількості днів).
+              Якщо None — використовується глобальний DAYS_TOTAL.
+    """
+    overview = await get_days_overview(user_id, role=role)
     for item_day, status in overview:
         if item_day == day:
             return status
     return DayStatus.CLOSED
 
 
-async def get_days_overview(user_id: int) -> List[Tuple[int, DayStatus]]:
+async def get_days_overview(
+    user_id: int, role: Optional[str] = None
+) -> List[Tuple[int, DayStatus]]:
+    """
+    Повертає список (день, статус) для всіх днів курсу користувача.
+
+    Args:
+        user_id: Telegram ID користувача.
+        role: Посада користувача. Якщо передано — кількість днів береться
+              з таблиці `positions` (per-role). Якщо None — використовується
+              глобальний DAYS_TOTAL із bot/config.py (зворотна сумісність).
+    """
+    # Визначаємо кількість днів для цього користувача/посади
+    if not role:
+        try:
+            from database.users import get_user_details
+            user_info = await get_user_details(user_id)
+            if user_info and user_info.get("role"):
+                role = user_info.get("role")
+        except Exception:
+            pass
+
+    if role:
+        from database.positions import get_days_count_for_role  # локальний імпорт
+        days_count = await get_days_count_for_role(role)
+    else:
+        days_count = DAYS_TOTAL
+
     rows = await _fetch_progress_rows(user_id)
     overview: List[Tuple[int, DayStatus]] = []
     prev_completed = True
-    for day in range(1, DAYS_TOTAL + 1):
+    for day in range(1, days_count + 1):
         row = rows.get(day)
         status = _status_from_row(day, row, prev_completed)
         overview.append((day, status))
