@@ -150,6 +150,7 @@ class DeveloperStates(StatesGroup):
     # Стани для управління посадами
     waiting_add_position_name = State()
     waiting_add_position_days = State()
+    waiting_add_position_type = State()  # Вибір типу: ТЗ або ВВ
     waiting_edit_position_name = State()
     waiting_edit_position_days = State()
     # Стани для управління містами
@@ -878,11 +879,35 @@ async def developer_users_menu(callback: CallbackQuery):
     await callback.answer()
 
 async def _filter_users_for_territorial(user_id: int, users: list) -> list:
-    """Фільтрує список користувачів, залишаючи лише тих, які належать керівникам територіала."""
-    from database.managers import get_managers_by_responsible
-    managers = await get_managers_by_responsible(user_id)
-    manager_ids = {m["uid"] for m in managers}
-    return [u for u in users if u.get("manager_id") in manager_ids]
+    """
+    Фільтрує список користувачів для територіала за:
+      1) Містом (user.city == territorial.city)
+      2) Типом посади (positions.territorial_type == territorial.territorial_type: 'ТЗ' або 'ВВ')
+    """
+    from database.managers import get_manager_by_uid
+    from database.positions import get_all_positions
+    
+    mgr = await get_manager_by_uid(user_id)
+    if not mgr or mgr.get("process") != "Територіал":
+        return users
+        
+    t_city = (mgr.get("city") or "").strip().lower()
+    t_type = (mgr.get("territorial_type") or "ТЗ").strip()
+    
+    positions = await get_all_positions()
+    pos_type_map = {p["name"]: p.get("territorial_type", "ТЗ") for p in positions}
+    
+    filtered = []
+    for u in users:
+        u_city = (u.get("city") or "").strip().lower()
+        u_role = u.get("role") or ""
+        u_type = pos_type_map.get(u_role, "ТЗ")
+        
+        # Перевірка збігу міста та напрямку посади (ТЗ або ВВ)
+        if u_city == t_city and u_type == t_type:
+            filtered.append(u)
+            
+    return filtered
 
 
 async def _developer_show_users_list(callback: CallbackQuery, users: list, title: str, mode: str, page: int = 0, show_day: bool = True):
@@ -6340,20 +6365,24 @@ async def dev_pos_add_name(message: Message, state: FSMContext):
     await state.set_state(DeveloperStates.waiting_add_position_days)
 
 
-async def _dev_pos_finish_add(message: Message, state: FSMContext, pos_name: str, days: int):
-    success = await add_position(pos_name, days)
-    if success:
-        await message.answer(f"✅ Посаду <b>{pos_name}</b> ({days} днів) успішно додано!")
-    else:
-        await message.answer(f"❌ Помилка: посада <b>{pos_name}</b> вже існує або виникла інша помилка.")
-    await state.clear()
-    
-    # Повертаємось до списку
-    positions = await get_all_positions()
-    await message.answer(
-        "👔 <b>Управління посадами</b>",
-        reply_markup=_positions_keyboard(positions, 1)
+async def _dev_pos_prompt_type(message_or_callback, state: FSMContext, pos_name: str, days: int):
+    await state.update_data(pos_days=days)
+    buttons = [
+        [InlineKeyboardButton(text="🏪 Торговий зал (ТЗ)", callback_data="dev_pos_add_type:ТЗ")],
+        [InlineKeyboardButton(text="🍞 Власне виробництво (ВВ)", callback_data="dev_pos_add_type:ВВ")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_positions_menu")]
+    ]
+    text = (
+        f"Посада: <b>{pos_name}</b> ({days} днів)\n\n"
+        f"Оберіть напрямок посади:\n"
+        f"• <b>ТЗ (Торговий зал)</b> — касири, продавці тощо\n"
+        f"• <b>ВВ (Власне виробництво)</b> — пекарі, кухарі, піцайоло тощо"
     )
+    if isinstance(message_or_callback, CallbackQuery):
+        await _edit_or_answer(message_or_callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    else:
+        await message_or_callback.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await state.set_state(DeveloperStates.waiting_add_position_type)
 
 
 async def dev_pos_add_days_text(message: Message, state: FSMContext):
@@ -6365,7 +6394,10 @@ async def dev_pos_add_days_text(message: Message, state: FSMContext):
         
     try:
         days = int(message.text.strip())
-        await _dev_pos_finish_add(message, state, pos_name, days)
+        if days < 1:
+            await message.answer("Кількість днів повинна бути не менше 1.")
+            return
+        await _dev_pos_prompt_type(message, state, pos_name, days)
     except ValueError:
         await message.answer("Будь ласка, введіть числове значення кількості днів.")
 
@@ -6378,7 +6410,40 @@ async def dev_pos_add_days_callback(callback: CallbackQuery, state: FSMContext):
         return
         
     days = int(callback.data.split(":")[1])
-    await _dev_pos_finish_add(callback.message, state, pos_name, days)
+    await _dev_pos_prompt_type(callback, state, pos_name, days)
+    await callback.answer()
+
+
+async def dev_pos_add_type_callback(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    pos_name = data.get('pos_name')
+    days = data.get('pos_days', 5)
+    if not pos_name:
+        await state.clear()
+        await callback.answer("Дані сесії застаріли.", show_alert=True)
+        return
+
+    t_type = callback.data.split(":")[1]  # 'ТЗ' або 'ВВ'
+    type_label = "🏪 Торговий зал (ТЗ)" if t_type == "ТЗ" else "🍞 Власне виробництво (ВВ)"
+    
+    success = await add_position(pos_name, days, territorial_type=t_type)
+    if success:
+        await _edit_or_answer(
+            callback.message,
+            f"✅ Посаду <b>{pos_name}</b> ({days} днів, {type_label}) успішно додано!"
+        )
+    else:
+        await _edit_or_answer(
+            callback.message,
+            f"❌ Помилка: посада <b>{pos_name}</b> вже існує або виникла інша помилка."
+        )
+    await state.clear()
+    
+    positions = await get_all_positions()
+    await callback.message.answer(
+        "👔 <b>Управління посадами</b>",
+        reply_markup=_positions_keyboard(positions, 1)
+    )
     await callback.answer()
 
 
@@ -7365,6 +7430,7 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.message.register(dev_pos_add_name, DeveloperStates.waiting_add_position_name)
     dp.message.register(dev_pos_add_days_text, DeveloperStates.waiting_add_position_days)
     dp.callback_query.register(dev_pos_add_days_callback, DeveloperStates.waiting_add_position_days, lambda c: c.data and c.data.startswith("dev_pos_add_days:"))
+    dp.callback_query.register(dev_pos_add_type_callback, DeveloperStates.waiting_add_position_type, lambda c: c.data and c.data.startswith("dev_pos_add_type:"))
     dp.callback_query.register(dev_pos_view, lambda c: c.data and c.data.startswith("dev_pos_view:"))
     dp.callback_query.register(dev_pos_edit_name_start, lambda c: c.data and c.data.startswith("dev_pos_edit_name:"))
     dp.message.register(dev_pos_edit_name_process, DeveloperStates.waiting_edit_position_name)
