@@ -9,11 +9,13 @@ from typing import Optional
 from pathlib import Path
 from datetime import datetime # NEW IMPORT
 from aiogram import Dispatcher
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message, InputMediaPhoto
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message, InputMediaPhoto, FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramBadRequest
 from bot.config import MAIN_DEVELOPER_ID, DAYS_TOTAL, TIMEZONE
+from bot.services.positions import get_all_positions, get_position_by_id, add_position, update_position_name, update_position_days, update_position_type, get_position_stats
+from bot.services.cities import get_all_cities, get_city_by_id, add_city, update_city_name, delete_city
 from bot.services.logger import get_logger
 from bot.services.semantic_search import build_and_reset_embeddings
 from database.users import (
@@ -31,6 +33,7 @@ from database.users import (
     get_reminder_history,
     get_user_progress,
     update_user_role,
+    get_users_by_managers,
 )
 from database.hr import (
     is_developer_user,
@@ -43,6 +46,17 @@ from database.managers import (
     get_manager_by_uid,
     get_all_developers as get_all_devs_from_managers_db, # Alias to avoid name conflict if needed
     get_all_kerivnyky,
+    is_territorial_user,
+    get_managers_by_responsible,
+    get_territorials_by_city,
+    update_manager_name,
+    update_manager_shops,
+    fire_manager,
+    search_managers,
+    transfer_users_to_territorial_or_admin,
+    count_users_in_shops,
+    transfer_users_by_shops,
+    update_manager_responsible,
 )
 
 from bot.services.developer_actions import (
@@ -125,9 +139,27 @@ class DeveloperStates(StatesGroup):
     waiting_video_role = State()
     waiting_video_day = State()
     waiting_video_uploads = State()
+    # Стани для управління посадами
+    waiting_add_position_name = State()
+    waiting_add_position_days = State()
+    waiting_edit_position_name = State()
+    waiting_edit_position_days = State()
+    # Стани для управління містами
+    waiting_add_city_name = State()
+    waiting_edit_city_name = State()
     waiting_photo_uploads = State() # New state for photo uploads
     waiting_syllabus_text = State() # State for editing syllabus
 
+    # Стани для управління територіалами
+    waiting_add_territorial_uid = State()
+    waiting_add_territorial_city = State()
+    waiting_add_territorial_type = State()   # Вибір типу: ТЗ або ВВ
+    waiting_add_territorial_transfer = State() # Запит чи переносити керівників
+
+    # Стани для управління та пошуку керівників
+    waiting_search_manager = State()
+    waiting_edit_manager_name = State()
+    waiting_edit_manager_shops = State()
 
 async def _ensure_developer(callback: CallbackQuery, require_main: bool = False) -> bool:
     user_id = callback.from_user.id
@@ -144,6 +176,25 @@ async def _ensure_developer(callback: CallbackQuery, require_main: bool = False)
             pass
         return False
     return True
+
+async def _check_access(callback: CallbackQuery) -> tuple[bool, bool, bool]:
+    """
+    Перевіряє доступ для панелі розробника/територіала.
+    Повертає кортеж (has_access, is_admin, is_territorial).
+    Якщо доступу немає, показує alert.
+    """
+    user_id = callback.from_user.id
+    is_admin = await is_developer_user(user_id)
+    is_territorial = await is_territorial_user(user_id)
+    has_access = is_admin or is_territorial
+    
+    if not has_access:
+        try:
+            await callback.answer("⛔️ Доступ заборонено. Ви не маєте потрібної ролі.", show_alert=True)
+        except Exception:
+            pass
+            
+    return has_access, is_admin, is_territorial
 
 
 async def _send_in_chunks(message: Message, text: str, reply_markup=None, chunk_size: int = 3500):
@@ -174,62 +225,209 @@ async def _send_in_chunks(message: Message, text: str, reply_markup=None, chunk_
     await message.answer(parts[-1], reply_markup=reply_markup)
 
 
-def _developer_main_keyboard(is_main_dev: bool) -> InlineKeyboardMarkup:
-    buttons = [
-        [InlineKeyboardButton(text="👥 Користувачі", callback_data="dev_users_menu")],
-        [
-            InlineKeyboardButton(text="📝 Матеріали", callback_data="dev_materials_menu"),
-            InlineKeyboardButton(text="📝 Тести", callback_data="dev_tests_menu"),
-        ],
-        [
-            InlineKeyboardButton(text="🎥 Відео", callback_data="dev_videos_menu"),
-            InlineKeyboardButton(text="🖼 Фото", callback_data="dev_photos_menu"),
-        ],
-        [
-            InlineKeyboardButton(text="📚 Змінити змісти", callback_data="dev_syllabus_menu"),
-        ],
-        [
-            InlineKeyboardButton(text="🎟 Токени", callback_data="dev_tokens_menu"),
-            InlineKeyboardButton(text="💚 Health Status", callback_data="dev_health_status"),
-        ],
-        [InlineKeyboardButton(text="🧠 Нагадати тему", callback_data="remind_topic_global")],
-        [
-            InlineKeyboardButton(text="📜 Історія нагадувань", callback_data="dev_reminder_history"),
-            InlineKeyboardButton(text="📊 Аналітика", callback_data="dev_analytics_menu"),
-        ],
-        [
-            InlineKeyboardButton(text="📊 XLSX звіт", callback_data="dev_xlsx_menu"),
-            InlineKeyboardButton(text="📊 Помилки тестів", callback_data="show_test_errors")
-        ],
-    ]
-    # Розділяємо меню для головного розробника та інших
-    row_team = []
-    
-    # "Команда Dev" тепер доступна всім розробникам
-    row_team.append(InlineKeyboardButton(text="👨‍💻 Команда Dev", callback_data="dev_team_menu"))
-    
-    # "Команда Керівників" тепер доступна всім розробникам
-    row_team.append(InlineKeyboardButton(text="👔 Команда Керівників", callback_data="dev_manage_managers"))
-    buttons.append(row_team)
-
+def _admin_cho_keyboard(is_main_dev: bool, is_admin: bool, is_territorial: bool) -> InlineKeyboardMarkup:
+    buttons = []
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text="📚 Навчальні матеріали", callback_data="dev_main_study")])
+    buttons.append([InlineKeyboardButton(text="📊 Аналітика", callback_data="dev_main_analyt")])
+    buttons.append([InlineKeyboardButton(text="👥 Команда Bulka", callback_data="dev_main_team")])
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text="🛠 Інше", callback_data="dev_main_other")])
     buttons.append([InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def _admin_study_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(text="📝 Матеріали", callback_data="dev_materials_menu"),
+            InlineKeyboardButton(text="🎥 Відео", callback_data="dev_videos_menu")
+        ],
+        [
+            InlineKeyboardButton(text="📝 Тести", callback_data="dev_tests_menu"),
+            InlineKeyboardButton(text="🖼 Фото", callback_data="dev_photos_menu")
+        ],
+        [
+            InlineKeyboardButton(text="📚 Змінити змісти", callback_data="dev_syllabus_menu"),
+            InlineKeyboardButton(text="🧠 Нагадати тему", callback_data="remind_topic_global")
+        ],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _admin_analyt_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(text="📊 Аналітика", callback_data="dev_analytics_menu"),
+            InlineKeyboardButton(text="📊 Помилки тестів", callback_data="show_test_errors")
+        ],
+        [
+            InlineKeyboardButton(text="📜 Історія нагадувань", callback_data="dev_reminder_history"),
+            InlineKeyboardButton(text="📊 XLSX звіт", callback_data="dev_xlsx_menu")
+        ],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _admin_team_keyboard(is_admin: bool, is_territorial: bool) -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(text="👥 Користувачі", callback_data="dev_users_menu"),
+            InlineKeyboardButton(text="👔 Команда Керівників", callback_data="dev_manage_managers")
+        ]
+    ]
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text="👨‍💻 Команда Адміністраторів", callback_data="dev_team_menu")])
+        buttons.append([
+            InlineKeyboardButton(text="🗺 Територіали", callback_data="dev_territorials_menu"),
+            InlineKeyboardButton(text="👁 Наглядачі", callback_data="dev_observers_menu")
+        ])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _admin_other_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(text="👔 Посади", callback_data="dev_positions_menu"),
+            InlineKeyboardButton(text="🏙 Міста", callback_data="dev_cities_menu")
+        ],
+        [
+            InlineKeyboardButton(text="🎟 Токени", callback_data="dev_tokens_menu"),
+            InlineKeyboardButton(text="💚 Health Status", callback_data="dev_health_status")
+        ],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 async def developer_menu_callback(callback: CallbackQuery):
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
         return
     is_main = callback.from_user.id == MAIN_DEVELOPER_ID
-    await _edit_or_answer(
-        callback.message,
-        "🛠 <b>Dev-панель</b>\nОберіть розділ для керування:",
-        reply_markup=_developer_main_keyboard(is_main),
-    )
+    
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    
+    caption_text = "🛠 <b>Панель Адміністратора</b>\nОберіть розділ для керування:" if is_admin else "🛠 <b>Панель Територіала</b>\nОберіть розділ для керування:"
+    
+    try:
+        photo = FSInputFile("img/admin/admin_cho.jpg")
+        await callback.message.answer_photo(
+            photo=photo,
+            caption=caption_text,
+            reply_markup=_admin_cho_keyboard(is_main, is_admin, is_territorial)
+        )
+    except Exception:
+        await callback.message.answer(
+            caption_text,
+            reply_markup=_admin_cho_keyboard(is_main, is_admin, is_territorial)
+        )
+
     try:
         await callback.answer()
     except TelegramBadRequest as e:
         if "query is too old" not in str(e):
             raise e
+
+
+async def dev_main_study_handler(callback: CallbackQuery):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or not is_admin:
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    try:
+        photo = FSInputFile("img/admin/admin_study.jpg")
+        await callback.message.answer_photo(
+            photo=photo,
+            caption="📚 <b>Навчальні матеріали</b>",
+            reply_markup=_admin_study_keyboard()
+        )
+    except Exception:
+        await callback.message.answer(
+            "📚 <b>Навчальні матеріали</b>",
+            reply_markup=_admin_study_keyboard()
+        )
+    await callback.answer()
+
+
+async def dev_main_analyt_handler(callback: CallbackQuery):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    try:
+        photo = FSInputFile("img/admin/admin_analyt.jpg")
+        await callback.message.answer_photo(
+            photo=photo,
+            caption="📊 <b>Аналітика</b>",
+            reply_markup=_admin_analyt_keyboard()
+        )
+    except Exception:
+        await callback.message.answer(
+            "📊 <b>Аналітика</b>",
+            reply_markup=_admin_analyt_keyboard()
+        )
+    await callback.answer()
+
+
+async def dev_main_team_handler(callback: CallbackQuery):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    try:
+        photo = FSInputFile("img/admin/admin_spus.jpg")
+        await callback.message.answer_photo(
+            photo=photo,
+            caption="👥 <b>Команда Bulka</b>",
+            reply_markup=_admin_team_keyboard(is_admin, is_territorial)
+        )
+    except Exception:
+        await callback.message.answer(
+            "👥 <b>Команда Bulka</b>",
+            reply_markup=_admin_team_keyboard(is_admin, is_territorial)
+        )
+    await callback.answer()
+
+
+async def dev_main_other_handler(callback: CallbackQuery):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or not is_admin:
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    try:
+        photo = FSInputFile("img/admin/admin_tools.jpg")
+        await callback.message.answer_photo(
+            photo=photo,
+            caption="🛠 <b>Інше</b>",
+            reply_markup=_admin_other_keyboard()
+        )
+    except Exception:
+        await callback.message.answer(
+            "🛠 <b>Інше</b>",
+            reply_markup=_admin_other_keyboard()
+        )
+    await callback.answer()
 
 
 async def _edit_or_answer(message: Message, text: str, reply_markup=None):
@@ -324,9 +522,14 @@ async def _format_identity(user_id: int, fallback_name=None, fallback_username=N
     return full_name, username_display
 
 
-async def _build_managers_team_view(page: int = 0):
-    """Список керівників з пагінацією та новим форматуванням."""
-    all_hrs = await get_all_kerivnyky()
+async def _build_managers_team_view(is_admin: bool, is_territorial: bool, user_id: int, page: int = 0):
+    """Список керівників з пагінацією, пошуком та прямим переходом до карток."""
+    if is_admin:
+        all_hrs = await get_all_kerivnyky()
+    elif is_territorial:
+        all_hrs = await get_managers_by_responsible(user_id)
+    else:
+        all_hrs = []
     
     city_abbr = {
         "Хмельницький": "ХМ",
@@ -334,10 +537,11 @@ async def _build_managers_team_view(page: int = 0):
     }
     
     if not all_hrs:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Додати керівника", callback_data="dev_add_manager")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")],
-        ])
+        buttons = []
+        if is_admin:
+            buttons.append([InlineKeyboardButton(text="➕ Додати керівника", callback_data="dev_add_manager")])
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")])
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         return "👔 <b>Команда керівників</b>\n\nПоки що немає", kb
 
     items_per_page = 10
@@ -351,7 +555,11 @@ async def _build_managers_team_view(page: int = 0):
     end = start + items_per_page
     paginated_hrs = all_hrs[start:end]
     
-    lines = [f"👔 <b>Команда керівників</b> (Всього: {total_count}, Стор. {page + 1}/{pages_total})", ""]
+    lines = [f"👔 <b>Команда керівників</b> (Всього: {total_count}, Стор. {page + 1}/{pages_total})", "Натисніть на керівника для перегляду картки:", ""]
+    
+    buttons = [
+        [InlineKeyboardButton(text="🔍 Пошук керівника", callback_data="dev_mgr_search_start")]
+    ]
     
     for idx, hr in enumerate(paginated_hrs, start=start + 1):
         name, username = await _format_identity(
@@ -360,15 +568,11 @@ async def _build_managers_team_view(page: int = 0):
             hr.get("username"),
         )
         
-        # Витягуємо тільки коди магазинів (наприклад, B-17)
         shop_list = hr.get("shops") or []
         shop_codes = [s.split(" ")[0] for s in shop_list]
         shops_str = ", ".join(shop_codes) if shop_codes else "Не вказано"
         
-        # Абревіатура міста
         city = hr.get("city")
-        
-        # Спроба вивести місто з магазинів, якщо воно не вказано в БД
         if not city and shop_list:
             from bot.constants import AVAILABLE_SHOPS
             for city_name, city_shops in AVAILABLE_SHOPS.items():
@@ -378,27 +582,22 @@ async def _build_managers_team_view(page: int = 0):
         
         abbr = city_abbr.get(city, "??")
         
-        # Екрануємо дані з БД
-        e_name = html.escape(name)
-        e_username = html.escape(username)
-        e_shops = html.escape(shops_str)
-        
-        lines.append(f"{idx}. {e_name} | {e_username} | {e_shops} | {abbr}")
-        lines.append("───────────────")
+        btn_text = f"👔 {name} | {shops_str} | {abbr}"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_mgr_view:{hr['uid']}")])
     
     # Кнопки навігації
     nav_row = []
     if page > 0:
-        nav_row.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"dev_mgr_page:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_mgr_page:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(text=f"📄 {page + 1}/{pages_total}", callback_data="ignore"))
     if page < pages_total - 1:
-        nav_row.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"dev_mgr_page:{page + 1}"))
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_mgr_page:{page + 1}"))
     
-    buttons = []
-    if nav_row:
+    if len(nav_row) > 1:
         buttons.append(nav_row)
         
-    buttons.append([InlineKeyboardButton(text="➕ Додати керівника", callback_data="dev_add_manager")])
-    buttons.append([InlineKeyboardButton(text="❌ Видалити керівника", callback_data="dev_remove_manager_menu")])
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text="➕ Додати керівника", callback_data="dev_add_manager")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")])
     
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -411,9 +610,9 @@ async def _build_dev_team_view() -> tuple[str, InlineKeyboardMarkup]:
     # Сортуємо: головний розробник завжди перший
     developers.sort(key=lambda x: x["uid"] != MAIN_DEVELOPER_ID)
     
-    lines = [f"👨‍💻 <b>Команда Dev (всього: {len(developers)})</b>", ""]
+    lines = [f"👨‍💻 <b>Команда Адміністраторів (всього: {len(developers)})</b>", ""]
     if not developers:
-        lines.append("  Немає розробників у команді.")
+        lines.append("  Немає адміністраторів у команді.")
     else:
         for idx, dev in enumerate(developers, start=1):
             name, username = await _format_identity(
@@ -431,7 +630,7 @@ async def _build_dev_team_view() -> tuple[str, InlineKeyboardMarkup]:
                 InlineKeyboardButton(text="➕ Додати", callback_data="dev_add_dev"),
                 InlineKeyboardButton(text="❌ Видалити", callback_data="dev_remove_dev_menu"),
             ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")],
         ]
     )
     return "\n".join(lines), kb
@@ -508,8 +707,8 @@ async def developer_remove_dev(callback: CallbackQuery, state: FSMContext):
 
 # ---------- Users section ----------
 
-def _users_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def _users_menu_keyboard(is_admin: bool, is_territorial: bool) -> InlineKeyboardMarkup:
+    buttons = [
         [
             InlineKeyboardButton(text="🎓 Стажери", callback_data="dev_users_interns"),
             InlineKeyboardButton(text="👷 Працівники", callback_data="dev_users_workers"),
@@ -518,13 +717,23 @@ def _users_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🚀 Активні стажери", callback_data="dev_users_active"),
             InlineKeyboardButton(text="😴 Неактивні", callback_data="dev_users_inactive"),
         ],
-        [InlineKeyboardButton(text="🏙️ За містом", callback_data="dev_users_by_city")],
-        [InlineKeyboardButton(text="✅ Перевести завершених у працівники", callback_data="dev_users_bulk_promote")],
-        [InlineKeyboardButton(text="📋 Список користувачів", callback_data="dev_users_list")],
-        [InlineKeyboardButton(text="🔍 Пошук", callback_data="dev_users_search")],
-        [InlineKeyboardButton(text="❌ Видалити", callback_data="dev_users_delete")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")]
-    ])
+    ]
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text="🏙️ За містом", callback_data="dev_users_by_city")])
+        buttons.append([InlineKeyboardButton(text="✅ Перевести завершених у працівники", callback_data="dev_users_bulk_promote")])
+        buttons.append([InlineKeyboardButton(text="📋 Список користувачів", callback_data="dev_users_list")])
+        buttons.append([InlineKeyboardButton(text="🔍 Пошук", callback_data="dev_users_search")])
+        buttons.append([InlineKeyboardButton(text="❌ Видалити", callback_data="dev_users_delete")])
+
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+async def _get_users_menu_kb(user_id: int) -> InlineKeyboardMarkup:
+    from database.hr import is_developer_user
+    from database.managers import is_territorial_user
+    is_admin = await is_developer_user(user_id)
+    is_territorial = await is_territorial_user(user_id)
+    return _users_menu_keyboard(is_admin, is_territorial)
 
 
 def _cancel_keyboard(callback_data: str) -> InlineKeyboardMarkup:
@@ -561,9 +770,9 @@ async def _refresh_panel_view(bot, panel_info: Optional[dict], builder):
 async def _build_developer_team_view():
     developers = await get_all_devs_from_managers_db()
     text = (
-        f"👨‍💻 <b>Команда Dev</b>\n"
+        f"👨‍💻 <b>Команда Адміністраторів</b>\n"
         f"Усього учасників: <b>{len(developers)}</b>\n"
-        "Оберіть девелопера, щоб керувати його доступом, або додайте нового."
+        "Оберіть адміністратора, щоб керувати його доступом, або додайте нового."
     )
     rows = []
     if developers:
@@ -577,8 +786,8 @@ async def _build_developer_team_view():
                     callback_data=f"dev_team_member_{dev['uid']}",
                 )
             ])
-    rows.append([InlineKeyboardButton(text="➕ Додати девелопера", callback_data="dev_add_developer")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")])
+    rows.append([InlineKeyboardButton(text="➕ Додати адміністратора", callback_data="dev_add_developer")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -628,19 +837,32 @@ async def _update_prompt_message(bot, prompt_info: Optional[dict], text: str, ca
 
 
 async def developer_users_menu(callback: CallbackQuery):
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
         return
     await _edit_or_answer(
         callback.message,
         "👥 <b>Користувачі</b>\nОберіть дію:",
-        reply_markup=_users_menu_keyboard(),
+        reply_markup=await _get_users_menu_kb(callback.from_user.id),
     )
     await callback.answer()
 
+async def _filter_users_for_territorial(user_id: int, users: list) -> list:
+    """Фільтрує список користувачів, залишаючи лише тих, які належать керівникам територіала."""
+    from database.managers import get_managers_by_responsible
+    managers = await get_managers_by_responsible(user_id)
+    manager_ids = {m["uid"] for m in managers}
+    return [u for u in users if u.get("manager_id") in manager_ids]
+
 
 async def _developer_show_users_list(callback: CallbackQuery, users: list, title: str, mode: str, page: int = 0, show_day: bool = True):
+    user_id = callback.from_user.id
+    from database.hr import is_developer_user
+    from database.managers import is_territorial_user
+    is_admin = await is_developer_user(user_id)
+    is_territorial = await is_territorial_user(user_id)
     if not users:
-        await _edit_or_answer(callback.message, f"{title}\n\nСписок порожній.", reply_markup=_users_menu_keyboard())
+        await _edit_or_answer(callback.message, f"{title}\n\nСписок порожній.", reply_markup=await _get_users_menu_kb(callback.from_user.id))
         try:
              await callback.answer()
         except:
@@ -730,33 +952,44 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
         pass
 
 async def developer_list_users(callback: CallbackQuery, page: int = 0):
-    if not await _ensure_developer(callback): return
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access: return
     users = await get_all_users()
+    if is_territorial: users = await _filter_users_for_territorial(callback.from_user.id, users)
     await _developer_show_users_list(callback, users, "👥 <b>Всі користувачі</b>", "all", page)
 
 async def developer_active_users(callback: CallbackQuery, page: int = 0):
-    if not await _ensure_developer(callback): return
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access: return
     users = await get_all_active_users(days=3)
+    if is_territorial: users = await _filter_users_for_territorial(callback.from_user.id, users)
     await _developer_show_users_list(callback, users, "🚀 <b>Активні стажери</b>", "active", page)
 
 async def developer_inactive_users(callback: CallbackQuery, page: int = 0):
-    if not await _ensure_developer(callback): return
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access: return
     users = await get_all_inactive_users(days=3)
+    if is_territorial: users = await _filter_users_for_territorial(callback.from_user.id, users)
     await _developer_show_users_list(callback, users, "😴 <b>Неактивні стажери</b>", "inactive", page)
 
 async def developer_list_interns(callback: CallbackQuery, page: int = 0):
-    if not await _ensure_developer(callback): return
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access: return
     users = await get_all_interns()
+    if is_territorial: users = await _filter_users_for_territorial(callback.from_user.id, users)
     await _developer_show_users_list(callback, users, "🎓 <b>Стажери</b>", "interns", page, show_day=True)
 
 async def developer_list_workers(callback: CallbackQuery, page: int = 0):
-    if not await _ensure_developer(callback): return
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access: return
     users = await get_all_workers()
+    if is_territorial: users = await _filter_users_for_territorial(callback.from_user.id, users)
     await _developer_show_users_list(callback, users, "👷 <b>Працівники</b>", "workers", page, show_day=False)
 
 async def developer_bulk_promote_completed_interns(callback: CallbackQuery):
     """Масово переводить завершених стажерів у працівники."""
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
         return
 
     interns = await get_all_interns()
@@ -780,12 +1013,13 @@ async def developer_bulk_promote_completed_interns(callback: CallbackQuery):
             f"У статус <b>Працівник</b> переведено: <b>{promoted_count}</b>"
         )
 
-    await _edit_or_answer(callback.message, text, reply_markup=_users_menu_keyboard())
+    await _edit_or_answer(callback.message, text, reply_markup=await _get_users_menu_kb(callback.from_user.id))
     await callback.answer("Готово ✅")
 
 async def developer_interns_export_xlsx(callback: CallbackQuery):
     """Вивантажує список усіх стажерів у xlsx з колонками Ім'я / День / Магазин / Керівник."""
-    if not await _ensure_developer(callback): return
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access: return
 
     import io
     import openpyxl
@@ -793,6 +1027,7 @@ async def developer_interns_export_xlsx(callback: CallbackQuery):
     from aiogram.types import BufferedInputFile
 
     users = await get_all_interns()
+    if is_territorial: users = await _filter_users_for_territorial(callback.from_user.id, users)
 
     # Збираємо імена керівників одним проходом (кешуємо щоб не дублювати запити)
     manager_cache: dict = {}
@@ -850,7 +1085,10 @@ async def developer_interns_export_xlsx(callback: CallbackQuery):
 
 async def developer_workers_export_xlsx(callback: CallbackQuery):
     """Вивантажує список усіх працівників у xlsx з колонками Ім'я / Магазин / Керівник."""
-    if not await _ensure_developer(callback): return
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        await callback.answer("Вам недоступна ця функція.", show_alert=True)
+        return
 
     import io
     import openpyxl
@@ -858,6 +1096,8 @@ async def developer_workers_export_xlsx(callback: CallbackQuery):
     from aiogram.types import BufferedInputFile
 
     users = await get_all_workers()
+    if is_territorial and not is_admin:
+        users = await _filter_users_for_territorial(callback.from_user.id, users)
 
     manager_cache: dict = {}
     for user in users:
@@ -911,7 +1151,10 @@ async def developer_workers_export_xlsx(callback: CallbackQuery):
     await callback.answer()
 
 async def developer_users_by_city_menu(callback: CallbackQuery):
-    if not await _ensure_developer(callback): return
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (is_territorial and not is_admin):
+        await callback.answer("Вам недоступна ця функція.", show_alert=True)
+        return
     
     buttons = []
     for city in AVAILABLE_CITIES:
@@ -927,7 +1170,10 @@ async def developer_users_by_city_menu(callback: CallbackQuery):
     except: pass
 
 async def developer_users_filter_city(callback: CallbackQuery):
-    if not await _ensure_developer(callback): return
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (is_territorial and not is_admin):
+        await callback.answer("Вам недоступна ця функція.", show_alert=True)
+        return
     try:
         city = callback.data.split(":")[1]
     except IndexError:
@@ -972,7 +1218,9 @@ async def developer_users_pagination_handler(callback: CallbackQuery):
 
 
 async def developer_request_user_search(callback: CallbackQuery, state: FSMContext):
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (is_territorial and not is_admin):
+        await callback.answer("Вам недоступна ця функція.", show_alert=True)
         return
     await state.set_state(DeveloperStates.waiting_user_search)
     await _edit_or_answer(
@@ -983,7 +1231,7 @@ async def developer_request_user_search(callback: CallbackQuery, state: FSMConte
         "• Username (наприклад, <code>@username</code>)\n"
         "• ПІБ (наприклад, <code>Іванов Іван</code>)\n\n"
         "<i>💡 Пошук не чутливий до регістру</i>",
-        reply_markup=_users_menu_keyboard(),
+        reply_markup=await _get_users_menu_kb(callback.from_user.id),
     )
     await callback.answer()
 
@@ -1074,13 +1322,15 @@ async def developer_process_user_search(message: Message, state: FSMContext):
 
 
 async def developer_request_delete_user(callback: CallbackQuery, state: FSMContext):
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (is_territorial and not is_admin):
+        if has_access: await callback.answer("Вам недоступна ця функція.", show_alert=True)
         return
     await state.set_state(DeveloperStates.waiting_delete_user)
     await _edit_or_answer(
         callback.message,
         "❌ Введіть ID користувача, якого потрібно видалити:",
-        reply_markup=_users_menu_keyboard(),
+        reply_markup=await _get_users_menu_kb(callback.from_user.id),
     )
     await callback.answer()
 
@@ -1099,41 +1349,50 @@ async def developer_process_delete_user(message: Message, state: FSMContext):
         return
 
     await delete_user(user_id)
-    await message.answer(f"✅ Користувача <b>{user.get('full_name', 'Без імені')}</b> (ID: {user_id}) видалено.", reply_markup=_users_menu_keyboard())
+    await message.answer(f"✅ Користувача <b>{user.get('full_name', 'Без імені')}</b> (ID: {user_id}) видалено.", reply_markup=await _get_users_menu_kb(message.from_user.id))
     await state.clear()
 
 
 # ---------- Mentors section ----------
 
-def _managers_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Список керівників", callback_data="dev_managers_list")],
-        [InlineKeyboardButton(text="➕ Додати керівника", callback_data="dev_manager_add")],
-        [InlineKeyboardButton(text="🗑 Видалити керівника", callback_data="dev_manager_delete")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")]
-    ])
+def _managers_menu_keyboard(is_admin: bool = True, is_territorial: bool = False) -> InlineKeyboardMarkup:
+    keyboard = []
+    keyboard.append([InlineKeyboardButton(text="📋 Список керівників", callback_data="dev_managers_list")])
+    if is_admin or not is_territorial:
+        keyboard.append([InlineKeyboardButton(text="➕ Додати керівника", callback_data="dev_manager_add")])
+        keyboard.append([InlineKeyboardButton(text="🗑 Видалити керівника", callback_data="dev_manager_delete")])
+    keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 async def developer_managers_menu(callback: CallbackQuery):
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
         return
     await _edit_or_answer(
         callback.message,
         "🧑‍🏫 <b>Керівники</b>\nОберіть дію:",
-        reply_markup=_managers_menu_keyboard(),
+        reply_markup=_managers_menu_keyboard(is_admin, is_territorial),
     )
     await callback.answer()
 
 
 async def developer_list_managers(callback: CallbackQuery):
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
         return
     managers = await get_all_managers()
+    
+    if is_territorial and not is_admin:
+        my_managers = await get_managers_by_responsible(callback.from_user.id)
+        my_mgr_ids = [m['uid'] for m in my_managers]
+        managers = [m for m in managers if m['uid'] in my_mgr_ids]
+
     if not managers:
         await _edit_or_answer(
             callback.message,
             "ℹ️ У системі поки немає керівників.",
-            reply_markup=_managers_menu_keyboard(),
+            reply_markup=_managers_menu_keyboard(is_admin, is_territorial),
         )
         await callback.answer()
         return
@@ -1150,19 +1409,21 @@ async def developer_list_managers(callback: CallbackQuery):
     await _edit_or_answer(
         callback.message,
         "\n".join(lines),
-        reply_markup=_managers_menu_keyboard(),
+        reply_markup=_managers_menu_keyboard(is_admin, is_territorial),
     )
     await callback.answer()
 
 
 async def developer_request_add_manager(callback: CallbackQuery, state: FSMContext):
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (is_territorial and not is_admin):
+        if has_access: await callback.answer("Вам недоступна ця функція.", show_alert=True)
         return
     await state.set_state(DeveloperStates.waiting_add_manager)
     await _edit_or_answer(
         callback.message,
         "➕ Введіть дані керівника у форматі <code>ID;посада</code> (наприклад: <code>123456;Керівник магазину</code>).",
-        reply_markup=_managers_menu_keyboard(),
+        reply_markup=_managers_menu_keyboard(is_admin, is_territorial),
     )
     await callback.answer()
 
@@ -1199,13 +1460,15 @@ async def developer_process_add_manager(message: Message, state: FSMContext):
 
 
 async def developer_request_delete_manager(callback: CallbackQuery, state: FSMContext):
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (is_territorial and not is_admin):
+        if has_access: await callback.answer("Вам недоступна ця функція.", show_alert=True)
         return
     await state.set_state(DeveloperStates.waiting_delete_manager)
     await _edit_or_answer(
         callback.message,
         "🗑 Введіть ID керівника для видалення:",
-        reply_markup=_managers_menu_keyboard(),
+        reply_markup=_managers_menu_keyboard(is_admin, is_territorial),
     )
     await callback.answer()
 
@@ -1244,7 +1507,9 @@ def _days_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 async def developer_days_menu(callback: CallbackQuery):
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (is_territorial and not is_admin):
+        if has_access: await callback.answer("Вам недоступна ця функція.", show_alert=True)
         return
     await _edit_or_answer(
         callback.message,
@@ -1255,7 +1520,9 @@ async def developer_days_menu(callback: CallbackQuery):
 
 
 async def developer_request_days_status(callback: CallbackQuery, state: FSMContext):
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (is_territorial and not is_admin):
+        if has_access: await callback.answer("Вам недоступна ця функція.", show_alert=True)
         return
     await state.set_state(DeveloperStates.waiting_days_status)
     await _edit_or_answer(
@@ -1283,7 +1550,9 @@ async def developer_process_days_status(message: Message, state: FSMContext):
 
 
 async def developer_request_days_action(callback: CallbackQuery, state: FSMContext, action: str):
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (is_territorial and not is_admin):
+        if has_access: await callback.answer("Вам недоступна ця функція.", show_alert=True)
         return
     action_map = {
         "open": "🔓 Введіть дані у форматі <code>ID;дні</code> (приклад: <code>123456;3-5</code>) для відкриття.",
@@ -1357,9 +1626,11 @@ async def developer_process_days_reset(message: Message, state: FSMContext):
 
 async def developer_manage_managers_menu(callback: CallbackQuery, state: FSMContext, page: int = 0):
     """Об'єднане меню керівників з пагінацією."""
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
         return
-    text, kb = await _build_managers_team_view(page=page)
+    user_id = callback.from_user.id
+    text, kb = await _build_managers_team_view(is_admin, is_territorial, user_id, page=page)
     msg = await _edit_or_answer(callback.message, text, reply_markup=kb)
     await _remember_panel(state, "managers_panel", msg or callback.message)
     try:
@@ -1378,7 +1649,9 @@ async def developer_managers_pagination_handler(callback: CallbackQuery, state: 
 
 async def developer_request_add_manager(callback: CallbackQuery, state: FSMContext):
     """Starts the process of adding a manager by requesting their ID."""
-    if not await _ensure_developer(callback):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (is_territorial and not is_admin):
+        if has_access: await callback.answer("Вам недоступна ця функція.", show_alert=True)
         return
     await state.set_state(DeveloperStates.waiting_add_manager_id)
     await _edit_or_answer(
@@ -1387,294 +1660,6 @@ async def developer_request_add_manager(callback: CallbackQuery, state: FSMConte
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_manage_managers")]
         ])
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
-    try:
-        city = callback.data.split(":", 1)[1]
-    except IndexError:
-        return await callback.answer("Помилка даних міста.", show_alert=True)
-        
-    await state.update_data(manager_city=city, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_shops)
-    
-    kb = await _build_manager_shops_keyboard(city, [])
-    await _edit_or_answer(
-        callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
-        reply_markup=kb
     )
     await callback.answer()
 
@@ -1877,6 +1862,467 @@ async def manager_team_back(callback: CallbackQuery, state: FSMContext):
     await developer_manage_managers_menu(callback, state)
 
 
+# ==============================================================================
+# УПРАВЛІННЯ ТА ПОШУК КЕРІВНИКІВ (ПУНКТ 5)
+# ==============================================================================
+
+async def _build_manager_card(manager_uid: int, is_admin: bool, is_territorial: bool):
+    mgr = await get_manager_by_uid(manager_uid)
+    if not mgr:
+        return None
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        c_interns = await db.execute(
+            "SELECT COUNT(*) FROM users WHERE manager_id = ? AND (status IS NULL OR status != 'Працівник')",
+            (manager_uid,)
+        )
+        interns_count = (await c_interns.fetchone())[0]
+        c_workers = await db.execute(
+            "SELECT COUNT(*) FROM users WHERE manager_id = ? AND status = 'Працівник'",
+            (manager_uid,)
+        )
+        workers_count = (await c_workers.fetchone())[0]
+
+    name, username = await _format_identity(mgr["uid"], mgr.get("full_name"), mgr.get("username"))
+    city = mgr.get("city") or "Не вказано"
+    shops_list = mgr.get("shops") or []
+    shops_str = ", ".join(shops_list) if shops_list else "Не призначено"
+    
+    resp_uid = mgr.get("responsible_uid")
+    if resp_uid:
+        resp_mgr = await get_manager_by_uid(resp_uid)
+        if resp_mgr:
+            t_type = resp_mgr.get("territorial_type") or "ТЗ"
+            resp_label = f"🗺 Територіал: {resp_mgr.get('full_name', '')} ({t_type})"
+        else:
+            resp_label = f"🗺 Територіал (UID: {resp_uid})"
+    else:
+        resp_label = "👑 Адміністратор (пряме підпорядкування)"
+
+    status_tag = ""
+    if mgr.get("status") == "fired":
+        status_tag = "\n⚠️ <b>Статус:</b> 🚫 Звільнений"
+
+    text = (
+        f"👔 <b>Керівник:</b> {html.escape(name)}\n"
+        f"👤 <b>Username:</b> {html.escape(username)}\n"
+        f"🆔 <b>Telegram ID:</b> <code>{mgr['uid']}</code>\n"
+        f"🏙 <b>Місто:</b> {html.escape(city)}\n"
+        f"🏪 <b>Магазини:</b> {html.escape(shops_str)}\n"
+        f"🗺 <b>Відповідальний:</b> {html.escape(resp_label)}"
+        f"{status_tag}\n\n"
+        f"📊 <b>Підлеглі:</b>\n"
+        f"• 🎓 Стажерів: {interns_count}\n"
+        f"• 👷 Працівників: {workers_count}\n"
+        f"• 👥 Всього: {interns_count + workers_count}"
+    )
+
+    buttons = []
+    if mgr.get("status") != "fired":
+        buttons.append([InlineKeyboardButton(text="✏️ Змінити", callback_data=f"dev_mgr_edit_menu:{manager_uid}")])
+        if is_admin:
+            buttons.append([InlineKeyboardButton(text="🔄 Перепривʼязати", callback_data=f"dev_mgr_reassign_menu:{manager_uid}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад до списку", callback_data="dev_manage_managers")])
+    
+    return text, InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def _build_edit_shops_keyboard(city: str, selected_shops: list, manager_uid: int) -> InlineKeyboardMarkup:
+    """Builds keyboard for editing manager shops with multi-select."""
+    from bot.constants import AVAILABLE_SHOPS
+    shops_in_city = AVAILABLE_SHOPS.get(city, [])
+    
+    buttons = []
+    for i in range(0, len(shops_in_city), 2):
+        row = []
+        shop1 = shops_in_city[i]
+        text1 = f"✅ {shop1}" if shop1 in selected_shops else shop1
+        row.append(InlineKeyboardButton(text=text1, callback_data=f"dev_mgr_eshop_toggle:{i}"))
+        
+        if i + 1 < len(shops_in_city):
+            shop2 = shops_in_city[i+1]
+            text2 = f"✅ {shop2}" if shop2 in selected_shops else shop2
+            row.append(InlineKeyboardButton(text=text2, callback_data=f"dev_mgr_eshop_toggle:{i+1}"))
+        buttons.append(row)
+    
+    buttons.append([InlineKeyboardButton(text="✅ Готово", callback_data=f"dev_mgr_eshop_done:{manager_uid}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Скасувати", callback_data=f"dev_mgr_view:{manager_uid}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def dev_mgr_view(callback: CallbackQuery, state: FSMContext):
+    """Відображає картку керівника."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    try:
+        manager_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        return await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        
+    card_data = await _build_manager_card(manager_uid, is_admin, is_territorial)
+    if not card_data:
+        await callback.answer("Керівника не знайдено!", show_alert=True)
+        return
+    text, kb = card_data
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+async def dev_mgr_search_start(callback: CallbackQuery, state: FSMContext):
+    """Початок FSM-пошуку керівника."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    await state.set_state(DeveloperStates.waiting_search_manager)
+    await _edit_or_answer(
+        callback.message,
+        "🔍 <b>Пошук керівника</b>\nВведіть ПІБ, прізвище, @username або Telegram ID:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_manage_managers")]
+        ])
+    )
+    await callback.answer()
+
+
+async def dev_mgr_search_process(message: Message, state: FSMContext):
+    """Обробляє введення пошукового запиту для керівників."""
+    user_id = message.from_user.id
+    is_admin = await is_developer_user(user_id)
+    is_territorial = await is_territorial_user(user_id)
+    
+    if not is_admin and not is_territorial:
+        await state.clear()
+        return
+
+    query = message.text.strip()
+    results = await search_managers(query, is_admin=is_admin, territorial_uid=user_id if is_territorial else None)
+    
+    if not results:
+        await message.answer(
+            f"❌ За запитом «<b>{html.escape(query)}</b>» керівників не знайдено.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔍 Шукати знову", callback_data="dev_mgr_search_start")],
+                [InlineKeyboardButton(text="⬅️ До списку керівників", callback_data="dev_manage_managers")]
+            ])
+        )
+        return
+        
+    if len(results) == 1:
+        await state.clear()
+        card_data = await _build_manager_card(results[0]["uid"], is_admin, is_territorial)
+        if card_data:
+            text, kb = card_data
+            await message.answer(text, reply_markup=kb)
+        return
+        
+    await state.clear()
+    buttons = []
+    for m in results:
+        name, _ = await _format_identity(m["uid"], m.get("full_name"), m.get("username"))
+        shops = ", ".join(m.get("shops") or []) or "—"
+        city = m.get("city") or ""
+        tag = f" ({city})" if city else ""
+        buttons.append([
+            InlineKeyboardButton(text=f"👔 {name}{tag} | {shops}", callback_data=f"dev_mgr_view:{m['uid']}")
+        ])
+    buttons.append([InlineKeyboardButton(text="🔍 Новий пошук", callback_data="dev_mgr_search_start")])
+    buttons.append([InlineKeyboardButton(text="⬅️ До списку керівників", callback_data="dev_manage_managers")])
+    
+    await message.answer(
+        f"🔍 Знайдено <b>{len(results)}</b> керівників за запитом «<b>{html.escape(query)}</b>»:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+
+async def dev_mgr_edit_menu(callback: CallbackQuery, state: FSMContext):
+    """Підменю редагування керівника."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    manager_uid = int(callback.data.split(":")[1])
+    mgr = await get_manager_by_uid(manager_uid)
+    if not mgr:
+        await callback.answer("Керівника не знайдено!", show_alert=True)
+        return
+    
+    text = f"✏️ <b>Редагування керівника {html.escape(mgr.get('full_name') or str(manager_uid))}</b>\nОберіть дію:"
+    buttons = [
+        [InlineKeyboardButton(text="🏪 Змінити магазин", callback_data=f"dev_mgr_ch_shops:{manager_uid}")],
+        [InlineKeyboardButton(text="👤 Змінити ПІБ", callback_data=f"dev_mgr_ch_name:{manager_uid}")],
+        [InlineKeyboardButton(text="🚫 Звільнити", callback_data=f"dev_mgr_fire_ask:{manager_uid}")],
+        [InlineKeyboardButton(text="⬅️ Назад до картки", callback_data=f"dev_mgr_view:{manager_uid}")]
+    ]
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_mgr_change_name_start(callback: CallbackQuery, state: FSMContext):
+    """Початок зміни ПІБ керівника."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    manager_uid = int(callback.data.split(":")[1])
+    mgr = await get_manager_by_uid(manager_uid)
+    if not mgr:
+        await callback.answer("Керівника не знайдено!", show_alert=True)
+        return
+    
+    await state.update_data(edit_mgr_uid=manager_uid)
+    await state.set_state(DeveloperStates.waiting_edit_manager_name)
+    await _edit_or_answer(
+        callback.message,
+        f"Введіть нове ПІБ для керівника <b>{html.escape(mgr.get('full_name') or '')}</b> (мінімум 2 слова):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_mgr_view:{manager_uid}")]
+        ])
+    )
+    await callback.answer()
+
+
+async def dev_mgr_change_name_process(message: Message, state: FSMContext):
+    """Обробка нового ПІБ керівника."""
+    data = await state.get_data()
+    manager_uid = data.get("edit_mgr_uid")
+    if not manager_uid:
+        await state.clear()
+        return
+    
+    new_name = message.text.strip()
+    if len(new_name.split()) < 2:
+        await message.answer("Будь ласка, введіть повне ім'я та прізвище (мінімум 2 слова).")
+        return
+    
+    await update_manager_name(manager_uid, new_name)
+    await state.clear()
+    
+    card_data = await _build_manager_card(manager_uid, True, False)
+    if card_data:
+        text, kb = card_data
+        await message.answer(f"✅ ПІБ оновлено на <b>{html.escape(new_name)}</b>!\n\n{text}", reply_markup=kb)
+
+
+async def dev_mgr_change_shops_start(callback: CallbackQuery, state: FSMContext):
+    """Початок зміни магазинів керівника з тихим перенесенням старих стажерів."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    manager_uid = int(callback.data.split(":")[1])
+    mgr = await get_manager_by_uid(manager_uid)
+    if not mgr:
+        await callback.answer("Керівника не знайдено!", show_alert=True)
+        return
+    
+    city = mgr.get("city") or "Хмельницький"
+    # Тихо переносимо стажерів старого магазину на територіала або адміна
+    await transfer_users_to_territorial_or_admin(manager_uid)
+    
+    await state.update_data(edit_mgr_uid=manager_uid, manager_city=city, selected_shops=[])
+    await state.set_state(DeveloperStates.waiting_edit_manager_shops)
+    
+    kb = await _build_edit_shops_keyboard(city, [], manager_uid)
+    await _edit_or_answer(
+        callback.message,
+        f"🏪 Зміна магазинів для керівника <b>{html.escape(mgr.get('full_name') or '')}</b> (місто {city}):\n"
+        f"Старі стажери переведені до Територіала/Адміна.\nОберіть нові магазини (до 5):",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+
+async def dev_mgr_edit_shop_toggle(callback: CallbackQuery, state: FSMContext):
+    """Перемикання магазину під час редагування."""
+    data = await state.get_data()
+    city = data.get("manager_city")
+    manager_uid = data.get("edit_mgr_uid")
+    if not city or not manager_uid:
+        await state.clear()
+        await callback.answer("Помилка стану.", show_alert=True)
+        return
+        
+    try:
+        shop_index = int(callback.data.split(":", 1)[1])
+        from bot.constants import AVAILABLE_SHOPS
+        shops_in_city = AVAILABLE_SHOPS.get(city, [])
+        shop_name = shops_in_city[shop_index]
+    except (IndexError, ValueError):
+        return await callback.answer("Помилка даних магазину.", show_alert=True)
+
+    selected_shops = data.get("selected_shops", [])
+    if shop_name in selected_shops:
+        selected_shops.remove(shop_name)
+    else:
+        if len(selected_shops) >= 5:
+            await callback.answer("⚠️ Можна обрати максимум 5 магазинів.", show_alert=True)
+            return
+        selected_shops.append(shop_name)
+        
+    await state.update_data(selected_shops=selected_shops)
+    kb = await _build_edit_shops_keyboard(city, selected_shops, manager_uid)
+    await callback.message.edit_reply_markup(reply_markup=kb)
+    await callback.answer()
+
+
+async def dev_mgr_edit_shop_done(callback: CallbackQuery, state: FSMContext):
+    """Завершення зміни магазинів керівника з запитом на переведення стажерів нових магазинів."""
+    manager_uid = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    city = data.get("manager_city") or "Хмельницький"
+    selected_shops = data.get("selected_shops", [])
+    
+    await update_manager_shops(manager_uid, city, selected_shops)
+    
+    # Перевіряємо чи є користувачі в обраних магазинах
+    interns_c, workers_c = await count_users_in_shops(city, selected_shops)
+    total_new = interns_c + workers_c
+    
+    if total_new > 0:
+        await state.clear()
+        shops_joined = ", ".join(selected_shops)
+        text = (
+            f"✅ Магазини оновлено: <b>{html.escape(shops_joined)}</b>.\n\n"
+            f"👥 У цих магазинах знайдено <b>{interns_c}</b> стажерів та <b>{workers_c}</b> працівників.\n"
+            f"Перевести їх під керівництво цього керівника?"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Так, перевести", callback_data=f"dev_mgr_tr_yes:{manager_uid}")],
+            [InlineKeyboardButton(text="❌ Ні, залишити як є", callback_data=f"dev_mgr_view:{manager_uid}")]
+        ])
+        await _edit_or_answer(callback.message, text, reply_markup=kb)
+        await callback.answer()
+    else:
+        await state.clear()
+        await callback.answer("✅ Магазини успішно оновлено!", show_alert=True)
+        has_access, is_admin, is_territorial = await _check_access(callback)
+        card_data = await _build_manager_card(manager_uid, is_admin, is_territorial)
+        if card_data:
+            text, kb = card_data
+            await _edit_or_answer(callback.message, text, reply_markup=kb)
+
+
+async def dev_mgr_transfer_shops_yes(callback: CallbackQuery, state: FSMContext):
+    """Підтвердження переведення стажерів/працівників нових магазинів до керівника."""
+    manager_uid = int(callback.data.split(":")[1])
+    mgr = await get_manager_by_uid(manager_uid)
+    if mgr:
+        city = mgr.get("city") or "Хмельницький"
+        shops = mgr.get("shops") or []
+        transferred = await transfer_users_by_shops(city, shops, manager_uid)
+        await callback.answer(f"✅ Переведено {transferred} користувачів!", show_alert=True)
+        
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    card_data = await _build_manager_card(manager_uid, is_admin, is_territorial)
+    if card_data:
+        text, kb = card_data
+        await _edit_or_answer(callback.message, text, reply_markup=kb)
+
+
+async def dev_mgr_fire_ask(callback: CallbackQuery, state: FSMContext):
+    """Діалог підтвердження звільнення керівника."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    manager_uid = int(callback.data.split(":")[1])
+    mgr = await get_manager_by_uid(manager_uid)
+    if not mgr:
+        await callback.answer("Керівника не знайдено!", show_alert=True)
+        return
+        
+    name = mgr.get("full_name") or str(manager_uid)
+    async with aiosqlite.connect(DB_PATH) as db:
+        c_interns = await db.execute("SELECT COUNT(*) FROM users WHERE manager_id = ? AND (status IS NULL OR status != 'Працівник')", (manager_uid,))
+        interns_count = (await c_interns.fetchone())[0]
+        c_workers = await db.execute("SELECT COUNT(*) FROM users WHERE manager_id = ? AND status = 'Працівник'", (manager_uid,))
+        workers_count = (await c_workers.fetchone())[0]
+
+    target_name = "Адміністратора"
+    if mgr.get("responsible_uid"):
+        r_mgr = await get_manager_by_uid(mgr["responsible_uid"])
+        if r_mgr:
+            target_name = f"Територіала {r_mgr.get('full_name', '')}"
+    else:
+        city_t = await get_territorials_by_city(mgr.get("city", ""))
+        if city_t:
+            target_name = f"Територіала {city_t[0].get('full_name', '')}"
+
+    text = (
+        f"⚠️ <b>Ви дійсно хочете звільнити керівника {html.escape(name)}?</b>\n\n"
+        f"• Доступ до функцій керівника буде заблоковано\n"
+        f"• {interns_count} стажерів та {workers_count} працівників тихо перейдуть до {target_name}\n"
+        f"• Всі дані та історія збережуться в базі для звітів та аналітики"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚫 Так, звільнити", callback_data=f"dev_mgr_fire_confirm:{manager_uid}")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_mgr_view:{manager_uid}")]
+    ])
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await callback.answer()
+
+
+async def dev_mgr_fire_confirm(callback: CallbackQuery, state: FSMContext):
+    """Виконання звільнення керівника."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    manager_uid = int(callback.data.split(":")[1])
+    res = await fire_manager(manager_uid)
+    await callback.answer(f"✅ Керівника звільнено. Підлеглих переведено до {res.get('target_name')}.", show_alert=True)
+    await developer_manage_managers_menu(callback, state)
+
+
+async def dev_mgr_reassign_menu(callback: CallbackQuery, state: FSMContext):
+    """Меню переприв'язки відповідального для керівника."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (is_territorial and not is_admin):
+        if has_access: await callback.answer("Ця дія доступна лише Адміністратору.", show_alert=True)
+        return
+    manager_uid = int(callback.data.split(":")[1])
+    mgr = await get_manager_by_uid(manager_uid)
+    if not mgr:
+        await callback.answer("Керівника не знайдено!", show_alert=True)
+        return
+
+    city = mgr.get("city") or ""
+    territorials = await get_territorials_by_city(city)
+    
+    buttons = [
+        [InlineKeyboardButton(text="👑 Адміністратор (пряме підпорядкування)", callback_data=f"dev_mgr_reassign_set:{manager_uid}:0")]
+    ]
+    for t in territorials:
+        t_type = t.get("territorial_type") or "ТЗ"
+        t_name = t.get("full_name") or str(t["uid"])
+        buttons.append([
+            InlineKeyboardButton(text=f"🗺 {t_name} ({t_type})", callback_data=f"dev_mgr_reassign_set:{manager_uid}:{t['uid']}")
+        ])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад до картки", callback_data=f"dev_mgr_view:{manager_uid}")])
+
+    text = f"🔄 <b>Перепривʼязка керівника {html.escape(mgr.get('full_name') or '')}</b>\nОберіть нового відповідального:"
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_mgr_reassign_set(callback: CallbackQuery, state: FSMContext):
+    """Збереження нового відповідального для керівника."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (is_territorial and not is_admin):
+        return
+    parts = callback.data.split(":")
+    manager_uid = int(parts[1])
+    target_uid = int(parts[2])
+    
+    responsible_uid = None if target_uid == 0 else target_uid
+    await update_manager_responsible(manager_uid, responsible_uid)
+    await callback.answer("✅ Відповідального змінено!", show_alert=True)
+    
+    card_data = await _build_manager_card(manager_uid, is_admin, is_territorial)
+    if card_data:
+        text, kb = card_data
+        await _edit_or_answer(callback.message, text, reply_markup=kb)
+
+
 async def developer_cancel_add_role(callback: CallbackQuery, state: FSMContext):
     """Cancels the process of adding a new developer."""
     if not await _ensure_developer(callback):
@@ -1897,7 +2343,7 @@ async def developer_request_add_dev(callback: CallbackQuery, state: FSMContext):
     await state.set_state(DeveloperStates.waiting_add_developer)
     prompt_info = await _show_prompt(
         callback,
-        "👨‍💻 Введіть ID користувача, якому потрібно надати роль Developer:",
+        "👨‍💻 Введіть ID користувача, якому потрібно надати роль Адміністратора:",
         "dev_cancel_add_role",
     )
     await state.update_data(dev_prompt=prompt_info)
@@ -1916,7 +2362,7 @@ async def developer_process_add_dev(message: Message, state: FSMContext):
         await _update_prompt_message(
             message.bot,
             prompt_info,
-            "⚠️ ID повинен бути числом.\n\n👨‍💻 Введіть ID користувача, якому потрібно надати роль Developer:",
+            "⚠️ ID повинен бути числом.\n\n👨‍💻 Введіть ID користувача, якому потрібно надати роль Адміністратора:",
             "dev_cancel_add_role",
         )
         return
@@ -1928,7 +2374,7 @@ async def developer_process_add_dev(message: Message, state: FSMContext):
     await _update_prompt_message(
         message.bot,
         prompt_info,
-        f"ID: {user_id}. Тепер введіть ПІБ розробника:",
+        f"ID: {user_id}. Тепер введіть ПІБ адміністратора:",
         "dev_cancel_add_role"
     )
 
@@ -1964,7 +2410,7 @@ async def developer_process_add_dev_name(message: Message, state: FSMContext):
     await _update_prompt_message(
         message.bot,
         prompt_info,
-        f"✅ Користувача {full_name} додано до Dev-команди.\n\nВикористайте кнопку нижче, щоб повернутися.",
+        f"✅ Користувача {full_name} додано до Команди Адміністраторів.\n\nВикористайте кнопку нижче, щоб повернутися.",
         "dev_team_back",
     )
     await _refresh_panel_view(message.bot, panel_info, _build_developer_team_view)
@@ -2069,11 +2515,11 @@ async def developer_team_member_handler(callback: CallbackQuery, state: FSMConte
     text = (
         f"👨‍💻 <b>{name}</b> (ID: <code>{user_id}</code>)\n"
         f"Username: {username}\n\n"
-        "Цей користувач має роль Developer. Що зробити?"
+        "Цей користувач має роль Адміністратор. Що зробити?"
     )
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🚫 Прибрати з Dev-команди", callback_data=f"dev_remove_{user_id}")],
+            [InlineKeyboardButton(text="🚫 Прибрати з Команди Адміністраторів", callback_data=f"dev_remove_{user_id}")],
             [InlineKeyboardButton(text="⬅️ Назад до списку", callback_data="dev_team_back")],
         ]
     )
@@ -2091,7 +2537,7 @@ async def developer_remove_member(callback: CallbackQuery, state: FSMContext):
         return
     await delete_manager_by_uid(user_id)
     text, kb = await _build_developer_team_view()
-    msg = await _edit_or_answer(callback.message, f"✅ Користувача {user_id} вилучено з Dev-команди.\n\n{text}", reply_markup=kb)
+    msg = await _edit_or_answer(callback.message, f"✅ Користувача {user_id} вилучено з Команди Адміністраторів.\n\n{text}", reply_markup=kb)
     await _remember_panel(state, "dev_panel", msg or callback.message)
     await callback.answer("Користувача вилучено.", show_alert=True)
 
@@ -3991,6 +4437,18 @@ async def developer_syllabus_toggle(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Помилка стану.", show_alert=True)
         return
 
+    syllabus_material = await get_material_by_role_day_type(role, 0, "syllabus")
+    if not syllabus_material:
+        await add_or_update_material(
+            role=role,
+            day=0,
+            content_type="syllabus",
+            title=f"Зміст: {role}",
+            content="",
+            resource_url=None,
+            order_index=0
+        )
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE materials SET is_enabled = ? WHERE role = ? AND day = 0 AND content_type = 'syllabus'",
@@ -4011,6 +4469,11 @@ async def developer_syllabus_edit(callback: CallbackQuery, state: FSMContext):
         
     data = await state.get_data()
     role = data.get("syllabus_role", "")
+    role_index = data.get("syllabus_role_index")
+    
+    if not role or role_index is None:
+        await callback.answer("Помилка стану (роль не обрана).", show_alert=True)
+        return
     
     text = (
         f"✏️ <b>Редагування змісту: {role}</b>\n\n"
@@ -4024,7 +4487,7 @@ async def developer_syllabus_edit(callback: CallbackQuery, state: FSMContext):
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_syl_role|{data.get('syllabus_role_index')}")]
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_syl_role|{role_index}")]
     ])
     
     await _edit_or_answer(callback.message, text, reply_markup=kb)
@@ -4040,7 +4503,13 @@ async def developer_process_syllabus(message: Message, state: FSMContext):
         
     data = await state.get_data()
     role = data.get("syllabus_role", "")
+    role_index = data.get("syllabus_role_index")
     
+    if not role:
+        await message.answer("❌ Помилка стану (роль не визначена). Спробуйте знову з меню.")
+        await state.clear()
+        return
+
     # Save to DB with day=0 and type='syllabus'
     await add_or_update_material(
         role=role,
@@ -4052,10 +4521,11 @@ async def developer_process_syllabus(message: Message, state: FSMContext):
         order_index=0
     )
     
+    back_cb = f"dev_syl_role|{role_index}" if role_index is not None else "dev_syllabus_menu"
     await message.answer(
-        f"✅ <b>Зміст успішно збережено!</b>",
+        "✅ <b>Зміст успішно збережено!</b>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ До перегляду", callback_data=f"dev_syl_role|{data.get('syllabus_role_index')}")]
+            [InlineKeyboardButton(text="⬅️ До перегляду", callback_data=back_cb)]
         ])
     )
     await state.clear()
@@ -4067,11 +4537,11 @@ async def _save_pending_material(state: FSMContext) -> tuple[bool, str, str, int
     """Зберігає pending матеріал. Повертає (success, role, content_type, day)."""
     logger = get_logger()
     data = await state.get_data()
-    role = data.get("edit_role") or data.get("edit_video_role", "")
-    day = data.get("edit_day") or data.get("edit_video_day", 1)
+    role = data.get("edit_role") or data.get("edit_video_role") or data.get("edit_photo_role", "")
+    day = data.get("edit_day") or data.get("edit_video_day") or data.get("edit_photo_day", 1)
     content_type = data.get("pending_content_type", "text")
     content = data.get("pending_content", "")
-    material_id = data.get("pending_material_id")
+    material_id = data.get("pending_material_id") or data.get("edit_photo_material_id") or data.get("edit_video_material_id")
     
     try:
         if content_type == "text":
@@ -4131,9 +4601,11 @@ async def _save_pending_material(state: FSMContext) -> tuple[bool, str, str, int
                 )
         
         # Schedule the embeddings build to run in the background.
-        # This function now contains lazy imports, so it won't crash the bot.
         logger.info("Material saved, scheduling embeddings build.")
-        asyncio.create_task(build_and_reset_embeddings())
+        try:
+            asyncio.create_task(build_and_reset_embeddings())
+        except Exception as emb_err:
+            logger.warning(f"Failed to schedule embeddings build: {emb_err}")
         
         return True, role, content_type, day
     except Exception as e:
@@ -4171,8 +4643,8 @@ async def notify_decision_no(callback: CallbackQuery, state: FSMContext):
 async def notify_decision_yes(callback: CallbackQuery, state: FSMContext):
     """Користувач обрав ТАК — просимо текст оповіщення."""
     data = await state.get_data()
-    role = data.get("edit_role", "")
-    day = data.get("edit_day", 1)
+    role = data.get("edit_role") or data.get("edit_video_role") or data.get("edit_photo_role", "")
+    day = data.get("edit_day") or data.get("edit_video_day") or data.get("edit_photo_day", 1)
     
     await state.set_state(DeveloperStates.waiting_notify_message)
     
@@ -4201,7 +4673,7 @@ async def process_notify_message(message: Message, state: FSMContext):
     """Обробка тексту оповіщення та розсилка."""
     from database.users import get_all_users
     
-    notify_text = message.text.strip()
+    notify_text = message.text.strip() if message.text else ""
     if not notify_text:
         await message.answer("❌ Текст оповіщення не може бути порожнім.")
         return
@@ -4234,12 +4706,17 @@ async def process_notify_message(message: Message, state: FSMContext):
     sent_count = 0
     failed_count = 0
     
-    for user in users:
+    # Фільтруємо користувачів за посадою, якщо вказана
+    target_users = [u for u in users if (not role or u.get("role") == role)]
+    if not target_users:
+        target_users = users
+
+    for user in target_users:
         user_id = user.get("user_id")
         if not user_id:
             continue
         try:
-            await message.bot.send_message(user_id, full_message)
+            await message.bot.send_message(user_id, full_message, parse_mode="HTML")
             sent_count += 1
         except Exception:
             failed_count += 1
@@ -4301,7 +4778,7 @@ async def developer_tokens_cleanup(callback: CallbackQuery):
     count = await cleanup_expired_tokens()
     await callback.answer(f"Оброблено {count} токенів", show_alert=True)
 
-    # Оновлюємо меню зі свіжою статистикою (без повторного callback.answer)
+    # Оновлюємо меню зі свіжою статистикою
     stats = await get_token_stats()
     text = (
         "🎟 <b>УПРАВЛІННЯ ТОКЕНАМИ</b>\n"
@@ -4352,12 +4829,11 @@ async def developer_health_status(callback: CallbackQuery):
     reminder_delta = format_delta(health_check._last_reminder_heartbeat)
     
     # Форматуємо дату очищення токенів
-    token_cleanup = status['last_token_cleanup']
+    token_cleanup = status.get('last_token_cleanup')
     if token_cleanup:
         try:
-            # Спроба зробити дату красивішою
-            token_cleanup = datetime.fromisoformat(token_cleanup.replace('Z', '+00:00')).astimezone(pytz.timezone(TIMEZONE)).strftime('%H:%M:%S (%d.%m)')
-        except:
+            token_cleanup = datetime.fromisoformat(str(token_cleanup).replace('Z', '+00:00')).astimezone(pytz.timezone(TIMEZONE)).strftime('%H:%M:%S (%d.%m)')
+        except Exception:
             pass
 
     text = (
@@ -4393,7 +4869,17 @@ async def developer_health_status(callback: CallbackQuery):
 
 async def _rebuild_user_profile_view(callback: CallbackQuery, user_id: int, state: FSMContext):
     """Helper to refresh the user profile view after an action."""
-    report = await get_user_days_report(user_id)
+    try:
+        report = await get_user_days_report(user_id)
+    except Exception:
+        await _edit_or_answer(
+            callback.message,
+            "⚠️ Користувача не знайдено або дані видалено.",
+            reply_markup=await _get_users_menu_kb(callback.from_user.id)
+        )
+        await state.clear()
+        return
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{user_id}"),
@@ -4418,6 +4904,10 @@ async def developer_days_manage_menu(callback: CallbackQuery, state: FSMContext,
             return
 
     user = await get_user_details(user_id)
+    if not user:
+        await callback.answer("Користувача не знайдено.", show_alert=True)
+        return
+
     overview = await get_days_overview(user_id)
     
     buttons = []
@@ -4432,42 +4922,51 @@ async def developer_days_manage_menu(callback: CallbackQuery, state: FSMContext,
     
     await _edit_or_answer(
         callback.message,
-        f"<b>Керування днями для {user.get('full_name')}</b>\nНатисніть на день, щоб змінити його статус (відкрити/закрити).",
+        f"<b>Керування днями для {user.get('full_name', 'Користувача')}</b>\nНатисніть на день, щоб змінити його статус (відкрити/закрити).",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
+    await callback.answer()
 
 async def developer_toggle_day_status(callback: CallbackQuery, state: FSMContext):
-    _, user_id_str, day_str, action = callback.data.split(":")
-    user_id, day = int(user_id_str), int(day_str)
+    try:
+        parts = callback.data.split(":")
+        user_id = int(parts[1])
+        day = int(parts[2])
+        action = parts[3]
+    except (ValueError, IndexError):
+        await callback.answer("Помилка даних.", show_alert=True)
+        return
 
     if action == "open":
         await open_days_for_user(user_id, [day])
     else: # close
         await close_days_for_user(user_id, [day])
     
+    await callback.answer(f"День {day}: {'відкрито' if action == 'open' else 'закрито'}")
     # Refresh the menu
     await developer_days_manage_menu(callback, state, user_id=user_id)
 
 async def developer_user_profile_back(callback: CallbackQuery, state: FSMContext):
-    user_id = int(callback.data.split(":")[1])
-    # To redisplay the profile, we essentially re-run the search result display logic
-    report = await get_user_days_report(user_id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{user_id}"),
-            InlineKeyboardButton(text="✍️ Змінити", callback_data=f"dev_user_modify:{user_id}")
-        ],
-        [
-            InlineKeyboardButton(text="❌ Видалити", callback_data=f"dev_user_delete_confirm:{user_id}"),
-            InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")
-        ]
-    ])
-    await _edit_or_answer(callback.message, report, reply_markup=kb)
+    try:
+        user_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ID користувача.", show_alert=True)
+        return
+
+    await state.clear()
+    await _rebuild_user_profile_view(callback, user_id, state)
+    await callback.answer()
 
 # --- Modify User ---
 
 async def developer_user_modify_menu(callback: CallbackQuery, state: FSMContext):
-    user_id = int(callback.data.split(":")[1])
+    try:
+        user_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ID користувача.", show_alert=True)
+        return
+
+    await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Змінити керівника", callback_data=f"dev_change_manager:{user_id}")],
         [InlineKeyboardButton(text="Змінити посаду", callback_data=f"dev_change_role:{user_id}")],
@@ -4475,95 +4974,203 @@ async def developer_user_modify_menu(callback: CallbackQuery, state: FSMContext)
         [InlineKeyboardButton(text="⬅️ Назад до профілю", callback_data=f"dev_user_profile_back:{user_id}")]
     ])
     await _edit_or_answer(callback.message, "✍️ <b>Що саме ви хочете змінити?</b>", reply_markup=kb)
+    await callback.answer()
 
 async def developer_change_manager_start(callback: CallbackQuery, state: FSMContext):
-    user_id = int(callback.data.split(":")[1])
+    try:
+        user_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ID користувача.", show_alert=True)
+        return
+
     await state.set_state(DeveloperStates.waiting_change_manager_id)
     await state.update_data(user_id_to_modify=user_id)
     await _edit_or_answer(callback.message, "Введіть новий ID керівника:", reply_markup=_cancel_keyboard(f"dev_user_modify:{user_id}"))
+    await callback.answer()
 
 async def developer_process_change_manager(message: Message, state: FSMContext):
     data = await state.get_data()
     user_id = data.get("user_id_to_modify")
-    try:
-        new_manager_id = int(message.text)
-        # Check if manager exists
-        if not await get_manager_by_uid(new_manager_id):
-            await message.answer("⚠️ Керівника з таким ID не знайдено. Спробуйте ще раз.")
-            return
-        
-        user_details = await get_user_details(user_id)
-        # set_intern_extra updates all three fields, so we pass existing ones
-        await set_intern_extra(user_id, new_manager_id, user_details.get('role'), user_details.get('city'))
-        await message.answer("✅ Керівника успішно змінено!")
-        
-        # Re-create a mock callback to return to the profile
-        from aiogram.types import User, CallbackQuery
-        mock_callback = CallbackQuery(id="mock", from_user=message.from_user, chat_instance="", message=message, data=f"dev_user_profile_back:{user_id}")
-        await _rebuild_user_profile_view(mock_callback, user_id, state)
-        
-    except ValueError:
-        await message.answer("❌ ID має бути числом. Спробуйте ще раз.")
+    if not user_id:
+        await message.answer("⚠️ Помилка стану: користувача не знайдено.")
+        await state.clear()
         return
-    except Exception as e:
-        await message.answer(f"Сталася помилка: {e}")
-        await state.clear()
 
-    except Exception as e:
-        await message.answer(f"Сталася помилка: {e}")
+    try:
+        new_manager_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ ID має бути числом. Спробуйте ще раз:")
+        return
+
+    # Check if manager exists
+    manager = await get_manager_by_uid(new_manager_id)
+    if not manager:
+        await message.answer("⚠️ Керівника з таким ID не знайдено в базі керівників. Спробуйте ще раз:")
+        return
+
+    user_details = await get_user_details(user_id)
+    if not user_details:
+        await message.answer("⚠️ Користувача не знайдено.")
         await state.clear()
+        return
+
+    # Update manager_id directly without altering shop or logging added events
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET manager_id = ? WHERE user_id = ?",
+            (new_manager_id, user_id)
+        )
+        await db.commit()
+
+    await state.clear()
+    await message.answer(f"✅ Керівника успішно змінено на <b>{manager.get('full_name', new_manager_id)}</b>!")
+    
+    try:
+        report = await get_user_days_report(user_id)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{user_id}"),
+                InlineKeyboardButton(text="✍️ Змінити", callback_data=f"dev_user_modify:{user_id}")
+            ],
+            [
+                InlineKeyboardButton(text="❌ Видалити", callback_data=f"dev_user_delete_confirm:{user_id}"),
+                InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")
+            ]
+        ])
+        await message.answer(report, reply_markup=kb)
+    except Exception as e:
+        logger = get_logger()
+        logger.error(f"Failed to display updated user profile: {e}")
 
 async def developer_change_role_start(callback: CallbackQuery, state: FSMContext):
-    user_id = int(callback.data.split(":")[1])
+    try:
+        user_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ID користувача.", show_alert=True)
+        return
+
+    positions = await get_all_positions()
+    role_names = [p["name"] for p in positions] if positions else AVAILABLE_ROLES
+
     buttons = []
-    for role in AVAILABLE_ROLES:
-        buttons.append([InlineKeyboardButton(text=role, callback_data=f"dev_process_change_role:{user_id}:{role}")])
+    for idx, role in enumerate(role_names):
+        short_name = role[:25] + "..." if len(role) > 28 else role
+        buttons.append([InlineKeyboardButton(text=short_name, callback_data=f"dev_set_role:{user_id}:{idx}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_user_modify:{user_id}")])
     await _edit_or_answer(callback.message, "Оберіть нову посаду:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
 
 async def developer_process_change_role(callback: CallbackQuery, state: FSMContext):
-    _, user_id_str, new_role = callback.data.split(":", 2)
-    user_id = int(user_id_str)
-    
+    try:
+        parts = callback.data.split(":")
+        user_id = int(parts[1])
+        role_idx = int(parts[2])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка даних.", show_alert=True)
+        return
+
+    positions = await get_all_positions()
+    role_names = [p["name"] for p in positions] if positions else AVAILABLE_ROLES
+
+    if not (0 <= role_idx < len(role_names)):
+        await callback.answer("Невідома посада.", show_alert=True)
+        return
+
+    new_role = role_names[role_idx]
     user_details = await get_user_details(user_id)
-    await set_intern_extra(user_id, user_details.get('manager_id'), new_role, user_details.get('city'))
-    await callback.answer("Посаду змінено!")
+    if not user_details:
+        await callback.answer("Користувача не знайдено.", show_alert=True)
+        return
+
+    # Update role directly without erasing shop
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET role = ? WHERE user_id = ?",
+            (new_role, user_id)
+        )
+        await db.commit()
+
+    await callback.answer(f"Посаду змінено на {new_role}!", show_alert=True)
     await _rebuild_user_profile_view(callback, user_id, state)
 
 async def developer_change_city_start(callback: CallbackQuery, state: FSMContext):
-    user_id = int(callback.data.split(":")[1])
+    try:
+        user_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ID користувача.", show_alert=True)
+        return
+
+    cities_data = await get_all_cities()
+    city_names = [c["name"] for c in cities_data] if cities_data else AVAILABLE_CITIES
+
     buttons = []
-    for city in AVAILABLE_CITIES:
-        buttons.append([InlineKeyboardButton(text=city, callback_data=f"dev_process_change_city:{user_id}:{city}")])
+    for idx, city in enumerate(city_names):
+        buttons.append([InlineKeyboardButton(text=city, callback_data=f"dev_set_city:{user_id}:{idx}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_user_modify:{user_id}")])
     await _edit_or_answer(callback.message, "Оберіть нове місто:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
 
 async def developer_process_change_city(callback: CallbackQuery, state: FSMContext):
-    _, user_id_str, new_city = callback.data.split(":", 2)
-    user_id = int(user_id_str)
-    
+    try:
+        parts = callback.data.split(":")
+        user_id = int(parts[1])
+        city_idx = int(parts[2])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка даних.", show_alert=True)
+        return
+
+    cities_data = await get_all_cities()
+    city_names = [c["name"] for c in cities_data] if cities_data else AVAILABLE_CITIES
+
+    if not (0 <= city_idx < len(city_names)):
+        await callback.answer("Невідоме місто.", show_alert=True)
+        return
+
+    new_city = city_names[city_idx]
     user_details = await get_user_details(user_id)
-    await set_intern_extra(user_id, user_details.get('manager_id'), user_details.get('role'), new_city)
-    await callback.answer("Місто змінено!")
+    if not user_details:
+        await callback.answer("Користувача не знайдено.", show_alert=True)
+        return
+
+    # Update city directly without erasing shop
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET city = ? WHERE user_id = ?",
+            (new_city, user_id)
+        )
+        await db.commit()
+
+    await callback.answer(f"Місто змінено на {new_city}!", show_alert=True)
     await _rebuild_user_profile_view(callback, user_id, state)
 
 # --- Delete User ---
 
 async def developer_user_delete_confirm(callback: CallbackQuery, state: FSMContext):
-    user_id = int(callback.data.split(":")[1])
+    try:
+        user_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ID користувача.", show_alert=True)
+        return
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Так, видалити", callback_data=f"dev_user_delete_perform:{user_id}"),
             InlineKeyboardButton(text="❌ Ні, назад", callback_data=f"dev_user_profile_back:{user_id}")
         ]
     ])
-    await _edit_or_answer(callback.message, f"Ви впевнені, що хочете видалити користувача {user_id}?", reply_markup=kb)
+    await _edit_or_answer(callback.message, f"Ви впевнені, що хочете видалити користувача <code>{user_id}</code>?", reply_markup=kb)
+    await callback.answer()
 
 async def developer_user_delete_perform(callback: CallbackQuery, state: FSMContext):
-    user_id = int(callback.data.split(":")[1])
+    try:
+        user_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ID користувача.", show_alert=True)
+        return
+
     await delete_user(user_id)
     await callback.answer(f"Користувача {user_id} видалено.", show_alert=True)
-    await _edit_or_answer(callback.message, "Користувача видалено.", reply_markup=_users_menu_keyboard())
+    await _edit_or_answer(callback.message, f"✅ Користувача <code>{user_id}</code> видалено.", reply_markup=await _get_users_menu_kb(callback.from_user.id))
 
 
 # ==================== XLSX Reports ====================
@@ -5279,13 +5886,854 @@ async def developer_training_rejected_export(callback: CallbackQuery):
     await callback.answer("Файл готовий ✅")
 
 
+
+# ==============================================================================
+# УПРАВЛІННЯ ПОСАДАМИ
+# ==============================================================================
+
+def _positions_keyboard(positions: list, page: int = 1) -> InlineKeyboardMarkup:
+    items_per_page = 6
+    total_pages = (len(positions) - 1) // items_per_page + 1
+    start_idx = (page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    current_positions = positions[start_idx:end_idx]
+
+    buttons = []
+    for pos in current_positions:
+        buttons.append([InlineKeyboardButton(text=f"👔 {pos['name']}", callback_data=f"dev_pos_view:{pos['id']}")])
+    
+    # Пагінація
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_positions_page:{page-1}"))
+    nav_row.append(InlineKeyboardButton(text=f"📄 {page}/{total_pages or 1}", callback_data="ignore"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_positions_page:{page+1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="➕ Додати посаду", callback_data="dev_pos_add")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_main_other")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def dev_positions_menu(callback: CallbackQuery):
+    positions = await get_all_positions()
+    await _edit_or_answer(
+        callback.message,
+        "👔 <b>Управління посадами</b>\nОберіть посаду для редагування або додайте нову:",
+        reply_markup=_positions_keyboard(positions, 1)
+    )
+    await callback.answer()
+
+
+async def dev_positions_page(callback: CallbackQuery):
+    page = int(callback.data.split(":")[1])
+    positions = await get_all_positions()
+    await _edit_or_answer(
+        callback.message,
+        "👔 <b>Управління посадами</b>\nОберіть посаду для редагування або додайте нову:",
+        reply_markup=_positions_keyboard(positions, page)
+    )
+    await callback.answer()
+
+
+async def dev_pos_add_start(callback: CallbackQuery, state: FSMContext):
+    await _edit_or_answer(
+        callback.message,
+        "Введіть назву нової посади:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Скасувати", callback_data="dev_positions_menu")]])
+    )
+    await state.set_state(DeveloperStates.waiting_add_position_name)
+    await callback.answer()
+
+
+async def dev_pos_add_name(message: Message, state: FSMContext):
+    name = message.text.strip()
+    await state.update_data(pos_name=name)
+    await message.answer(
+        f"Посада: <b>{name}</b>\nВведіть кількість днів навчання (за замовчуванням 5):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Залишити 5", callback_data="dev_pos_add_days:5")],
+            [InlineKeyboardButton(text="Скасувати", callback_data="dev_positions_menu")]
+        ])
+    )
+    await state.set_state(DeveloperStates.waiting_add_position_days)
+
+
+async def _dev_pos_finish_add(message: Message, state: FSMContext, pos_name: str, days: int):
+    success = await add_position(pos_name, days)
+    if success:
+        await message.answer(f"✅ Посаду <b>{pos_name}</b> ({days} днів) успішно додано!")
+    else:
+        await message.answer(f"❌ Помилка: посада <b>{pos_name}</b> вже існує або виникла інша помилка.")
+    await state.clear()
+    
+    # Повертаємось до списку
+    positions = await get_all_positions()
+    await message.answer(
+        "👔 <b>Управління посадами</b>",
+        reply_markup=_positions_keyboard(positions, 1)
+    )
+
+
+async def dev_pos_add_days_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    pos_name = data.get('pos_name')
+    if not pos_name:
+        await state.clear()
+        return
+        
+    try:
+        days = int(message.text.strip())
+        await _dev_pos_finish_add(message, state, pos_name, days)
+    except ValueError:
+        await message.answer("Будь ласка, введіть числове значення кількості днів.")
+
+
+async def dev_pos_add_days_callback(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    pos_name = data.get('pos_name')
+    if not pos_name:
+        await state.clear()
+        return
+        
+    days = int(callback.data.split(":")[1])
+    await _dev_pos_finish_add(callback.message, state, pos_name, days)
+    await callback.answer()
+
+
+async def dev_pos_view(callback: CallbackQuery):
+    pos_id = int(callback.data.split(":")[1])
+    pos = await get_position_by_id(pos_id)
+    if not pos:
+        await callback.answer("Посаду не знайдено!", show_alert=True)
+        return
+        
+    stats = await get_position_stats(pos['name'])
+    t_type = pos.get('territorial_type', 'ТЗ')
+    type_label = "🏪 Торговий зал (ТЗ)" if t_type == "ТЗ" else "🍞 Власне виробництво (ВВ)"
+    
+    text = (
+        f"👔 <b>Посада:</b> {pos['name']}\n"
+        f"🏷 <b>Тип:</b> {type_label}\n"
+        f"📅 <b>Днів навчання:</b> {pos['days_count']}\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"• Працівників: {stats['workers_count']}\n"
+        f"• Стажерів: {stats['interns_count']}\n"
+        f"• Всього: {stats['total']}"
+    )
+    
+    other_type = "ВВ" if t_type == "ТЗ" else "ТЗ"
+    other_label = "🍞 Змінити на ВВ" if t_type == "ТЗ" else "🏪 Змінити на ТЗ"
+    
+    buttons = [
+        [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_pos_edit_name:{pos_id}")],
+        [InlineKeyboardButton(text="✏️ Змінити кількість днів", callback_data=f"dev_pos_edit_days:{pos_id}")],
+        [InlineKeyboardButton(text=other_label, callback_data=f"dev_pos_toggle_type:{pos_id}:{other_type}")],
+        [InlineKeyboardButton(text="🔙 До списку посад", callback_data="dev_positions_menu")]
+    ]
+    
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_pos_toggle_type(callback: CallbackQuery):
+    """Перемикає тип посади між ТЗ та ВВ."""
+    parts = callback.data.split(":")
+    pos_id = int(parts[1])
+    new_type = parts[2]  # 'ТЗ' або 'ВВ'
+    
+    success = await update_position_type(pos_id, new_type)
+    if not success:
+        await callback.answer("❌ Помилка зміни типу", show_alert=True)
+        return
+    
+    pos = await get_position_by_id(pos_id)
+    stats = await get_position_stats(pos['name'])
+    t_type = pos.get('territorial_type', 'ТЗ')
+    type_label = "🏪 Торговий зал (ТЗ)" if t_type == "ТЗ" else "🍞 Власне виробництво (ВВ)"
+    
+    text = (
+        f"👔 <b>Посада:</b> {pos['name']}\n"
+        f"🏷 <b>Тип:</b> {type_label}\n"
+        f"📅 <b>Днів навчання:</b> {pos['days_count']}\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"• Працівників: {stats['workers_count']}\n"
+        f"• Стажерів: {stats['interns_count']}\n"
+        f"• Всього: {stats['total']}"
+    )
+    
+    other_type = "ВВ" if t_type == "ТЗ" else "ТЗ"
+    other_label = "🍞 Змінити на ВВ" if t_type == "ТЗ" else "🏪 Змінити на ТЗ"
+    
+    buttons = [
+        [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_pos_edit_name:{pos_id}")],
+        [InlineKeyboardButton(text="✏️ Змінити кількість днів", callback_data=f"dev_pos_edit_days:{pos_id}")],
+        [InlineKeyboardButton(text=other_label, callback_data=f"dev_pos_toggle_type:{pos_id}:{other_type}")],
+        [InlineKeyboardButton(text="🔙 До списку посад", callback_data="dev_positions_menu")]
+    ]
+    
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer(f"✅ Тип змінено на {t_type}")
+
+
+async def dev_pos_edit_name_start(callback: CallbackQuery, state: FSMContext):
+    pos_id = int(callback.data.split(":")[1])
+    pos = await get_position_by_id(pos_id)
+    
+    await _edit_or_answer(
+        callback.message,
+        f"Введіть нову назву для посади <b>{pos['name']}</b>:\n\n"
+        f"⚠️ <i>Увага: зміна назви автоматично оновить всіх користувачів, матеріали та історію!</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Скасувати", callback_data=f"dev_pos_view:{pos_id}")]])
+    )
+    await state.update_data(edit_pos_id=pos_id)
+    await state.set_state(DeveloperStates.waiting_edit_position_name)
+    await callback.answer()
+
+
+async def dev_pos_edit_name_process(message: Message, state: FSMContext):
+    data = await state.get_data()
+    pos_id = data.get('edit_pos_id')
+    new_name = message.text.strip()
+    
+    success = await update_position_name(pos_id, new_name)
+    if success:
+        await message.answer(f"✅ Назву посади змінено на <b>{new_name}</b>, зв'язані сутності оновлено.")
+    else:
+        await message.answer("❌ Помилка: можливо посада з такою назвою вже існує.")
+        
+    await state.clear()
+    pos = await get_position_by_id(pos_id)
+    
+    # Повертаємось до перегляду
+    stats = await get_position_stats(pos['name'])
+    text = (
+        f"👔 <b>Посада:</b> {pos['name']}\n"
+        f"📅 <b>Днів навчання:</b> {pos['days_count']}\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"• Працівників: {stats['workers_count']}\n"
+        f"• Стажерів: {stats['interns_count']}\n"
+        f"• Всього: {stats['total']}"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_pos_edit_name:{pos_id}")],
+        [InlineKeyboardButton(text="✏️ Змінити кількість днів", callback_data=f"dev_pos_edit_days:{pos_id}")],
+        [InlineKeyboardButton(text="🔙 До списку посад", callback_data="dev_positions_menu")]
+    ]
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+async def dev_pos_edit_days_start(callback: CallbackQuery, state: FSMContext):
+    pos_id = int(callback.data.split(":")[1])
+    pos = await get_position_by_id(pos_id)
+    
+    await _edit_or_answer(
+        callback.message,
+        f"Введіть нову кількість днів навчання для посади <b>{pos['name']}</b> (зараз {pos['days_count']}):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Скасувати", callback_data=f"dev_pos_view:{pos_id}")]])
+    )
+    await state.update_data(edit_pos_id=pos_id)
+    await state.set_state(DeveloperStates.waiting_edit_position_days)
+    await callback.answer()
+
+
+async def dev_pos_edit_days_process(message: Message, state: FSMContext):
+    data = await state.get_data()
+    pos_id = data.get('edit_pos_id')
+    
+    try:
+        new_days = int(message.text.strip())
+        success = await update_position_days(pos_id, new_days)
+        if success:
+            await message.answer(f"✅ Кількість днів змінено на {new_days}.")
+        else:
+            await message.answer("❌ Помилка під час оновлення.")
+    except ValueError:
+        await message.answer("Будь ласка, введіть число.")
+        return
+        
+    await state.clear()
+    pos = await get_position_by_id(pos_id)
+    
+    # Повертаємось до перегляду
+    stats = await get_position_stats(pos['name'])
+    text = (
+        f"👔 <b>Посада:</b> {pos['name']}\n"
+        f"📅 <b>Днів навчання:</b> {pos['days_count']}\n\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"• Працівників: {stats['workers_count']}\n"
+        f"• Стажерів: {stats['interns_count']}\n"
+        f"• Всього: {stats['total']}"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_pos_edit_name:{pos_id}")],
+        [InlineKeyboardButton(text="✏️ Змінити кількість днів", callback_data=f"dev_pos_edit_days:{pos_id}")],
+        [InlineKeyboardButton(text="🔙 До списку посад", callback_data="dev_positions_menu")]
+    ]
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+# ==============================================================================
+# УПРАВЛІННЯ МІСТАМИ
+# ==============================================================================
+
+def _cities_keyboard(cities: list, page: int = 1) -> InlineKeyboardMarkup:
+    items_per_page = 10
+    total_pages = (len(cities) - 1) // items_per_page + 1
+    start_idx = (page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    current_cities = cities[start_idx:end_idx]
+
+    buttons = []
+    for city in current_cities:
+        buttons.append([InlineKeyboardButton(text=f"🏙 {city['name']}", callback_data=f"dev_city_view:{city['id']}")])
+    
+    # Пагінація
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_cities_page:{page-1}"))
+    nav_row.append(InlineKeyboardButton(text=f"📄 {page}/{total_pages or 1}", callback_data="ignore"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_cities_page:{page+1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="➕ Додати місто", callback_data="dev_city_add")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_main_other")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def dev_cities_menu(callback: CallbackQuery):
+    cities = await get_all_cities()
+    await _edit_or_answer(
+        callback.message,
+        "🏙 <b>Управління містами</b>\nОберіть місто для редагування або додайте нове:",
+        reply_markup=_cities_keyboard(cities, 1)
+    )
+    await callback.answer()
+
+
+async def dev_cities_page(callback: CallbackQuery):
+    page = int(callback.data.split(":")[1])
+    cities = await get_all_cities()
+    await _edit_or_answer(
+        callback.message,
+        "🏙 <b>Управління містами</b>\nОберіть місто для редагування або додайте нове:",
+        reply_markup=_cities_keyboard(cities, page)
+    )
+    await callback.answer()
+
+
+async def dev_city_add_start(callback: CallbackQuery, state: FSMContext):
+    await _edit_or_answer(
+        callback.message,
+        "Введіть назву нового міста:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Скасувати", callback_data="dev_cities_menu")]])
+    )
+    await state.set_state(DeveloperStates.waiting_add_city_name)
+    await callback.answer()
+
+
+async def dev_city_add_name(message: Message, state: FSMContext):
+    name = message.text.strip()
+    success = await add_city(name)
+    if success:
+        await message.answer(f"✅ Місто <b>{name}</b> успішно додано!")
+    else:
+        await message.answer(f"❌ Помилка: місто <b>{name}</b> вже існує.")
+    await state.clear()
+    
+    cities = await get_all_cities()
+    await message.answer(
+        "🏙 <b>Управління містами</b>",
+        reply_markup=_cities_keyboard(cities, 1)
+    )
+
+
+async def dev_city_view(callback: CallbackQuery):
+    city_id = int(callback.data.split(":")[1])
+    city = await get_city_by_id(city_id)
+    if not city:
+        await callback.answer("Місто не знайдено!", show_alert=True)
+        return
+        
+    text = f"🏙 <b>Місто:</b> {city['name']}"
+    
+    buttons = [
+        [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_city_edit_name:{city_id}")],
+        [InlineKeyboardButton(text="🗑 Видалити місто", callback_data=f"dev_city_delete:{city_id}")],
+        [InlineKeyboardButton(text="🔙 До списку міст", callback_data="dev_cities_menu")]
+    ]
+    
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_city_edit_name_start(callback: CallbackQuery, state: FSMContext):
+    city_id = int(callback.data.split(":")[1])
+    city = await get_city_by_id(city_id)
+    
+    await _edit_or_answer(
+        callback.message,
+        f"Введіть нову назву для міста <b>{city['name']}</b>:\n\n"
+        f"⚠️ <i>Увага: зміна назви автоматично оновить всіх користувачів!</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Скасувати", callback_data=f"dev_city_view:{city_id}")]])
+    )
+    await state.update_data(edit_city_id=city_id)
+    await state.set_state(DeveloperStates.waiting_edit_city_name)
+    await callback.answer()
+
+
+async def dev_city_edit_name_process(message: Message, state: FSMContext):
+    data = await state.get_data()
+    city_id = data.get('edit_city_id')
+    new_name = message.text.strip()
+    
+    success = await update_city_name(city_id, new_name)
+    if success:
+        await message.answer(f"✅ Назву міста змінено на <b>{new_name}</b>, зв'язані сутності оновлено.")
+    else:
+        await message.answer("❌ Помилка під час оновлення назви міста.")
+        
+    await state.clear()
+    
+    city = await get_city_by_id(city_id)
+    text = f"🏙 <b>Місто:</b> {city['name']}"
+    buttons = [
+        [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_city_edit_name:{city_id}")],
+        [InlineKeyboardButton(text="🗑 Видалити місто", callback_data=f"dev_city_delete:{city_id}")],
+        [InlineKeyboardButton(text="🔙 До списку міст", callback_data="dev_cities_menu")]
+    ]
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+async def dev_city_delete(callback: CallbackQuery):
+    city_id = int(callback.data.split(":")[1])
+    city = await get_city_by_id(city_id)
+    
+    if not city:
+        await callback.answer("Місто не знайдено!", show_alert=True)
+        return
+        
+    await _edit_or_answer(
+        callback.message,
+        f"❗️ Ви впевнені, що хочете видалити місто <b>{city['name']}</b>?\n\n"
+        f"<i>Користувачі з цим містом збережуть його назву, але воно зникне зі списку вибору.</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="❌ Ні, скасувати", callback_data=f"dev_city_view:{city_id}"),
+                InlineKeyboardButton(text="✅ Так, видалити", callback_data=f"dev_city_delete_confirm:{city_id}")
+            ]
+        ])
+    )
+    await callback.answer()
+
+
+async def dev_city_delete_confirm(callback: CallbackQuery):
+    city_id = int(callback.data.split(":")[1])
+    success = await delete_city(city_id)
+    
+    if success:
+        await callback.answer("Місто видалено!", show_alert=True)
+    else:
+        await callback.answer("Помилка при видаленні!", show_alert=True)
+        
+    cities = await get_all_cities()
+    await _edit_or_answer(
+        callback.message,
+        "🏙 <b>Управління містами</b>",
+        reply_markup=_cities_keyboard(cities, 1)
+    )
+
+
+
+# =========================================================
+# ТЕРИТОРІАЛИ (Territorials)
+# =========================================================
+from database.managers import get_all_territorials, update_manager_responsible, reassign_city_managers_to_territorial, get_territorials_by_city
+
+TERRITORIAL_TYPES = {"ТЗ": "🏪 Торговий зал", "ВВ": "🍞 Власне виробництво"}
+
+def _territorials_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Список територіалів", callback_data="dev_territorials_list")],
+        [InlineKeyboardButton(text="➕ Додати територіала", callback_data="dev_territorial_add")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")]
+    ])
+
+async def developer_territorials_menu(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    await _edit_or_answer(
+        callback.message,
+        "🗺 <b>Територіали</b>\nОберіть дію:",
+        reply_markup=_territorials_menu_keyboard(),
+    )
+    await callback.answer()
+
+async def developer_list_territorials(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    territorials = await get_all_territorials()
+    if not territorials:
+        await _edit_or_answer(
+            callback.message,
+            "ℹ️ У системі поки немає територіалів.",
+            reply_markup=_territorials_menu_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    buttons = []
+    for t in territorials:
+        name = t.get('full_name', 'Без імені')
+        city = t.get('city', 'Без міста')
+        t_type = t.get('territorial_type') or '—'
+        type_label = TERRITORIAL_TYPES.get(t_type, t_type)
+        buttons.append([InlineKeyboardButton(
+            text=f"{name} | {city} · {t_type}",
+            callback_data=f"dev_territorial_view:{t['uid']}"
+        )])
+
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_territorials_menu")])
+
+    await _edit_or_answer(
+        callback.message,
+        "🗺 <b>Список територіалів:</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await callback.answer()
+
+async def developer_territorial_view(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    t_uid = int(callback.data.split(":")[1])
+    manager = await get_manager_by_uid(t_uid)
+    if not manager:
+        await callback.answer("Територіала не знайдено!", show_alert=True)
+        return
+
+    t_type = manager.get('territorial_type') or '—'
+    type_label = TERRITORIAL_TYPES.get(t_type, t_type)
+    city = manager.get('city', '')
+
+    # Підлеглі керівники
+    subordinate_managers = await get_managers_by_responsible(t_uid)
+    managers_count = len(subordinate_managers)
+
+    # Збираємо унікальні магазини серед підлеглих керівників
+    shops_set = set()
+    for m in subordinate_managers:
+        m_shops = m.get('shops') or []
+        if isinstance(m_shops, str):
+            import json
+            try:
+                m_shops = json.loads(m_shops)
+            except Exception:
+                m_shops = []
+        for s in m_shops:
+            if s:
+                shops_set.add(s)
+    shops_count = len(shops_set)
+
+    # Рахуємо стажерів та працівників по місту
+    from database.users import get_users_by_city
+    city_users = await get_users_by_city(city) if city else []
+    workers_count = sum(1 for u in city_users if u.get('status') == 'Працівник')
+    trainees_count = sum(1 for u in city_users if u.get('status') in ('Стажер', 'Новачок'))
+
+    text = (
+        f"🗺 <b>Територіал:</b> {manager.get('full_name', 'Без імені')}\n"
+        f"👤 <b>Username:</b> @{manager.get('username', 'немає')}\n"
+        f"🏙 <b>Місто:</b> {city or 'не вказано'}\n"
+        f"🏷 <b>Тип:</b> {type_label} ({t_type})\n"
+        f"👔 <b>Підлеглих керівників:</b> {managers_count}\n"
+        f"🏪 <b>Магазинів:</b> {shops_count}\n"
+        f"👷 <b>Працівників по місту:</b> {workers_count}\n"
+        f"🎓 <b>Стажерів по місту:</b> {trainees_count}\n"
+        f"🆔 <b>UID:</b> <code>{manager.get('uid')}</code>\n"
+    )
+
+    buttons = [
+        [InlineKeyboardButton(text="👔 Керівники Територіала", callback_data=f"dev_territorial_managers:{t_uid}:0")],
+        [InlineKeyboardButton(text="🗑 Видалити", callback_data=f"dev_territorial_del:{t_uid}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_territorials_list")]
+    ]
+
+    await _edit_or_answer(
+        callback.message,
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+async def developer_territorial_managers(callback: CallbackQuery):
+    """Список керівників конкретного Територіала з пагінацією."""
+    if not await _ensure_developer(callback):
+        return
+    parts = callback.data.split(":")
+    t_uid = int(parts[1])
+    page = int(parts[2]) if len(parts) > 2 else 0
+
+    manager_info = await get_manager_by_uid(t_uid)
+    t_name = manager_info.get('full_name', f'UID {t_uid}') if manager_info else f'UID {t_uid}'
+
+    subordinates = await get_managers_by_responsible(t_uid)
+
+    if not subordinates:
+        await _edit_or_answer(
+            callback.message,
+            f"👔 <b>Керівники Територіала {t_name}</b>\n\nПоки що немає жодного керівника.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_territorial_view:{t_uid}")]
+            ])
+        )
+        await callback.answer()
+        return
+
+    per_page = 10
+    total = len(subordinates)
+    pages = (total + per_page - 1) // per_page
+    page = max(0, min(page, pages - 1))
+    chunk = subordinates[page * per_page:(page + 1) * per_page]
+
+    lines = []
+    for m in chunk:
+        name = m.get('full_name', 'Без імені')
+        shops = m.get('shops') or []
+        if isinstance(shops, str):
+            import json
+            try:
+                shops = json.loads(shops)
+            except Exception:
+                shops = []
+        shop_str = ', '.join(shops) if shops else '—'
+        lines.append(f"• <b>{name}</b> | {shop_str}")
+
+    text = (
+        f"👔 <b>Керівники Територіала {t_name}</b> ({page+1}/{pages}):\n\n"
+        + "\n".join(lines)
+    )
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data=f"dev_territorial_managers:{t_uid}:{page-1}"))
+    if page < pages - 1:
+        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"dev_territorial_managers:{t_uid}:{page+1}"))
+
+    buttons = []
+    if nav_buttons:
+        buttons.append(nav_buttons)
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_territorial_view:{t_uid}")])
+
+    await _edit_or_answer(
+        callback.message,
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+async def developer_territorial_del(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    t_uid = int(callback.data.split(":")[1])
+    manager = await get_manager_by_uid(t_uid)
+    if not manager:
+        await callback.answer("Територіала не знайдено!", show_alert=True)
+        return
+
+    name = manager.get('full_name', 'Без імені')
+    city = manager.get('city', '—')
+    t_type = manager.get('territorial_type') or '—'
+
+    # Підтвердження видалення
+    buttons = [
+        [InlineKeyboardButton(text="✅ Так, видалити", callback_data=f"dev_territorial_del_confirm:{t_uid}")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_territorial_view:{t_uid}")]
+    ]
+    await _edit_or_answer(
+        callback.message,
+        f"⚠️ Видалити Територіала <b>{name}</b> ({city} · {t_type})?\n\n"
+        f"Всі підлеглі керівники повернуться до Адміністратора (без сповіщень).",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+async def developer_territorial_del_confirm(callback: CallbackQuery):
+    if not await _ensure_developer(callback):
+        return
+    t_uid = int(callback.data.split(":")[1])
+    await delete_manager_by_uid(t_uid)
+    await callback.answer("Територіала видалено! Підлеглих передано Адміністратору.", show_alert=True)
+    await developer_list_territorials(callback)
+
+# ADDING TERRITORIAL — FSM: uid → city → type → transfer
+async def developer_add_territorial_start(callback: CallbackQuery, state: FSMContext):
+    if not await _ensure_developer(callback):
+        return
+    await _edit_or_answer(
+        callback.message,
+        "Введіть Telegram ID (UID) нового територіала:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Скасувати", callback_data="dev_territorials_menu")]])
+    )
+    await state.set_state(DeveloperStates.waiting_add_territorial_uid)
+    await callback.answer()
+
+async def developer_add_territorial_uid(message: Message, state: FSMContext):
+    try:
+        uid = int(message.text.strip())
+    except ValueError:
+        await message.answer("Будь ласка, введіть коректний числовий UID.")
+        return
+
+    await state.update_data(t_uid=uid)
+    cities = await get_all_cities()
+
+    if not cities:
+        await message.answer("У базі немає міст. Додайте міста спочатку.")
+        await state.clear()
+        return
+
+    buttons = []
+    for c in cities:
+        buttons.append([InlineKeyboardButton(text=c['name'], callback_data=f"dev_t_city:{c['id']}")])
+
+    await message.answer(
+        "Оберіть місто для цього територіала:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await state.set_state(DeveloperStates.waiting_add_territorial_city)
+
+async def developer_add_territorial_city(callback: CallbackQuery, state: FSMContext):
+    city_id = int(callback.data.split(":")[1])
+    city_data = await get_city_by_id(city_id)
+    city_name = city_data['name']
+
+    await state.update_data(t_city=city_name)
+
+    # Перевіряємо, які типи вже є в цьому місті
+    existing = await get_territorials_by_city(city_name)
+    existing_types = {t.get('territorial_type') for t in existing}
+
+    buttons = []
+    for code, label in TERRITORIAL_TYPES.items():
+        if code in existing_types:
+            buttons.append([InlineKeyboardButton(
+                text=f"{label} ({code}) — вже існує ⚠️",
+                callback_data=f"dev_t_type:{code}"
+            )])
+        else:
+            buttons.append([InlineKeyboardButton(
+                text=f"{label} ({code})",
+                callback_data=f"dev_t_type:{code}"
+            )])
+
+    warning = ""
+    if existing_types:
+        warning = f"\n\n⚠️ У місті <b>{city_name}</b> вже є: {', '.join(existing_types)}."
+
+    await callback.message.edit_text(
+        f"Оберіть тип Територіала для міста <b>{city_name}</b>:{warning}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await state.set_state(DeveloperStates.waiting_add_territorial_type)
+    await callback.answer()
+
+async def developer_add_territorial_type(callback: CallbackQuery, state: FSMContext):
+    t_type = callback.data.split(":")[1]  # "ТЗ" або "ВВ"
+    await state.update_data(t_type=t_type)
+    data = await state.get_data()
+    city_name = data.get("t_city")
+
+    buttons = [
+        [InlineKeyboardButton(text="✅ Так, перенести", callback_data="dev_t_transfer:yes")],
+        [InlineKeyboardButton(text="❌ Ні, залишити як є", callback_data="dev_t_transfer:no")]
+    ]
+
+    type_label = TERRITORIAL_TYPES.get(t_type, t_type)
+    await callback.message.edit_text(
+        f"Перенести <b>всіх керівників</b> міста <b>{city_name}</b> під управління цього Територіала ({type_label})?\n\n"
+        f"💡 Після перенесення можна перепривʼязати окремих керівників вручну.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await state.set_state(DeveloperStates.waiting_add_territorial_transfer)
+    await callback.answer()
+
+async def developer_add_territorial_finish(callback: CallbackQuery, state: FSMContext):
+    transfer = callback.data.split(":")[1] == "yes"
+    data = await state.get_data()
+    uid = data.get("t_uid")
+    city = data.get("t_city")
+    t_type = data.get("t_type")
+
+    await add_manager(uid, "Територіал", city=city, territorial_type=t_type)
+
+    if transfer:
+        await reassign_city_managers_to_territorial(city, uid)
+
+    type_label = TERRITORIAL_TYPES.get(t_type, t_type)
+    await callback.message.edit_text(
+        f"✅ Територіала <b>{type_label} ({t_type})</b> для міста <b>{city}</b> успішно додано!" +
+        ("\n👔 Всіх керівників міста перенесено." if transfer else ""),
+        reply_markup=_territorials_menu_keyboard()
+    )
+    await state.clear()
+    await callback.answer()
+
+
 def register_developer_menu_handlers(dp: Dispatcher):
+
+    # Territorials
+    dp.callback_query.register(developer_territorials_menu, lambda c: c.data == "dev_territorials_menu")
+    dp.callback_query.register(developer_list_territorials, lambda c: c.data == "dev_territorials_list")
+    dp.callback_query.register(developer_territorial_view, lambda c: c.data and c.data.startswith("dev_territorial_view:"))
+    dp.callback_query.register(developer_territorial_managers, lambda c: c.data and c.data.startswith("dev_territorial_managers:"))
+    dp.callback_query.register(developer_territorial_del, lambda c: c.data and c.data.startswith("dev_territorial_del:") and not c.data.startswith("dev_territorial_del_confirm:"))
+    dp.callback_query.register(developer_territorial_del_confirm, lambda c: c.data and c.data.startswith("dev_territorial_del_confirm:"))
+
+    dp.callback_query.register(developer_add_territorial_start, lambda c: c.data == "dev_territorial_add")
+    dp.message.register(developer_add_territorial_uid, DeveloperStates.waiting_add_territorial_uid)
+    dp.callback_query.register(developer_add_territorial_city, DeveloperStates.waiting_add_territorial_city, lambda c: c.data and c.data.startswith("dev_t_city:"))
+    dp.callback_query.register(developer_add_territorial_type, DeveloperStates.waiting_add_territorial_type, lambda c: c.data and c.data.startswith("dev_t_type:"))
+    dp.callback_query.register(developer_add_territorial_finish, DeveloperStates.waiting_add_territorial_transfer, lambda c: c.data and c.data.startswith("dev_t_transfer:"))
+
+    # Positions
+    dp.callback_query.register(dev_positions_menu, lambda c: c.data == "dev_positions_menu")
+    dp.callback_query.register(dev_positions_page, lambda c: c.data and c.data.startswith("dev_positions_page:"))
+    dp.callback_query.register(dev_pos_add_start, lambda c: c.data == "dev_pos_add")
+    dp.message.register(dev_pos_add_name, DeveloperStates.waiting_add_position_name)
+    dp.message.register(dev_pos_add_days_text, DeveloperStates.waiting_add_position_days)
+    dp.callback_query.register(dev_pos_add_days_callback, DeveloperStates.waiting_add_position_days, lambda c: c.data and c.data.startswith("dev_pos_add_days:"))
+    dp.callback_query.register(dev_pos_view, lambda c: c.data and c.data.startswith("dev_pos_view:"))
+    dp.callback_query.register(dev_pos_edit_name_start, lambda c: c.data and c.data.startswith("dev_pos_edit_name:"))
+    dp.message.register(dev_pos_edit_name_process, DeveloperStates.waiting_edit_position_name)
+    dp.callback_query.register(dev_pos_edit_days_start, lambda c: c.data and c.data.startswith("dev_pos_edit_days:"))
+    dp.message.register(dev_pos_edit_days_process, DeveloperStates.waiting_edit_position_days)
+    dp.callback_query.register(dev_pos_toggle_type, lambda c: c.data and c.data.startswith("dev_pos_toggle_type:"))
+
+    # Cities
+    dp.callback_query.register(dev_cities_menu, lambda c: c.data == "dev_cities_menu")
+    dp.callback_query.register(dev_cities_page, lambda c: c.data and c.data.startswith("dev_cities_page:"))
+    dp.callback_query.register(dev_city_add_start, lambda c: c.data == "dev_city_add")
+    dp.message.register(dev_city_add_name, DeveloperStates.waiting_add_city_name)
+    dp.callback_query.register(dev_city_view, lambda c: c.data and c.data.startswith("dev_city_view:"))
+    dp.callback_query.register(dev_city_edit_name_start, lambda c: c.data and c.data.startswith("dev_city_edit_name:"))
+    dp.message.register(dev_city_edit_name_process, DeveloperStates.waiting_edit_city_name)
+    dp.callback_query.register(dev_city_delete, lambda c: c.data and c.data.startswith("dev_city_delete:"))
+    dp.callback_query.register(dev_city_delete_confirm, lambda c: c.data and c.data.startswith("dev_city_delete_confirm:"))
+
     # XLSX Reports (Priority)
     dp.callback_query.register(developer_xlsx_menu, lambda c: c.data == "dev_xlsx_menu")
     dp.callback_query.register(developer_send_current_report, lambda c: c.data == "dev_xlsx_send_current")
     dp.callback_query.register(developer_send_period_report, lambda c: c.data and c.data.startswith("dev_xlsx_send_period:"))
 
     dp.callback_query.register(developer_menu_callback, lambda c: c.data == "developer_menu")
+    dp.callback_query.register(dev_main_study_handler, lambda c: c.data == "dev_main_study")
+    dp.callback_query.register(dev_main_analyt_handler, lambda c: c.data == "dev_main_analyt")
+    dp.callback_query.register(dev_main_team_handler, lambda c: c.data == "dev_main_team")
+    dp.callback_query.register(dev_main_other_handler, lambda c: c.data == "dev_main_other")
 
     # Users
     dp.callback_query.register(developer_users_menu, lambda c: c.data == "dev_users_menu")
@@ -5326,6 +6774,22 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_remove_manager, lambda c: c.data and c.data.startswith("mgr_remove:"))
     dp.callback_query.register(manager_cancel_add, lambda c: c.data == "mgr_cancel_add")
     dp.callback_query.register(manager_team_back, lambda c: c.data == "mgr_team_back")
+
+    # Manager Search & Card Management Handlers (Point 5)
+    dp.callback_query.register(dev_mgr_search_start, lambda c: c.data == "dev_mgr_search_start")
+    dp.message.register(dev_mgr_search_process, DeveloperStates.waiting_search_manager)
+    dp.callback_query.register(dev_mgr_view, lambda c: c.data and c.data.startswith("dev_mgr_view:"))
+    dp.callback_query.register(dev_mgr_edit_menu, lambda c: c.data and c.data.startswith("dev_mgr_edit_menu:"))
+    dp.callback_query.register(dev_mgr_change_name_start, lambda c: c.data and c.data.startswith("dev_mgr_ch_name:"))
+    dp.message.register(dev_mgr_change_name_process, DeveloperStates.waiting_edit_manager_name)
+    dp.callback_query.register(dev_mgr_change_shops_start, lambda c: c.data and c.data.startswith("dev_mgr_ch_shops:"))
+    dp.callback_query.register(dev_mgr_edit_shop_toggle, DeveloperStates.waiting_edit_manager_shops, lambda c: c.data and c.data.startswith("dev_mgr_eshop_toggle:"))
+    dp.callback_query.register(dev_mgr_edit_shop_done, DeveloperStates.waiting_edit_manager_shops, lambda c: c.data and c.data.startswith("dev_mgr_eshop_done:"))
+    dp.callback_query.register(dev_mgr_transfer_shops_yes, lambda c: c.data and c.data.startswith("dev_mgr_tr_yes:"))
+    dp.callback_query.register(dev_mgr_fire_ask, lambda c: c.data and c.data.startswith("dev_mgr_fire_ask:"))
+    dp.callback_query.register(dev_mgr_fire_confirm, lambda c: c.data and c.data.startswith("dev_mgr_fire_confirm:"))
+    dp.callback_query.register(dev_mgr_reassign_menu, lambda c: c.data and c.data.startswith("dev_mgr_reassign_menu:"))
+    dp.callback_query.register(dev_mgr_reassign_set, lambda c: c.data and c.data.startswith("dev_mgr_reassign_set:"))
     
     # HR Team Management (moved up or handled here)
     dp.callback_query.register(developer_request_add_hr, lambda c: c.data == "dev_add_hr")
@@ -5439,9 +6903,9 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_change_manager_start, lambda c: c.data and c.data.startswith("dev_change_manager:"))
     dp.message.register(developer_process_change_manager, DeveloperStates.waiting_change_manager_id)
     dp.callback_query.register(developer_change_role_start, lambda c: c.data and c.data.startswith("dev_change_role:"))
-    dp.callback_query.register(developer_process_change_role, lambda c: c.data and c.data.startswith("dev_process_change_role:"))
+    dp.callback_query.register(developer_process_change_role, lambda c: c.data and (c.data.startswith("dev_process_change_role:") or c.data.startswith("dev_set_role:")))
     dp.callback_query.register(developer_change_city_start, lambda c: c.data and c.data.startswith("dev_change_city:"))
-    dp.callback_query.register(developer_process_change_city, lambda c: c.data and c.data.startswith("dev_process_change_city:"))
+    dp.callback_query.register(developer_process_change_city, lambda c: c.data and (c.data.startswith("dev_process_change_city:") or c.data.startswith("dev_set_city:")))
     dp.callback_query.register(developer_user_delete_confirm, lambda c: c.data and c.data.startswith("dev_user_delete_confirm:"))
     dp.callback_query.register(developer_user_delete_perform, lambda c: c.data and c.data.startswith("dev_user_delete_perform:"))
     
