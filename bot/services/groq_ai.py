@@ -253,7 +253,7 @@ def is_groq_configured() -> bool:
 
 
 def get_groq_status() -> dict:
-    """Повертає статус Groq API для Dev-панелі."""
+    """Повертає статус Groq API для Панелі Адміністратора."""
     return {
         "configured": is_groq_configured(),
         "total_keys": _key_manager.available_keys_count,

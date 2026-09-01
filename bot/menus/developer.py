@@ -567,7 +567,7 @@ async def _build_managers_team_view(is_admin: bool, is_territorial: bool, user_i
         buttons = []
         if is_admin:
             buttons.append([InlineKeyboardButton(text="➕ Додати керівника", callback_data="dev_add_manager")])
-        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")])
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         return "👔 <b>Команда керівників</b>\n\nПоки що немає", kb
 
@@ -625,7 +625,7 @@ async def _build_managers_team_view(is_admin: bool, is_territorial: bool, user_i
         
     if is_admin:
         buttons.append([InlineKeyboardButton(text="➕ Додати керівника", callback_data="dev_add_manager")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")])
     
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -682,7 +682,7 @@ async def developer_remove_dev_menu(callback: CallbackQuery, state: FSMContext):
     
     developers = await get_all_devs_from_managers_db()
     if not developers:
-        await callback.answer("Немає розробників для видалення.", show_alert=True)
+        await callback.answer("Немає адміністраторів для видалення.", show_alert=True)
         return
     
     buttons = []
@@ -698,7 +698,7 @@ async def developer_remove_dev_menu(callback: CallbackQuery, state: FSMContext):
     
     await _edit_or_answer(
         callback.message,
-        "🗑 Оберіть розробника для видалення:",
+        "🗑 Оберіть адміністратора для видалення:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     try:
@@ -721,13 +721,13 @@ async def developer_remove_dev(callback: CallbackQuery, state: FSMContext):
     # Захист від видалення головного розробника
     if user_id_to_remove == MAIN_DEVELOPER_ID:
         await callback.answer(
-            "⛔️ Ви не можете видалити головного розробника.",
+            "⛔️ Ви не можете видалити головного адміністратора.",
             show_alert=True
         )
         return
         
     await delete_manager_by_uid(user_id_to_remove)
-    await callback.answer(f"Розробника {user_id_to_remove} видалено з команди.", show_alert=True)
+    await callback.answer(f"Адміністратора {user_id_to_remove} видалено з команди.", show_alert=True)
     
     # Оновлюємо вигляд меню
     await developer_dev_team_menu(callback, state)
@@ -754,7 +754,7 @@ def _users_menu_keyboard(is_admin: bool, is_territorial: bool, is_observer: bool
         if is_admin:
             buttons.append([InlineKeyboardButton(text="❌ Видалити", callback_data="dev_users_delete")])
 
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 async def _get_users_menu_kb(user_id: int) -> InlineKeyboardMarkup:
@@ -2624,7 +2624,7 @@ async def hr_team_back(callback: CallbackQuery, state: FSMContext):
 
 def _materials_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_study")]
     ])
 
 
@@ -2643,7 +2643,7 @@ async def developer_materials_menu(callback: CallbackQuery):
             callback_data=f"dev_mat_role|{i}"
         )])
     
-    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="developer_menu")])
+    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_main_study")])
     
     await _edit_or_answer(
         callback.message,
@@ -3686,14 +3686,14 @@ async def _finalize_material_update(message: Message, state: FSMContext, new_con
             f"День: {day}\n"
             f"Тип: {content_type}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]
+                [InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]
             ])
         )
     else:
         await message.answer(
             "❌ Помилка збереження матеріалу.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]
+                [InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]
             ])
         )
     
@@ -3720,10 +3720,10 @@ async def developer_process_material_video(message: Message, state: FSMContext):
     if success:
         await message.answer(
             f"✅ <b>Матеріал оновлено!</b>\n\nПосада: {role}\nДень: {day}\nТип: {content_type}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]])
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]])
         )
     else:
-        await message.answer("❌ Помилка збереження матеріалу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]]))
+        await message.answer("❌ Помилка збереження матеріалу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]]))
     
     await state.clear()
 
@@ -3747,10 +3747,10 @@ async def _finalize_video_update(message: Message, state: FSMContext, video_file
     if success:
         await message.answer(
             f"✅ <b>Матеріал оновлено!</b>\n\nПосада: {role}\nДень: {day}\nТип: {content_type}\nЗавантажено файлів: {len(video_file_ids)}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]])
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]])
         )
     else:
-        await message.answer("❌ Помилка збереження матеріалу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]]))
+        await message.answer("❌ Помилка збереження матеріалу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]]))
     
     await state.clear()
 
@@ -3770,7 +3770,7 @@ async def developer_tests_menu(callback: CallbackQuery):
             callback_data=f"dev_test_role|{i}"
         )])
     
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_study")])
     
     await _edit_or_answer(
         callback.message,
@@ -4170,7 +4170,7 @@ async def developer_videos_menu(callback: CallbackQuery):
             callback_data=f"dev_video_role|{i}"
         )])
     
-    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="developer_menu")])
+    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_main_study")])
     
     await _edit_or_answer(
         callback.message,
@@ -4194,7 +4194,7 @@ async def developer_photos_menu(callback: CallbackQuery):
             callback_data=f"dev_photo_role|{i}"
         )])
     
-    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="developer_menu")])
+    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_main_study")])
     
     await _edit_or_answer(
         callback.message,
@@ -4390,10 +4390,10 @@ async def _finalize_photo_update(message: Message, state: FSMContext, photo_file
     if success:
         await message.answer(
             f"✅ <b>Матеріал оновлено!</b>\n\nПосада: {role}\nДень: {day}\nТип: {content_type}\nЗавантажено файлів: {len(photo_file_ids)}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]])
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]])
         )
     else:
-        await message.answer("❌ Помилка збереження матеріалу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]]))
+        await message.answer("❌ Помилка збереження матеріалу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]]))
     
     await state.clear()
 
@@ -4457,7 +4457,7 @@ async def developer_syllabus_menu(callback: CallbackQuery):
             callback_data=f"dev_syl_role|{i}"
         )])
     
-    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="developer_menu")])
+    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_main_study")])
     
     await _edit_or_answer(
         callback.message,
@@ -4728,14 +4728,14 @@ async def notify_decision_no(callback: CallbackQuery, state: FSMContext):
             f"Тип: {content_type}\n\n"
             f"<i>Оповіщення не надсилалось.</i>",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]
+                [InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]
             ])
         )
     else:
         await callback.message.edit_text(
             "❌ Помилка збереження матеріалу.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]
+                [InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]
             ])
         )
     
@@ -4786,7 +4786,7 @@ async def process_notify_message(message: Message, state: FSMContext):
         await message.answer(
             "❌ Помилка збереження матеріалу.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]
+                [InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]
             ])
         )
         await state.clear()
@@ -4809,7 +4809,7 @@ async def process_notify_message(message: Message, state: FSMContext):
         f"🌊 Кількість хвиль: <b>{waves_total}</b> (по 40 осіб на годину)\n"
         f"⏳ Першу хвилю надіслано негайно.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]
+            [InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]
         ])
     )
     
@@ -5142,7 +5142,7 @@ async def developer_tokens_menu(callback: CallbackQuery):
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🧹 Очистити прострочені", callback_data="dev_tokens_cleanup")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_other")],
     ])
     
     await _edit_or_answer(callback.message, text, reply_markup=kb)
@@ -5174,7 +5174,7 @@ async def developer_tokens_cleanup(callback: CallbackQuery):
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🧹 Очистити прострочені", callback_data="dev_tokens_cleanup")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_other")],
     ])
     await _edit_or_answer(callback.message, text, reply_markup=kb)
 
@@ -5237,7 +5237,7 @@ async def developer_health_status(callback: CallbackQuery):
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Оновити статус", callback_data="dev_health_status")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_other")],
     ])
     
     await _edit_or_answer(callback.message, text, reply_markup=kb)
@@ -5620,7 +5620,7 @@ async def developer_xlsx_menu(callback: CallbackQuery):
         [InlineKeyboardButton(text="📥 За 3 місяці", callback_data="dev_xlsx_send_period:3")],
         [InlineKeyboardButton(text="📥 За пів року", callback_data="dev_xlsx_send_period:6")],
         [InlineKeyboardButton(text="📥 За рік", callback_data="dev_xlsx_send_period:12")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_analyt")],
     ])
     
     try:
@@ -5708,7 +5708,7 @@ async def developer_reminder_history_menu(callback: CallbackQuery):
             callback.message,
             "📭 Історія нагадувань порожня.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")]
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_analyt")]
             ])
         )
         await callback.answer()
@@ -5764,7 +5764,7 @@ async def developer_analytics_menu(callback: CallbackQuery):
         [InlineKeyboardButton(text="📅 Щоденний дайджест", callback_data="dev_analytics_digest")],
         [InlineKeyboardButton(text="📉 Воронка відсіву", callback_data="dev_analytics_funnel")],
         [InlineKeyboardButton(text="🎓 Навчальний процес", callback_data="dev_training_menu")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_analyt")]
     ])
     
     await _edit_or_answer(

@@ -241,7 +241,7 @@ async def show_developer_main_menu(
     force_new_message: bool = False,
 ) -> None:
     caption = (
-        "🛠 Ви увійшли як розробник команди Булка!\n"
+        "🛠 Ви увійшли як адміністратор команди Булка!\n"
         "Час творити магію. Що робимо далі?"
     )
     keyboard = main_menu_keyboard(is_hr=is_hr, is_developer=is_developer)
@@ -1356,7 +1356,7 @@ async def remind_topic_global_callback(callback: CallbackQuery, state: FSMContex
             )])
         buttons.append([InlineKeyboardButton(text="🌐 Всі посади", callback_data="remind_role_select:ALL")])
         
-        back_button_cb = "developer_menu" if is_dev else "manager_menu"
+        back_button_cb = "dev_main_study" if is_dev else "manager_menu"
         buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_button_cb)])
         
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -2131,7 +2131,7 @@ async def developer_profile_handler(callback: CallbackQuery):
     username = user_details.get('username', 'немає') if user_details else callback.from_user.username or "немає"
 
     text = (
-        f"🛠️ <b>Профіль розробника</b> 🛠️\n\n"
+        f"🛠️ <b>Профіль адміністратора</b> 🛠️\n\n"
         f"👤 <b>{full_name}</b> (@{username})\n\n"
         f"📊 <b>Статистика системи:</b>\n"
         f"— Всього користувачів: <b>{len(all_users)}</b>\n"
@@ -2599,8 +2599,9 @@ async def show_test_error_statistics(callback: CallbackQuery):
             
         text = "\n".join(text_lines)
 
+    back_cb = "dev_main_analyt" if is_dev else "main_menu_photo"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад до головного меню", callback_data="main_menu_photo")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)]
     ])
     
     if callback.message:
