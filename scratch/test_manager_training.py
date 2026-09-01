@@ -17,7 +17,7 @@ from database.managers import (
     get_all_kerivnyky,
     delete_manager_by_uid,
 )
-from database.users import register_user, set_intern_extra, get_user_details
+from database.users import register_user, set_intern_extra, get_user_details, delete_user
 from bot.keyboards import manager_menu_keyboard
 from bot.services.reminders import notify_territorial_manager_training_completed
 from bot.menus.developer import developer_promote_manager_handler, developer_keep_manager_trainee_handler
@@ -36,6 +36,7 @@ async def run_tests():
 
     # Clean up before testing
     await delete_manager_by_uid(test_trainee_mgr_uid)
+    await delete_user(test_trainee_mgr_uid)
 
     # 1. Test creation of 'Керівник Стажер'
     print("\n1. Testing 'Керівник Стажер' Creation & Registration...")

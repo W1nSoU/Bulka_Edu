@@ -81,20 +81,23 @@ def manager_menu_keyboard():
         [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")]
     ])
 
-def learning_menu_keyboard(day_statuses, syllabus_enabled=True, total_days=None):
+def learning_menu_keyboard(day_statuses, syllabus_enabled=True, total_days=None, page: int = 0):
     """
-    Клавіатура меню навчання.
+    Клавіатура меню навчання з підтримкою пагінації (по 6 днів на сторінку).
 
     Args:
         day_statuses: список (day, DayStatus) із get_days_overview().
         syllabus_enabled: чи показувати кнопку «Зміст».
         total_days: загальна кількість днів навчання для цієї посади.
                     Якщо None — визначається автоматично як останній день у списку.
+        page: номер сторінки (0-indexed).
     """
     from bot.config import DAYS_TOTAL  # локальний імпорт щоб уникнути циклу
 
-    kb_rows = []
-    syllabus_unlocked = False
+    PER_PAGE = 6
+    total_count = len(day_statuses)
+    pages_total = max(1, (total_count + PER_PAGE - 1) // PER_PAGE)
+    page = max(0, min(page, pages_total - 1))
 
     # Визначаємо останній день курсу
     if total_days is None:
@@ -103,7 +106,16 @@ def learning_menu_keyboard(day_statuses, syllabus_enabled=True, total_days=None)
         else:
             total_days = DAYS_TOTAL
 
+    syllabus_unlocked = False
     for day, status in day_statuses:
+        if day == total_days and status != DayStatus.CLOSED:
+            syllabus_unlocked = True
+
+    start = page * PER_PAGE
+    paginated_days = day_statuses[start:start + PER_PAGE]
+
+    kb_rows = []
+    for day, status in paginated_days:
         if status == DayStatus.COMPLETED:
             txt = f"✅ День {day}"
             cb = f"day_{day}"
@@ -115,9 +127,15 @@ def learning_menu_keyboard(day_statuses, syllabus_enabled=True, total_days=None)
             cb = f"locked_{day}"
         kb_rows.append([InlineKeyboardButton(text=txt, callback_data=cb)])
 
-        # Розблоковуємо зміст коли останній день курсу відкрито або пройдено
-        if day == total_days and status != DayStatus.CLOSED:
-            syllabus_unlocked = True
+    # Рядок пагінації, якщо сторінок більше 1
+    if pages_total > 1:
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"learning_days_page:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {page + 1}/{pages_total}", callback_data="ignore"))
+        if page < pages_total - 1:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"learning_days_page:{page + 1}"))
+        kb_rows.append(nav_row)
 
     # Показуємо зміст лише якщо він увімкнений адміном
     if syllabus_enabled:

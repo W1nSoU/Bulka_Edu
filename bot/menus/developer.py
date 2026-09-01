@@ -2651,6 +2651,37 @@ async def developer_materials_menu(callback: CallbackQuery):
     await callback.answer()
 
 
+async def _build_dev_days_picker_keyboard(role: str, callback_prefix: str, back_callback: str, page: int = 0) -> InlineKeyboardMarkup:
+    from database.positions import get_days_count_for_role
+    total_days = await get_days_count_for_role(role)
+    
+    PER_PAGE = 6
+    pages_total = max(1, (total_days + PER_PAGE - 1) // PER_PAGE)
+    page = max(0, min(page, pages_total - 1))
+    
+    start_day = page * PER_PAGE + 1
+    end_day = min(start_day + PER_PAGE, total_days + 1)
+    
+    buttons = []
+    for day in range(start_day, end_day):
+        buttons.append([InlineKeyboardButton(
+            text=f"📅 День {day}",
+            callback_data=f"{callback_prefix}|{day}"
+        )])
+        
+    if pages_total > 1:
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"{callback_prefix}_pg|{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {page + 1}/{pages_total}", callback_data="ignore"))
+        if page < pages_total - 1:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"{callback_prefix}_pg|{page + 1}"))
+        buttons.append(nav_row)
+        
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 async def developer_materials_select_day(callback: CallbackQuery, state: FSMContext):
     """Вибір дня для редагування."""
     if not await _ensure_developer(callback):
@@ -2669,21 +2700,14 @@ async def developer_materials_select_day(callback: CallbackQuery, state: FSMCont
     
     await state.update_data(edit_role=role, edit_role_index=role_index)
     
-    buttons = []
-    for day in range(1, DAYS_TOTAL + 1):
-        buttons.append([InlineKeyboardButton(
-            text=f"📅 День {day}",
-            callback_data=f"dev_mat_day|{day}"
-        )])
-    
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_materials_menu")])
+    kb = await _build_dev_days_picker_keyboard(role, "dev_mat_day", "dev_materials_menu", page=0)
     
     await _edit_or_answer(
         callback.message,
         f"📝 <b>Редагування матеріалів</b>\n\n"
         f"Посада: <b>{role}</b>\n\n"
         f"Оберіть день:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        reply_markup=kb
     )
     await callback.answer()
 
@@ -3737,21 +3761,14 @@ async def developer_tests_select_day(callback: CallbackQuery, state: FSMContext)
     
     await state.update_data(test_role=role, test_role_index=role_index)
     
-    buttons = []
-    for day in range(1, DAYS_TOTAL + 1):
-        buttons.append([InlineKeyboardButton(
-            text=f"📅 День {day}",
-            callback_data=f"dev_test_day|{day}"
-        )])
-    
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_tests_menu")])
+    kb = await _build_dev_days_picker_keyboard(role, "dev_test_day", "dev_tests_menu", page=0)
     
     await _edit_or_answer(
         callback.message,
         f"📝 <b>Редагування тестів</b>\n\n"
         f"Посада: <b>{role}</b>\n\n"
         f"Оберіть день:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        reply_markup=kb
     )
     await callback.answer()
 
@@ -3774,21 +3791,14 @@ async def developer_videos_select_day(callback: CallbackQuery, state: FSMContext
     
     await state.update_data(edit_video_role=role, edit_video_role_index=role_index)
     
-    buttons = []
-    for day in range(1, DAYS_TOTAL + 1):
-        buttons.append([InlineKeyboardButton(
-            text=f"📅 День {day}",
-            callback_data=f"dev_video_day|{day}"
-        )])
-    
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_videos_menu")])
+    kb = await _build_dev_days_picker_keyboard(role, "dev_video_day", "dev_videos_menu", page=0)
     
     await _edit_or_answer(
         callback.message,
         f"🎥 <b>Редагування відео матеріалів</b>\n\n"
         f"Посада: <b>{role}</b>\n\n"
         f"Оберіть день:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        reply_markup=kb
     )
     await callback.answer()
 
@@ -4177,22 +4187,52 @@ async def developer_photos_select_day(callback: CallbackQuery, state: FSMContext
     
     await state.update_data(edit_photo_role=role, edit_photo_role_index=role_index)
     
-    buttons = []
-    for day in range(1, DAYS_TOTAL + 1):
-        buttons.append([InlineKeyboardButton(
-            text=f"📅 День {day}",
-            callback_data=f"dev_photo_day|{day}"
-        )])
-    
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_photos_menu")])
+    kb = await _build_dev_days_picker_keyboard(role, "dev_photo_day", "dev_photos_menu", page=0)
     
     await _edit_or_answer(
         callback.message,
         f"🖼 <b>Редагування фото матеріалів</b>\n\n"
         f"Посада: <b>{role}</b>\n\n"
         f"Оберіть день:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        reply_markup=kb
     )
+    await callback.answer()
+
+
+async def developer_days_page_callback(callback: CallbackQuery, state: FSMContext):
+    """Обробляє пагінацію вибору днів у панелі розробника."""
+    if not await _ensure_developer(callback):
+        return
+    try:
+        prefix, page_str = callback.data.split("|", 1)
+        page = int(page_str)
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+
+    data = await state.get_data()
+    
+    if prefix == "dev_mat_day_pg":
+        role = data.get("edit_role", AVAILABLE_ROLES[0])
+        kb = await _build_dev_days_picker_keyboard(role, "dev_mat_day", "dev_materials_menu", page=page)
+        title = f"📝 <b>Редагування матеріалів</b>\n\nПосада: <b>{role}</b>\n\nОберіть день:"
+    elif prefix == "dev_test_day_pg":
+        role = data.get("test_role", AVAILABLE_ROLES[0])
+        kb = await _build_dev_days_picker_keyboard(role, "dev_test_day", "dev_tests_menu", page=page)
+        title = f"📝 <b>Редагування тестів</b>\n\nПосада: <b>{role}</b>\n\nОберіть день:"
+    elif prefix == "dev_video_day_pg":
+        role = data.get("edit_video_role", AVAILABLE_ROLES[0])
+        kb = await _build_dev_days_picker_keyboard(role, "dev_video_day", "dev_videos_menu", page=page)
+        title = f"🎥 <b>Редагування відео матеріалів</b>\n\nПосада: <b>{role}</b>\n\nОберіть день:"
+    elif prefix == "dev_photo_day_pg":
+        role = data.get("edit_photo_role", AVAILABLE_ROLES[0])
+        kb = await _build_dev_days_picker_keyboard(role, "dev_photo_day", "dev_photos_menu", page=page)
+        title = f"🖼 <b>Редагування фото матеріалів</b>\n\nПосада: <b>{role}</b>\n\nОберіть день:"
+    else:
+        await callback.answer()
+        return
+
+    await _edit_or_answer(callback.message, title, reply_markup=kb)
     await callback.answer()
 
 async def developer_photos_view(callback: CallbackQuery, state: FSMContext):
@@ -7111,6 +7151,9 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_tokens_menu, lambda c: c.data == "dev_tokens_menu")
     dp.callback_query.register(developer_tokens_cleanup, lambda c: c.data == "dev_tokens_cleanup")
     dp.callback_query.register(developer_health_status, lambda c: c.data == "dev_health_status")
+
+    # Days picker pagination (Materials, Videos, Photos, Tests)
+    dp.callback_query.register(developer_days_page_callback, lambda c: c.data and any(c.data.startswith(p) for p in ["dev_mat_day_pg|", "dev_test_day_pg|", "dev_video_day_pg|", "dev_photo_day_pg|"]))
 
     # Materials Editor
     dp.callback_query.register(developer_materials_menu, lambda c: c.data == "dev_materials_menu")

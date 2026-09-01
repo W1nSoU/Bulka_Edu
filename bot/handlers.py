@@ -360,10 +360,40 @@ async def menu_days(callback: CallbackQuery):
         await _show_text_menu(
             callback.message,
             "Оберіть день для навчання:",
-            learning_menu_keyboard(day_overview, syllabus_enabled=is_syl_enabled, total_days=len(day_overview)),
+            learning_menu_keyboard(day_overview, syllabus_enabled=is_syl_enabled, total_days=len(day_overview), page=0),
             allow_edit=True,
             allow_caption_edit=False,
         )
+
+async def menu_days_page_callback(callback: CallbackQuery):
+    """Обробляє перемикання сторінок у меню днів навчання."""
+    user_id = callback.from_user.id
+    try:
+        page = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        page = 0
+
+    user_details = await get_user_details(user_id)
+    user_role = user_details.get('role', 'ALL') if user_details else 'ALL'
+    
+    initialize_user_progress(user_id)
+    day_overview = await get_days_overview(user_id, role=user_role)
+    
+    syllabus = await get_material_by_role_day_type(user_role, 0, "syllabus")
+    is_syl_enabled = bool(syllabus.get('is_enabled', 1)) if syllabus else True
+
+    kb = learning_menu_keyboard(
+        day_overview,
+        syllabus_enabled=is_syl_enabled,
+        total_days=len(day_overview),
+        page=page
+    )
+    
+    try:
+        await callback.message.edit_reply_markup(reply_markup=kb)
+    except Exception:
+        pass
+    await callback.answer()
 
 async def locked_day(callback: CallbackQuery):
     try:
@@ -2629,6 +2659,7 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(day_material_detail, lambda c: c.data.startswith("daymat_"))
     dp.callback_query.register(show_syllabus, lambda c: c.data == "show_syllabus")
     dp.callback_query.register(syllabus_locked, lambda c: c.data == "syllabus_locked")
+    dp.callback_query.register(menu_days_page_callback, lambda c: c.data and c.data.startswith("learning_days_page:"))
     
     dp.callback_query.register(_handle_pagination, lambda c: c.data and c.data.startswith("paginate:"))
 
