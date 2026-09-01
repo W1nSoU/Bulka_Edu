@@ -82,8 +82,15 @@ async def is_privileged_user(user_id):
     if user_id == MAIN_DEVELOPER_ID:
         return True
     
-    # Тепер перевіряємо також роль Керівника з таблиці managers
-    return await is_developer_user(user_id) or await is_hr_user(user_id) or await is_manager_user(user_id)
+    # Тепер перевіряємо також ролі з таблиці managers
+    from database.managers import is_manager_user, is_territorial_user, is_observer_user
+    return (
+        await is_developer_user(user_id)
+        or await is_hr_user(user_id)
+        or await is_manager_user(user_id)
+        or await is_territorial_user(user_id)
+        or await is_observer_user(user_id)
+    )
 
 async def get_user_role(user_id):
     """

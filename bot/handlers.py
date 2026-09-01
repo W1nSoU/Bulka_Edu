@@ -24,7 +24,9 @@ from database.users import (
     can_start_conversation, create_conversation, close_conversation, MAX_OPEN_CONVERSATIONS,
     log_support_request
 )
-from database.managers import get_manager_by_uid
+from database.managers import (
+    get_manager_by_uid, is_territorial_user, is_observer_user, is_manager_user, add_observer
+)
 from database.tokens import get_token_data, use_token
 from database import DB_PATH
 from bot.menus.developer import register_developer_menu_handlers
@@ -74,22 +76,30 @@ class RegistrationStates(StatesGroup):
 async def start_menu(message: types.Message, state: FSMContext):
     args = message.text.split()[1:] if len(message.text.split()) > 1 else []
     user_id = message.from_user.id
-    manager_info = await get_manager_by_uid(user_id)
-    is_manager = bool(manager_info)
-    is_hr = await is_hr_user(user_id)
+    is_observer = await is_observer_user(user_id)
     is_developer = await is_developer_user(user_id)
+    is_territorial = await is_territorial_user(user_id)
+    is_manager = await is_manager_user(user_id)
+    is_hr = await is_hr_user(user_id)
 
-    if is_manager or is_hr:
-        await show_manager_main_menu(
+    if is_observer:
+        await show_observer_main_menu(
+            message,
+            allow_edit=False,
+        )
+        return
+
+    if is_developer or is_territorial:
+        await show_developer_main_menu(
             message,
             is_hr=is_hr,
             is_developer=is_developer,
             allow_edit=False,
         )
         return
-    
-    if is_developer:
-        await show_developer_main_menu(
+
+    if is_manager or is_hr:
+        await show_manager_main_menu(
             message,
             is_hr=is_hr,
             is_developer=is_developer,
@@ -257,6 +267,40 @@ async def show_developer_main_menu(
         allow_edit=allow_edit,
     )
 
+async def show_observer_main_menu(
+    message: types.Message,
+    *,
+    allow_edit: bool = True,
+    force_new_message: bool = False,
+) -> None:
+    caption = (
+        "👁 <b>Ви увійшли як Наглядач команди Булка!</b>\n\n"
+        "Вам доступний перегляд навчальних матеріалів, аналітики та команди Булка."
+    )
+    keyboard = main_menu_keyboard(is_observer=True)
+    
+    if force_new_message:
+        if message:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+        await message.answer_photo(
+            photo=FSInputFile(IMG_DIR / "stager.png"),
+            caption=caption,
+            reply_markup=keyboard,
+        )
+        return
+        
+    await _show_photo_menu(
+        message,
+        "stager.png",
+        caption,
+        keyboard,
+        allow_edit=allow_edit,
+    )
+
+
 async def all_available_tests_completed(user_id):
     overview = await get_days_overview(user_id)
     return all(
@@ -399,6 +443,8 @@ def _build_snippet(text: str, limit: int = 240) -> str:
     return textwrap.shorten(clean, width=limit, placeholder="…")
 
 def _validate_invite_payload(role: Optional[str], city: Optional[str]) -> tuple[bool, Optional[str]]:
+    if role in ["Наглядач", "Територіал"]:
+        return True, None
     if not is_valid_role(role):
         return False, (
             "⚠️ <b>Помилка реєстрації!</b>\n\n"
@@ -656,7 +702,7 @@ async def _show_material_entry(
         if callback.message:
             await callback.message.edit_text(
                 "😿 Поки що для цього дня немає матеріалів у вашій траєкторії.\n"
-                "Керівник або Dev-команда вже працюють над оновленням контенту.",
+                "Керівник або команда Адміністраторів вже працюють над оновленням контенту.",
                 reply_markup=kb,
             )
         await callback.answer()
@@ -1041,7 +1087,7 @@ async def day_content(callback: CallbackQuery):
 
     fallback_text = (
         "😿 Поки що для цього дня немає матеріалів у вашій траєкторії.\n"
-        "Керівник або Dev-команда вже працюють над оновленням контенту."
+        "Керівник або команда Адміністраторів вже працюють над оновленням контенту."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Повернутися до блоків навчання", callback_data="continue_learning")]
@@ -1186,7 +1232,7 @@ async def remind_topic_global_callback(callback: CallbackQuery, state: FSMContex
     is_hr = await is_hr_user(user_id)
     is_dev = await is_developer_user(user_id)
     if not (is_hr or is_dev):
-        await callback.answer("Ця функція доступна лише HR та Dev.", show_alert=True)
+        await callback.answer("Ця функція доступна лише HR та Адміністраторам.", show_alert=True)
         return
 
     if is_dev or is_hr:
@@ -1219,7 +1265,7 @@ async def remind_topic_global_callback(callback: CallbackQuery, state: FSMContex
     await state.set_state(SearchStates.waiting_for_query)
     prompt = (
         "🧠 <b>Глобальний пошук по матеріалах</b>\n\n"
-        "Введіть слово, фразу або питання, і я знайду відповідні матеріали для HR/Dev.\n"
+        "Введіть слово, фразу або питання, і я знайду відповідні матеріали для HR/Адміністраторів.\n"
         "Наприклад: <i>мотивація</i>, <i>стандарти продажу</i>, <i>каса</i>."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1238,7 +1284,7 @@ async def remind_role_select_callback(callback: CallbackQuery, state: FSMContext
     is_dev = await is_developer_user(user_id)
 
     if not (is_hr or is_dev):
-        await callback.answer("Ця функція доступна лише для HR та Dev.", show_alert=True)
+        await callback.answer("Ця функція доступна лише для HR та Адміністраторів.", show_alert=True)
         return
     
     parts = callback.data.split(":", 1)
@@ -1345,7 +1391,7 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
 
     if mode == "global":
         if not (await is_hr_user(user_id) or await is_developer_user(user_id)):
-            await message.answer("Цей режим доступний лише HR та Dev.")
+            await message.answer("Цей режим доступний лише HR та Адміністраторам.")
             await state.clear()
             return
         role_filter = None
@@ -2406,7 +2452,7 @@ async def show_test_error_statistics(callback: CallbackQuery):
     is_dev = await is_developer_user(user_id)
 
     if not (is_hr or is_dev):
-        await callback.answer("Ця функція доступна лише для HR та Dev.", show_alert=True)
+        await callback.answer("Ця функція доступна лише для HR та Адміністраторів.", show_alert=True)
         return
 
     errors = await get_test_error_statistics()
@@ -2475,6 +2521,16 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
     user_id = message.from_user.id
     username = message.from_user.username
 
+    if role == "Наглядач":
+        await register_user(user_id, username=username, full_name=full_name)
+        await add_observer(user_id, full_name, username, responsible_uid=manager_id)
+        if token:
+            await use_token(token, user_id)
+        await message.answer(f"Вітаємо, {full_name}! Реєстрацію Наглядача успішно завершено. 👁✅")
+        await show_observer_main_menu(message, allow_edit=False, force_new_message=True)
+        await state.clear()
+        return
+
     # Register/Update user with provided full_name
     await register_user(user_id, username=username, full_name=full_name)
     await set_intern_extra(user_id, manager_id, role, city, shop=shop)
@@ -2487,6 +2543,7 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
     initialize_user_progress(user_id)
     await show_student_main_menu(message, user_id, allow_edit=False)
     await state.clear()
+
 
 async def global_error_handler(event: ErrorEvent):
     """

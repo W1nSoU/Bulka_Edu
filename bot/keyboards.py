@@ -2,21 +2,38 @@ from typing import Optional
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from bot.services.learning_progress import DayStatus
 
-def main_menu_keyboard(is_new_user=False, is_manager=False, is_hr=False, is_developer=False, can_search=False):
+def main_menu_keyboard(is_new_user=False, is_manager=False, is_hr=False, is_developer=False, is_territorial=False, is_observer=False, can_search=False):
     """
     Створює клавіатуру головного меню.
     Якщо is_developer=True, показує меню для розробника.
     Якщо is_manager=True, показує меню для керівника.
     Якщо is_hr=True, додає кнопку Панелі керівника.
+    Якщо is_territorial=True, додає кнопку Панелі Територіала.
+    Якщо is_observer=True, додає кнопку Панелі Наглядача.
     """
+    if is_observer:
+        buttons = [
+            [InlineKeyboardButton(text="👁 Панель Наглядача", callback_data="developer_menu")],
+            [InlineKeyboardButton(text="👤 Профіль", callback_data="profile")]
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
+
     if is_developer:
         buttons = [
-            [InlineKeyboardButton(text="🛠 Dev-панель", callback_data="developer_menu")],
+            [InlineKeyboardButton(text="🛠 Панель Адміністратора", callback_data="developer_menu")],
             [InlineKeyboardButton(text="👑 Панель керівника", callback_data="manager_menu")], # Always add for developers
         ]
         buttons.append([InlineKeyboardButton(text="👤 Профіль", callback_data="profile")])
         return InlineKeyboardMarkup(inline_keyboard=buttons)
         
+    if is_territorial:
+        buttons = [
+            [InlineKeyboardButton(text="🗺 Панель Територіала", callback_data="developer_menu")],
+            [InlineKeyboardButton(text="👑 Панель керівника", callback_data="manager_menu")],
+            [InlineKeyboardButton(text="👤 Профіль", callback_data="profile")]
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
+
     if is_manager:
         buttons = [
             [InlineKeyboardButton(text="📋 Адміністрування стажерів", callback_data="manager_menu")],
@@ -33,7 +50,7 @@ def main_menu_keyboard(is_new_user=False, is_manager=False, is_hr=False, is_deve
     ]
     if can_search:
         buttons.append([InlineKeyboardButton(text="🧠 Нагадати тему", callback_data="remind_topic_self")])
-    if is_hr or is_developer:
+    if is_hr or is_developer or is_territorial:
         buttons.append([InlineKeyboardButton(text="🧠 Нагадати тему", callback_data="remind_topic_global")])
     buttons.extend([
         [InlineKeyboardButton(text="👤 Профіль", callback_data="profile")],
@@ -43,7 +60,10 @@ def main_menu_keyboard(is_new_user=False, is_manager=False, is_hr=False, is_deve
     # Додаємо кнопки адмін-панелей для тих, хто має доступ
     prefix_buttons = []
     if is_developer:
-        prefix_buttons.append([InlineKeyboardButton(text="🛠 Dev-панель", callback_data="developer_menu")])
+        prefix_buttons.append([InlineKeyboardButton(text="🛠 Панель Адміністратора", callback_data="developer_menu")])
+    elif is_territorial:
+        prefix_buttons.append([InlineKeyboardButton(text="🗺 Панель Територіала", callback_data="developer_menu")])
+        
     if is_hr:
         prefix_buttons.append([InlineKeyboardButton(text="👑 Панель керівника", callback_data="manager_menu")])
     if prefix_buttons:
@@ -60,10 +80,28 @@ def manager_menu_keyboard():
         [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")]
     ])
 
-def learning_menu_keyboard(day_statuses, syllabus_enabled=True):
+def learning_menu_keyboard(day_statuses, syllabus_enabled=True, total_days=None):
+    """
+    Клавіатура меню навчання.
+
+    Args:
+        day_statuses: список (day, DayStatus) із get_days_overview().
+        syllabus_enabled: чи показувати кнопку «Зміст».
+        total_days: загальна кількість днів навчання для цієї посади.
+                    Якщо None — визначається автоматично як останній день у списку.
+    """
+    from bot.config import DAYS_TOTAL  # локальний імпорт щоб уникнути циклу
+
     kb_rows = []
     syllabus_unlocked = False
-    
+
+    # Визначаємо останній день курсу
+    if total_days is None:
+        if day_statuses:
+            total_days = day_statuses[-1][0]  # останній день у списку
+        else:
+            total_days = DAYS_TOTAL
+
     for day, status in day_statuses:
         if status == DayStatus.COMPLETED:
             txt = f"✅ День {day}"
@@ -75,11 +113,11 @@ def learning_menu_keyboard(day_statuses, syllabus_enabled=True):
             txt = f"🔒 День {day}"
             cb = f"locked_{day}"
         kb_rows.append([InlineKeyboardButton(text=txt, callback_data=cb)])
-        
-        # Unlock if Day 5 is open or completed
-        if day == 5 and status != DayStatus.CLOSED:
+
+        # Розблоковуємо зміст коли останній день курсу відкрито або пройдено
+        if day == total_days and status != DayStatus.CLOSED:
             syllabus_unlocked = True
-    
+
     # Показуємо зміст лише якщо він увімкнений адміном
     if syllabus_enabled:
         if syllabus_unlocked:
@@ -89,6 +127,7 @@ def learning_menu_keyboard(day_statuses, syllabus_enabled=True):
         
     kb_rows.append([InlineKeyboardButton(text="В головне меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
 
 def manager_interns_list_keyboard(interns):
     kb_rows = []

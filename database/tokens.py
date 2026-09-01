@@ -69,7 +69,7 @@ async def init_tokens_db():
         await db.commit()
     # print(f"База токенів ініціалізована за шляхом: {TOKENS_DB_PATH}")
 
-async def generate_token(manager_id, role, city, shop=None, expires_in_hours=24):
+async def generate_token(manager_id, role, city=None, shop=None, expires_in_hours=24):
     """
     Створює новий токен для запрошення стажера
     

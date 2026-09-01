@@ -1,3 +1,4 @@
+from __future__ import annotations
 import aiosqlite
 from . import DB_PATH
 import json
@@ -419,4 +420,50 @@ async def transfer_users_by_shops(city: str, shop_names: list[str], target_manag
         )
         await db.commit()
         return count
+
+async def get_all_observers() -> list[dict]:
+    """Отримує список всіх активних наглядачів (process='Наглядач')."""
+    managers = await get_all_managers()
+    return [
+        m for m in managers
+        if m.get("process") == "Наглядач" and (m.get("status") == "active" or m.get("status") is None)
+    ]
+
+async def is_observer_user(user_id: int) -> bool:
+    """Перевіряє, чи користувач є активним наглядачем."""
+    async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT uid FROM managers WHERE uid = ? AND process = 'Наглядач' AND (status = 'active' OR status IS NULL)",
+            (user_id,)
+        )
+        return bool(await cursor.fetchone())
+
+async def get_observer_by_uid(uid: int) -> dict | None:
+    """Отримує дані наглядача за UID."""
+    manager = await get_manager_by_uid(uid)
+    if manager and manager.get("process") == "Наглядач" and (manager.get("status") == "active" or manager.get("status") is None):
+        return manager
+    return None
+
+async def add_observer(uid: int, full_name: str, username: str | None, responsible_uid: int | None = None) -> bool:
+    """Додає або оновлює наглядача в базі managers."""
+    await add_manager(
+        uid=uid,
+        username=username or "",
+        full_name=full_name,
+        process="Наглядач",
+        responsible_uid=responsible_uid
+    )
+    return True
+
+async def delete_observer_by_uid(uid: int) -> bool:
+    """Видаляє/деактивує наглядача (встановлює статус 'fired')."""
+    async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+        await db.execute(
+            "UPDATE managers SET status = 'fired', fired_at = CURRENT_TIMESTAMP WHERE uid = ? AND process = 'Наглядач'",
+            (uid,)
+        )
+        await db.commit()
+        return True
+
 
