@@ -9,6 +9,7 @@ from database.managers import init_managers_db
 from database.tokens import init_tokens_db
 from database.hr import init_hr_db
 from database.materials import init_materials_db # New import
+from database.material_notifications import init_material_notifications_db
 from bot.state import load_all_progress, auto_open_blocks_scheduler
 from bot.middleware import AccessMiddleware
 from bot.services.reminders import auto_reminder_loop, manager_daily_report_loop
@@ -108,6 +109,8 @@ async def start_bot():
     print_status("✅", "База керівників")
     await init_materials_db() # New initialization call
     print_status("✅", "База матеріалів")
+    await init_material_notifications_db()
+    print_status("✅", "База сповіщень матеріалів")
     await perform_monthly_reset_if_due()
     print_status("✅", "Перевірено та оновлено статистику помилок тестів (якщо потрібно)")
     await load_all_progress()

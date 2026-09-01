@@ -395,6 +395,86 @@ async def menu_days_page_callback(callback: CallbackQuery):
         pass
     await callback.answer()
 
+
+async def material_notification_page_callback(callback: CallbackQuery):
+    """Обробляє пагінацію сторінок у повідомленні про зміну матеріалів."""
+    try:
+        _, event_id_str, recipient_id_str, page_str = callback.data.split(":")
+        event_id = int(event_id_str)
+        recipient_id = int(recipient_id_str)
+        page = int(page_str)
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+
+    from database.material_notifications import get_event_by_id, get_recipient_by_id
+    from bot.services.wave_broadcaster import format_material_notification_text, build_material_notification_keyboard
+
+    event = await get_event_by_id(event_id)
+    recipient = await get_recipient_by_id(recipient_id)
+    if not event or not recipient:
+        await callback.answer("Матеріал не знайдено.")
+        return
+
+    pages = json.loads(event.get("pages_json", "[]"))
+    if not pages:
+        pages = [event.get("description", "Оновлено матеріали")]
+
+    total_pages = len(pages)
+    page = max(0, min(page, total_pages - 1))
+    
+    is_acknowledged = bool(recipient.get("acknowledged_at"))
+    new_text = format_material_notification_text(event["role"], event["day"], pages[page], page, total_pages)
+    kb = build_material_notification_keyboard(event_id, recipient_id, page, total_pages, is_acknowledged=is_acknowledged)
+
+    try:
+        await callback.message.edit_text(new_text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        pass
+    await callback.answer()
+
+
+async def material_notification_ack_callback(callback: CallbackQuery):
+    """Обробляє натискання кнопки «Зі змінами ознайомлений/а»."""
+    try:
+        _, event_id_str, recipient_id_str = callback.data.split(":")
+        event_id = int(event_id_str)
+        recipient_id = int(recipient_id_str)
+    except (ValueError, IndexError):
+        await callback.answer()
+        return
+
+    user_id = callback.from_user.id
+    from database.material_notifications import mark_recipient_acknowledged, get_event_by_id
+    from bot.services.wave_broadcaster import build_material_notification_keyboard
+
+    success, is_late = await mark_recipient_acknowledged(event_id, user_id)
+    if not success:
+        await callback.answer("Не вдалося зафіксувати ознайомлення.", show_alert=True)
+        return
+
+    event = await get_event_by_id(event_id)
+    total_pages = 1
+    if event:
+        try:
+            pages = json.loads(event.get("pages_json", "[]"))
+            total_pages = max(1, len(pages))
+        except Exception:
+            total_pages = 1
+
+    # Оновлюємо клавіатуру на останній сторінці
+    kb = build_material_notification_keyboard(event_id, recipient_id, total_pages - 1, total_pages, is_acknowledged=True)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=kb)
+    except Exception:
+        pass
+
+    if is_late:
+        await callback.answer("⏳ Ви ознайомились зі змінами (зафіксовано після 72 годин).", show_alert=True)
+    else:
+        await callback.answer("✅ Дякуємо! Ви успішно ознайомились зі змінами.", show_alert=True)
+
+
 async def locked_day(callback: CallbackQuery):
     try:
         await callback.answer(
@@ -2660,6 +2740,8 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(show_syllabus, lambda c: c.data == "show_syllabus")
     dp.callback_query.register(syllabus_locked, lambda c: c.data == "syllabus_locked")
     dp.callback_query.register(menu_days_page_callback, lambda c: c.data and c.data.startswith("learning_days_page:"))
+    dp.callback_query.register(material_notification_page_callback, lambda c: c.data and c.data.startswith("mat_ch_pag:"))
+    dp.callback_query.register(material_notification_ack_callback, lambda c: c.data and c.data.startswith("mat_ch_ack:"))
     
     dp.callback_query.register(_handle_pagination, lambda c: c.data and c.data.startswith("paginate:"))
 

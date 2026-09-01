@@ -279,6 +279,9 @@ def _admin_analyt_keyboard(is_observer: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📊 Аналітика", callback_data="dev_analytics_menu"),
             InlineKeyboardButton(text="📊 Помилки тестів", callback_data="show_test_errors")
         ],
+        [
+            InlineKeyboardButton(text="📋 Ознайомлення", callback_data="dev_an_ack_menu")
+        ],
         row2,
         [InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")]
     ]
@@ -3164,9 +3167,41 @@ async def developer_process_notify_decision(callback: CallbackQuery, state: FSMC
     decision = callback.data.split(":")[1]
     
     if decision == "now":
-        await callback.message.answer("📢 Оголошення відправлено (у розробці)")
+        from database.material_notifications import create_material_change_event, create_recipients_for_event
+        from bot.services.wave_broadcaster import start_event_wave_broadcast
+        
+        data = await state.get_data()
+        role = data.get("edit_role") or data.get("edit_video_role") or data.get("edit_photo_role") or data.get("test_role") or "ALL"
+        day = data.get("edit_day") or data.get("edit_video_day") or data.get("edit_photo_day") or data.get("test_day") or 1
+        content_type = data.get("content_type") or "text"
+        pages = data.get("insert_array") or data.get("replace_array") or data.get("pages")
+        if not pages:
+            material_id = data.get("material_id")
+            if material_id:
+                mat = await get_material_by_id(material_id)
+                if mat and mat.get("content"):
+                    try:
+                        pages = json.loads(mat["content"])
+                    except Exception:
+                        pages = [mat["content"]]
+        if not pages:
+            pages = [f"Оновлено навчальні матеріали ({content_type})"]
+
+        description = f"Оновлення матеріалів {content_type} (День {day})"
+        event_id = await create_material_change_event(role, day, content_type, description, pages)
+        recipients_count = await create_recipients_for_event(event_id, role)
+        start_event_wave_broadcast(callback.bot, event_id)
+
+        waves_total = max(1, (recipients_count + 39) // 40)
+        await callback.message.answer(
+            f"📢 <b>Хвильову розсилку запущено!</b>\n\n"
+            f"📚 Посада: <b>{role}</b> | 📅 День: <b>{day}</b>\n"
+            f"👥 Всього отримувачів: <b>{recipients_count}</b>\n"
+            f"🌊 Кількість хвиль: <b>{waves_total}</b> (по 40 осіб на годину)\n"
+            f"⏳ Першу хвилю надіслано негайно."
+        )
     elif decision == "merge":
-        await callback.message.answer("📥 Зміни збережено для наступного оголошення (у розробці)")
+        await callback.message.answer("📥 Зміни збережено для наступного оголошення.")
     elif decision == "none":
         await callback.message.answer("🔇 Зміни збережено без оголошення.")
         
@@ -4738,9 +4773,7 @@ async def notify_cancel(callback: CallbackQuery, state: FSMContext):
 
 
 async def process_notify_message(message: Message, state: FSMContext):
-    """Обробка тексту оповіщення та розсилка."""
-    from database.users import get_all_users
-    
+    """Обробка тексту оповіщення та хвильова розсилка."""
     notify_text = message.text.strip() if message.text else ""
     if not notify_text:
         await message.answer("❌ Текст оповіщення не може бути порожнім.")
@@ -4758,51 +4791,329 @@ async def process_notify_message(message: Message, state: FSMContext):
         )
         await state.clear()
         return
-    
-    # Отримуємо всіх користувачів
-    users = await get_all_users()
-    
-    # Формуємо повідомлення
-    full_message = (
-        f"📢 <b>Оновлення навчальних матеріалів</b>\n\n"
-        f"📚 Посада: <b>{role}</b>\n"
-        f"📅 День: <b>{day}</b>\n\n"
-        f"{notify_text}"
-    )
-    
-    # Розсилаємо
-    sent_count = 0
-    failed_count = 0
-    
-    # Фільтруємо користувачів за посадою, якщо вказана
-    target_users = [u for u in users if (not role or u.get("role") == role)]
-    if not target_users:
-        target_users = users
 
-    for user in target_users:
-        user_id = user.get("user_id")
-        if not user_id:
-            continue
-        try:
-            await message.bot.send_message(user_id, full_message, parse_mode="HTML")
-            sent_count += 1
-        except Exception:
-            failed_count += 1
+    from database.material_notifications import create_material_change_event, create_recipients_for_event
+    from bot.services.wave_broadcaster import start_event_wave_broadcast
+
+    event_id = await create_material_change_event(role, day, content_type, notify_text, [notify_text])
+    recipients_count = await create_recipients_for_event(event_id, role)
+    start_event_wave_broadcast(message.bot, event_id)
+    waves_total = max(1, (recipients_count + 39) // 40)
     
     await message.answer(
-        f"✅ <b>Матеріал оновлено та оповіщення надіслано!</b>\n\n"
-        f"Посада: {role}\n"
-        f"День: {day}\n"
-        f"Тип: {content_type}\n\n"
-        f"📊 <b>Статистика розсилки:</b>\n"
-        f"• Надіслано: {sent_count}\n"
-        f"• Не вдалось: {failed_count}",
+        f"✅ <b>Матеріал оновлено та хвильову розсилку запущено!</b>\n\n"
+        f"📚 Посада: <b>{role}</b>\n"
+        f"📅 День: <b>{day}</b>\n"
+        f"📝 Тип: <b>{content_type}</b>\n\n"
+        f"👥 Всього отримувачів: <b>{recipients_count}</b>\n"
+        f"🌊 Кількість хвиль: <b>{waves_total}</b> (по 40 осіб на годину)\n"
+        f"⏳ Першу хвилю надіслано негайно.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ До Dev-панелі", callback_data="developer_menu")]
         ])
     )
     
     await state.clear()
+
+
+# ==================== Material Acknowledgment Analytics ====================
+
+async def developer_ack_analytics_menu(callback: CallbackQuery):
+    """Головне меню аналітики ознайомлення — вибір категорії."""
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+
+    text = (
+        "📋 <b>Аналітика ознайомлення з матеріалами</b>\n"
+        "───────────────────\n"
+        "Оберіть категорію співробітників для перегляду звітів про ознайомлення зі змінами:"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👔 Керівники", callback_data="dev_ack_cat:керівник")],
+        [InlineKeyboardButton(text="👷 Працівники", callback_data="dev_ack_cat:працівник")],
+        [InlineKeyboardButton(text="🎓 Стажери", callback_data="dev_ack_cat:стажер")],
+        [InlineKeyboardButton(text="⬅️ Назад до аналітики", callback_data="dev_main_analyt")]
+    ])
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await callback.answer()
+
+
+async def developer_ack_category_events_view(callback: CallbackQuery):
+    """Список дат змін навчальних матеріалів для обраної категорії з пагінацією."""
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+
+    # Callback formats: dev_ack_cat:{cat} or dev_ack_cat_pg:{cat}:{page}
+    parts = callback.data.split(":")
+    category = parts[1]
+    page = int(parts[2]) if len(parts) > 2 else 0
+
+    from database.material_notifications import get_events_for_category, prune_old_material_events
+    await prune_old_material_events(days=90)
+    events = await get_events_for_category(category, days_limit=90)
+
+    cat_titles = {
+        "керівник": "👔 Керівники",
+        "працівник": "👷 Працівники",
+        "стажер": "🎓 Стажери"
+    }
+    cat_title = cat_titles.get(category.lower(), category.title())
+
+    if not events:
+        text = (
+            f"📋 <b>Аналітика ознайомлення — {cat_title}</b>\n"
+            f"───────────────────\n\n"
+            f"<i>За останні 90 днів оновлень матеріалів для цієї категорії не знайдено.</i>"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_an_ack_menu")]
+        ])
+        await _edit_or_answer(callback.message, text, reply_markup=kb)
+        await callback.answer()
+        return
+
+    PER_PAGE = 6
+    pages_total = max(1, (len(events) + PER_PAGE - 1) // PER_PAGE)
+    page = max(0, min(page, pages_total - 1))
+    
+    start_idx = page * PER_PAGE
+    paginated_events = events[start_idx:start_idx + PER_PAGE]
+
+    buttons = []
+    for ev in paginated_events:
+        created_str = ev.get('created_at', '')
+        try:
+            dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+            dt_formatted = dt.strftime("%d.%m %H:%M")
+        except Exception:
+            dt_formatted = created_str[:16]
+
+        btn_text = f"📅 {dt_formatted} — {ev['role']} (День {ev['day']})"
+        buttons.append([InlineKeyboardButton(
+            text=btn_text,
+            callback_data=f"dev_ack_ev:{ev['id']}:{category}"
+        )])
+
+    # Рядок пагінації якщо подій більше ніж 6
+    if pages_total > 1:
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_ack_cat_pg:{category}:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {page + 1}/{pages_total}", callback_data="ignore"))
+        if page < pages_total - 1:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_ack_cat_pg:{category}:{page + 1}"))
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_an_ack_menu")])
+
+    text = (
+        f"📋 <b>Аналітика ознайомлення — {cat_title}</b>\n"
+        f"───────────────────\n"
+        f"Оберіть дату та подію зміни матеріалу для перегляду звіту:"
+    )
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def developer_ack_event_card_view(callback: CallbackQuery):
+    """Картка події: перевірка 75h порогу (таймер або повний звіт)."""
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+
+    # Format: dev_ack_ev:{event_id}:{category}
+    parts = callback.data.split(":")
+    event_id = int(parts[1])
+    category = parts[2]
+
+    from database.material_notifications import get_event_by_id, get_event_analytics_for_category
+    event = await get_event_by_id(event_id)
+    if not event:
+        await callback.answer("Подію не знайдено.", show_alert=True)
+        return
+
+    stats = await get_event_analytics_for_category(event_id, category)
+
+    cat_titles = {
+        "керівник": "👔 Керівники",
+        "працівник": "👷 Працівники",
+        "стажер": "🎓 Стажери"
+    }
+    cat_title = cat_titles.get(category.lower(), category.title())
+
+    created_str = event.get('created_at', '')
+    try:
+        dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+        dt_formatted = dt.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        try:
+            dt = datetime.strptime(created_str, "%Y-%m-%d %H:%M:%S")
+            dt_formatted = dt.strftime("%d.%m.%Y %H:%M")
+        except Exception:
+            dt = datetime.utcnow()
+            dt_formatted = created_str
+
+    time_passed = datetime.utcnow() - dt
+    threshold_seconds = 75 * 3600
+
+    # Перевірка 75-годинного порогу
+    if time_passed.total_seconds() < threshold_seconds:
+        rem_sec = int(threshold_seconds - time_passed.total_seconds())
+        rem_hours = rem_sec // 3600
+        rem_mins = (rem_sec % 3600) // 60
+
+        text = (
+            f"⏳ <b>Аналітика ознайомлення (Формування звіту)</b>\n"
+            f"───────────────────\n"
+            f"📚 Посада: <b>{event['role']}</b> | 📅 День: <b>{event['day']}</b>\n"
+            f"📝 Зміна: <b>{event.get('description', '')}</b>\n"
+            f"🕒 Створено: <b>{dt_formatted}</b>\n\n"
+            f"👥 Категорія: <b>{cat_title}</b>\n"
+            f"• Всього отримувачів: <b>{stats['total']}</b>\n"
+            f"• Вже ознайомились: <b>{stats['acknowledged_count']}</b> ({stats['ack_percent']}%)\n\n"
+            f"⚠️ <i>Аналітика формується лише через 75 годин після повідомлення про зміни.</i>\n\n"
+            f"⏳ <b>До повного формування звіту залишилось:</b> {rem_hours} год {rem_mins} хв."
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Оновити статус", callback_data=f"dev_ack_ev:{event_id}:{category}")],
+            [InlineKeyboardButton(text="⬅️ Назад до дат", callback_data=f"dev_ack_cat:{category}")]
+        ])
+    else:
+        text = (
+            f"📊 <b>Аналітика ознайомлення</b>\n"
+            f"───────────────────\n"
+            f"📚 Посада: <b>{event['role']}</b> | 📅 День: <b>{event['day']}</b>\n"
+            f"📝 Зміна: <b>{event.get('description', '')}</b>\n"
+            f"🕒 Дата розсилки: <b>{dt_formatted}</b>\n\n"
+            f"👥 Категорія: <b>{cat_title}</b>\n"
+            f"• Всього в категорії: <b>{stats['total']}</b> осіб\n"
+            f"• ✅ <b>Ознайомились:</b> {stats['acknowledged_count']} ({stats['ack_percent']}%)\n"
+            f"  └ ⏳ з них із запізненням (>72 год): <b>{stats['acknowledged_late_count']}</b>\n"
+            f"• ❌ <b>Не ознайомились:</b> {stats['unacknowledged_count']} ({stats['unack_percent']}%)\n"
+            f"───────────────────\n"
+            f"Оберіть групу для перегляду списку по магазинах:"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"✅ Ознайомились ({stats['acknowledged_count']})", callback_data=f"dev_ack_shops:{event_id}:{category}:ack:0")],
+            [InlineKeyboardButton(text=f"❌ Не ознайомились ({stats['unacknowledged_count']})", callback_data=f"dev_ack_shops:{event_id}:{category}:noack:0")],
+            [InlineKeyboardButton(text="⬅️ Назад до дат", callback_data=f"dev_ack_cat:{category}")]
+        ])
+
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await callback.answer()
+
+
+async def developer_ack_shops_list_view(callback: CallbackQuery):
+    """Список магазинів для обраної групи (ознайомлені/неознайомлені) з пагінацією."""
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+
+    # Format: dev_ack_shops:{event_id}:{category}:{status_key}:{page}
+    parts = callback.data.split(":")
+    event_id = int(parts[1])
+    category = parts[2]
+    status_key = parts[3]
+    page = int(parts[4]) if len(parts) > 4 else 0
+    is_ack = (status_key == "ack")
+
+    from database.material_notifications import get_event_shop_breakdown
+    shops = await get_event_shop_breakdown(event_id, category, is_ack)
+
+    status_title = "✅ Ознайомлені" if is_ack else "❌ Не ознайомлені"
+
+    if not shops:
+        text = f"📋 <b>{status_title} по магазинах</b>\n\n<i>Користувачів у цій групі не знайдено.</i>"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_ack_ev:{event_id}:{category}")]
+        ])
+        await _edit_or_answer(callback.message, text, reply_markup=kb)
+        await callback.answer()
+        return
+
+    PER_PAGE = 6
+    pages_total = max(1, (len(shops) + PER_PAGE - 1) // PER_PAGE)
+    page = max(0, min(page, pages_total - 1))
+    
+    start_idx = page * PER_PAGE
+    paginated_shops = shops[start_idx:start_idx + PER_PAGE]
+
+    buttons = []
+    for s in paginated_shops:
+        shop_name = s['shop']
+        btn_text = f"🏪 {shop_name} ({s['user_count']} чол.)"
+        buttons.append([InlineKeyboardButton(
+            text=btn_text,
+            callback_data=f"dev_ack_shop_u:{event_id}:{category}:{status_key}:{shop_name[:30]}"
+        )])
+
+    if pages_total > 1:
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_ack_shops:{event_id}:{category}:{status_key}:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {page + 1}/{pages_total}", callback_data="ignore"))
+        if page < pages_total - 1:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_ack_shops:{event_id}:{category}:{status_key}:{page + 1}"))
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_ack_ev:{event_id}:{category}")])
+
+    text = (
+        f"📋 <b>{status_title} — Список магазинів</b>\n"
+        f"───────────────────\n"
+        f"Оберіть магазин для перегляду співробітників:"
+    )
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def developer_ack_shop_users_view(callback: CallbackQuery):
+    """Детальний список співробітників конкретного магазину."""
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+
+    # Format: dev_ack_shop_u:{event_id}:{category}:{status_key}:{shop}
+    parts = callback.data.split(":", 4)
+    event_id = int(parts[1])
+    category = parts[2]
+    status_key = parts[3]
+    shop = parts[4]
+    is_ack = (status_key == "ack")
+
+    from database.material_notifications import get_event_shop_users
+    users = await get_event_shop_users(event_id, category, is_ack, shop)
+
+    status_title = "✅ Ознайомлені" if is_ack else "❌ Не ознайомлені"
+
+    lines = [
+        f"🏪 <b>Магазин:</b> {shop}",
+        f"📋 <b>Статус:</b> {status_title}",
+        f"👥 <b>Кількість:</b> {len(users)} чол.",
+        "───────────────────"
+    ]
+
+    if not users:
+        lines.append("<i>Список порожній.</i>")
+    else:
+        for idx, u in enumerate(users, 1):
+            name = u['full_name']
+            username_str = f" (@{u['username']})" if u.get('username') else ""
+            if is_ack:
+                ack_str = u.get('acknowledged_at', '')
+                try:
+                    dt = datetime.fromisoformat(ack_str.replace("Z", "+00:00"))
+                    dt_fmt = dt.strftime("%d.%m %H:%M")
+                except Exception:
+                    dt_fmt = ack_str[:16]
+                late_badge = " ⏳ <i>(після 72 год)</i>" if u.get('is_late') else ""
+                lines.append(f"{idx}. <b>{name}</b>{username_str} — {dt_fmt}{late_badge}")
+            else:
+                lines.append(f"{idx}. <b>{name}</b>{username_str} — ❌ <i>Не ознайомився (>72 год)</i>")
+
+    text = "\n".join(lines)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад до магазинів", callback_data=f"dev_ack_shops:{event_id}:{category}:{status_key}:0")]
+    ])
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await callback.answer()
 
 
 # ==================== Tokens Management ====================
@@ -7154,6 +7465,13 @@ def register_developer_menu_handlers(dp: Dispatcher):
 
     # Days picker pagination (Materials, Videos, Photos, Tests)
     dp.callback_query.register(developer_days_page_callback, lambda c: c.data and any(c.data.startswith(p) for p in ["dev_mat_day_pg|", "dev_test_day_pg|", "dev_video_day_pg|", "dev_photo_day_pg|"]))
+
+    # Material Acknowledgment Analytics (Point 8)
+    dp.callback_query.register(developer_ack_analytics_menu, lambda c: c.data == "dev_an_ack_menu")
+    dp.callback_query.register(developer_ack_category_events_view, lambda c: c.data and (c.data.startswith("dev_ack_cat:") or c.data.startswith("dev_ack_cat_pg:")))
+    dp.callback_query.register(developer_ack_event_card_view, lambda c: c.data and c.data.startswith("dev_ack_ev:"))
+    dp.callback_query.register(developer_ack_shops_list_view, lambda c: c.data and c.data.startswith("dev_ack_shops:"))
+    dp.callback_query.register(developer_ack_shop_users_view, lambda c: c.data and c.data.startswith("dev_ack_shop_u:"))
 
     # Materials Editor
     dp.callback_query.register(developer_materials_menu, lambda c: c.data == "dev_materials_menu")
