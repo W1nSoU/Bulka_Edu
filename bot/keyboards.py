@@ -74,6 +74,7 @@ def main_menu_keyboard(is_new_user=False, is_manager=False, is_hr=False, is_deve
 def manager_menu_keyboard():
     """Клавіатура головного меню керівника"""
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📚 Навчання", callback_data="continue_learning")],
         [InlineKeyboardButton(text="👨‍💼 Керівники", callback_data="mgr_managers_list")],
         [InlineKeyboardButton(text="👨‍🎓 Стажери", callback_data="mgr_interns|all")],
         [InlineKeyboardButton(text="📊 Звіт стажерів", callback_data="mgr_report")],

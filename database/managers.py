@@ -150,21 +150,58 @@ async def get_all_developers():
     return [m for m in managers if m.get("process") == "Developer"]
 
 async def get_all_kerivnyky():
-    """Отримує список всіх активних керівників з роллю 'Керівник'."""
+    """Отримує список всіх активних керівників з роллю 'Керівник' або 'Керівник Стажер'."""
     managers = await get_all_managers()
     return [
         m for m in managers
-        if m.get("process") == "Керівник" and (m.get("status") == "active" or m.get("status") is None)
+        if m.get("process") in ("Керівник", "Керівник Стажер") and (m.get("status") == "active" or m.get("status") is None)
     ]
 
 async def is_manager_user(user_id: int) -> bool:
-    """Перевіряє, чи користувач є активним керівником (role='Керівник') у таблиці managers."""
+    """Перевіряє, чи користувач є активним керівником (роль 'Керівник' або 'Керівник Стажер') у таблиці managers."""
     async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT uid FROM managers WHERE uid = ? AND process = 'Керівник' AND (status = 'active' OR status IS NULL)",
+            "SELECT uid FROM managers WHERE uid = ? AND process IN ('Керівник', 'Керівник Стажер') AND (status = 'active' OR status IS NULL)",
             (user_id,)
         )
         return bool(await cursor.fetchone())
+
+async def is_manager_trainee(user_id: int) -> bool:
+    """Перевіряє, чи є керівник стажером ('Керівник Стажер')."""
+    async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT uid FROM managers WHERE uid = ? AND process = 'Керівник Стажер' AND (status = 'active' OR status IS NULL)",
+            (user_id,)
+        )
+        return bool(await cursor.fetchone())
+
+async def promote_manager_trainee(uid: int) -> bool:
+    """Переводить керівника-стажера в статус повноцінного 'Керівник'."""
+    async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+        await db.execute(
+            "UPDATE managers SET process = 'Керівник' WHERE uid = ? AND process = 'Керівник Стажер'",
+            (uid,)
+        )
+        await db.commit()
+        
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET status = 'Працівник' WHERE user_id = ?",
+            (uid,)
+        )
+        await db.commit()
+    return True
+
+async def get_manager_trainees_by_territorial(territorial_uid: int) -> list[dict]:
+    """Отримує список керівників-стажерів, закріплених за певним територіалом."""
+    async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM managers WHERE responsible_uid = ? AND process = 'Керівник Стажер' AND (status = 'active' OR status IS NULL) ORDER BY full_name ASC",
+            (territorial_uid,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
 async def get_all_territorials():
     """Отримує список всіх активних керівників з роллю 'Територіал'."""

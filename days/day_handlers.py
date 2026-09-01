@@ -133,10 +133,20 @@ async def _finish_test_successfully(callback: CallbackQuery, state: FSMContext, 
     
     await callback.answer("Тест успішно пройдено! 🎉", show_alert=True)
     
-    # Notify manager if this was the last training day
-    if day >= DAYS_TOTAL:
+    user_details = await get_user_details(user_id)
+    role = user_details.get("role", "ALL") if user_details else "ALL"
+    from database.positions import get_days_count_for_role
+    total_days = await get_days_count_for_role(role)
+    
+    # Notify manager/territorial if this was the last training day
+    if day >= total_days:
         try:
-            await notify_manager_training_completed(callback.bot, user_id)
+            from database.managers import is_manager_trainee
+            from bot.services.reminders import notify_territorial_manager_training_completed
+            if await is_manager_trainee(user_id):
+                await notify_territorial_manager_training_completed(callback.bot, user_id)
+            else:
+                await notify_manager_training_completed(callback.bot, user_id)
         except Exception:
             pass
 
@@ -178,3 +188,4 @@ def register_day_handlers(dp: Dispatcher):
     dp.callback_query.register(process_test_answer_handler, lambda c: c.data and c.data.startswith("test_ans:"), TestStates.answering_questions)
     # Handler for manually completing a day
     dp.callback_query.register(complete_day_handler, lambda c: c.data and c.data.startswith("complete_day_"))
+    dp.callback_query.regist

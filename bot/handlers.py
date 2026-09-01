@@ -344,7 +344,8 @@ async def menu_days(callback: CallbackQuery):
             return
     
     initialize_user_progress(user_id)
-    day_overview = await get_days_overview(user_id)
+    user_role = user_details.get('role', 'ALL') if user_details else 'ALL'
+    day_overview = await get_days_overview(user_id, role=user_role)
     
     try:
         await callback.answer()
@@ -352,14 +353,14 @@ async def menu_days(callback: CallbackQuery):
         print(f"Не вдалося відповісти на callback: {e}")
     
     # Перевіряємо чи увімкнено зміст для цієї ролі
-    syllabus = await get_material_by_role_day_type(user_details.get('role', 'ALL'), 0, "syllabus")
+    syllabus = await get_material_by_role_day_type(user_role, 0, "syllabus")
     is_syl_enabled = bool(syllabus.get('is_enabled', 1)) if syllabus else True
 
     if callback.message:
         await _show_text_menu(
             callback.message,
             "Оберіть день для навчання:",
-            learning_menu_keyboard(day_overview, syllabus_enabled=is_syl_enabled),
+            learning_menu_keyboard(day_overview, syllabus_enabled=is_syl_enabled, total_days=len(day_overview)),
             allow_edit=True,
             allow_caption_edit=False,
         )
@@ -2528,6 +2529,27 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
             await use_token(token, user_id)
         await message.answer(f"Вітаємо, {full_name}! Реєстрацію Наглядача успішно завершено. 👁✅")
         await show_observer_main_menu(message, allow_edit=False, force_new_message=True)
+        await state.clear()
+        return
+
+    if role in ("Керівник", "Керівник Стажер"):
+        await register_user(user_id, username=username, full_name=full_name)
+        await set_intern_extra(user_id, manager_id, "Керівник", city, shop=shop)
+        from database.managers import add_manager
+        await add_manager(
+            uid=user_id,
+            username=username or "",
+            full_name=full_name,
+            process="Керівник Стажер",
+            shops=shop,
+            city=city,
+            responsible_uid=manager_id
+        )
+        if token:
+            await use_token(token, user_id)
+        await message.answer(f"Вітаємо, {full_name}! Реєстрацію Керівника-стажера успішно завершено. 👔✅")
+        initialize_user_progress(user_id)
+        await show_student_main_menu(message, user_id, allow_edit=False)
         await state.clear()
         return
 

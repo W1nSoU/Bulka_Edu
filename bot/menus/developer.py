@@ -53,6 +53,8 @@ from database.managers import (
     get_all_observers,
     get_observer_by_uid,
     delete_observer_by_uid,
+    is_manager_trainee,
+    promote_manager_trainee,
     get_managers_by_responsible,
     get_territorials_by_city,
     update_manager_name,
@@ -6893,7 +6895,96 @@ async def developer_observer_delete_do(callback: CallbackQuery):
     await _edit_or_answer(callback.message, text, reply_markup=kb)
 
 
+async def developer_promote_manager_handler(callback: CallbackQuery):
+    """Обробляє рішення територіала перевести керівника-стажера в статус 'Керівник'."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (not is_admin and not is_territorial):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+        
+    try:
+        manager_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+        
+    mgr = await get_manager_by_uid(manager_uid)
+    if not mgr:
+        await callback.answer("Керівника не знайдено.", show_alert=True)
+        return
+        
+    await promote_manager_trainee(manager_uid)
+    name, _ = await _format_identity(mgr["uid"], mgr.get("full_name"), mgr.get("username"))
+    
+    updated_text = (
+        f"✅ <b>Керівника успішно переведено!</b>\n\n"
+        f"👤 <b>Керівник:</b> {html.escape(name)}\n"
+        f"🟢 <b>Новий статус:</b> Керівник\n"
+        f"🕒 <b>Дата переведення:</b> {datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d %H:%M')}"
+    )
+    
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=updated_text, reply_markup=None)
+        else:
+            await callback.message.edit_text(updated_text, reply_markup=None)
+    except Exception:
+        pass
+        
+    await callback.answer("✅ Керівника переведено в статус «Керівник»!", show_alert=True)
+    
+    # Сповіщення самому керівнику
+    try:
+        congrats_text = (
+            "🎉 <b>Вітаємо!</b>\n\n"
+            "Ваш територіальний керівник підтвердив успішне проходження навчального курсу.\n"
+            "Вам офіційно присвоєно статус <b>Керівник</b>! 👔✨\n\n"
+            "Всі навчальні матеріали залишаються доступними для перегляду в <b>Панелі керівника</b>."
+        )
+        await callback.bot.send_message(manager_uid, congrats_text, parse_mode="HTML")
+    except Exception:
+        pass
+
+
+async def developer_keep_manager_trainee_handler(callback: CallbackQuery):
+    """Обробляє рішення територіала залишити керівника стажером."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (not is_admin and not is_territorial):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+        
+    try:
+        manager_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+        
+    mgr = await get_manager_by_uid(manager_uid)
+    name = mgr.get("full_name") or f"ID {manager_uid}" if mgr else f"ID {manager_uid}"
+    
+    updated_text = (
+        f"⏳ <b>Рішення зафіксовано</b>\n\n"
+        f"👤 <b>Керівник:</b> {html.escape(name)}\n"
+        f"🟡 <b>Поточний статус:</b> Керівник Стажер (навчання продовжується)\n"
+        f"Ви зможете перевести його у статус «Керівник» пізніше в меню управління керівниками."
+    )
+    
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=updated_text, reply_markup=None)
+        else:
+            await callback.message.edit_text(updated_text, reply_markup=None)
+    except Exception:
+        pass
+        
+    await callback.answer("Статус керівника залишено без змін.", show_alert=True)
+
+
 def register_developer_menu_handlers(dp: Dispatcher):
+
+    # Manager Trainee Promotion (Пункт 6)
+    dp.callback_query.register(developer_promote_manager_handler, lambda c: c.data and c.data.startswith("dev_promote_mgr:"))
+    dp.callback_query.register(developer_keep_manager_trainee_handler, lambda c: c.data and c.data.startswith("dev_keep_mgr_trainee:"))
 
     # Observers (Пункт 6)
     dp.callback_query.register(developer_observers_menu, lambda c: c.data == "dev_observers_menu" or (c.data and c.data.startswith("dev_obs_page:")))

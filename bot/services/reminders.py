@@ -420,6 +420,7 @@ __all__ = [
     "send_day3_question",
     "notify_manager_test_failed",
     "notify_manager_training_completed",
+    "notify_territorial_manager_training_completed",
 ]
 
 async def notify_manager_training_completed(bot: Bot, intern_id: int) -> bool:
@@ -456,4 +457,44 @@ async def notify_manager_training_completed(bot: Bot, intern_id: int) -> bool:
     except Exception as exc:
         from bot.services.logger import get_logger
         get_logger().error(f"Failed to notify manager {manager_id} about intern {intern_id} completion: {exc}")
+        return False
+
+
+async def notify_territorial_manager_training_completed(bot: Bot, manager_uid: int) -> bool:
+    """
+    Надсилає Територіалу сповіщення про завершення навчання керівником-стажером.
+    Кнопки: [ ✅ Перевести у «Керівник» ] та [ ⏳ Залишити «Керівник Стажер» ].
+    """
+    from database.managers import get_manager_by_uid
+    mgr = await get_manager_by_uid(manager_uid)
+    if not mgr:
+        return False
+        
+    responsible_uid = mgr.get("responsible_uid")
+    if not responsible_uid:
+        from bot.config import MAIN_DEVELOPER_ID
+        responsible_uid = MAIN_DEVELOPER_ID
+
+    full_name = mgr.get("full_name") or mgr.get("username") or f"ID {manager_uid}"
+    city = mgr.get("city") or "Не вказано"
+    shops = mgr.get("shops") or "Не вказано"
+
+    text = (
+        f"🎓 <b>Керівник-стажер {full_name} завершив(-ла) навчання!</b>\n\n"
+        f"🏙 <b>Місто:</b> {city}\n"
+        f"🏪 <b>Магазини:</b> {shops}\n\n"
+        f"Бажаєте перевести його/її в статус повноцінного <b>Керівника</b>?"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Перевести у «Керівник»", callback_data=f"dev_promote_mgr:{manager_uid}")],
+        [InlineKeyboardButton(text="⏳ Залишити «Керівник Стажер»", callback_data=f"dev_keep_mgr_trainee:{manager_uid}")]
+    ])
+
+    try:
+        await bot.send_message(responsible_uid, text, reply_markup=kb, parse_mode="HTML")
+        return True
+    except Exception as exc:
+        from bot.services.logger import get_logger
+        get_logger().error(f"Failed to notify territorial {responsible_uid} about manager {manager_uid} completion: {exc}")
         return False
