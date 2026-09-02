@@ -188,4 +188,3 @@ def register_day_handlers(dp: Dispatcher):
     dp.callback_query.register(process_test_answer_handler, lambda c: c.data and c.data.startswith("test_ans:"), TestStates.answering_questions)
     # Handler for manually completing a day
     dp.callback_query.register(complete_day_handler, lambda c: c.data and c.data.startswith("complete_day_"))
-    dp.callback_query.regist

