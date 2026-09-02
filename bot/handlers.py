@@ -241,8 +241,8 @@ async def show_developer_main_menu(
     force_new_message: bool = False,
 ) -> None:
     caption = (
-        "🛠 Ви увійшли як адміністратор команди Булка!\n"
-        "Час творити магію. Що робимо далі?"
+        "🛠 <b>Панель Адміністратора</b>\n"
+        "Оберіть розділ для керування:"
     )
     keyboard = main_menu_keyboard(is_hr=is_hr, is_developer=is_developer)
     
@@ -253,7 +253,7 @@ async def show_developer_main_menu(
             except Exception:
                 pass
         await message.answer_photo(
-            photo=FSInputFile(IMG_DIR / "stager.png"),
+            photo=FSInputFile(IMG_DIR / "admin" / "admin_cho.jpg"),
             caption=caption,
             reply_markup=keyboard,
         )
@@ -261,7 +261,7 @@ async def show_developer_main_menu(
         
     await _show_photo_menu(
         message,
-        "stager.png",
+        "admin/admin_cho.jpg",
         caption,
         keyboard,
         allow_edit=allow_edit,
@@ -286,7 +286,7 @@ async def show_observer_main_menu(
             except Exception:
                 pass
         await message.answer_photo(
-            photo=FSInputFile(IMG_DIR / "stager.png"),
+            photo=FSInputFile(IMG_DIR / "admin" / "admin_cho.jpg"),
             caption=caption,
             reply_markup=keyboard,
         )
@@ -294,7 +294,7 @@ async def show_observer_main_menu(
         
     await _show_photo_menu(
         message,
-        "stager.png",
+        "admin/admin_cho.jpg",
         caption,
         keyboard,
         allow_edit=allow_edit,
@@ -606,23 +606,28 @@ async def _show_photo_menu(
 ) -> None:
     photo_path = IMG_DIR / photo_filename
     if not photo_path.exists():
-        await _show_text_menu(message, caption, reply_markup, allow_edit=allow_edit)
-        return
-
-    if allow_edit and getattr(message, "photo", None):
-        try:
-            await message.edit_caption(caption=caption, reply_markup=reply_markup)
+        if (IMG_DIR / "admin" / photo_filename).exists():
+            photo_path = IMG_DIR / "admin" / photo_filename
+        else:
+            await _show_text_menu(message, caption, reply_markup, allow_edit=allow_edit)
             return
-        except Exception:
-            pass
 
-    if allow_edit:
+    has_photo = bool(getattr(message, "photo", None))
+    if allow_edit and has_photo:
         try:
             media = InputMediaPhoto(media=FSInputFile(str(photo_path)), caption=caption)
             await message.edit_media(media=media, reply_markup=reply_markup)
             return
         except Exception:
             pass
+        try:
+            await message.edit_caption(caption=caption, reply_markup=reply_markup)
+            return
+        except Exception:
+            pass
+
+    # If message was text-only or edit failed, safely delete old message and send photo
+    if message:
         try:
             await message.delete()
         except Exception:
@@ -666,6 +671,8 @@ async def show_student_main_menu(
         can_search=can_search,
     )
 
+    photo_file = "b_start.jpg" if (IMG_DIR / "b_start.jpg").exists() else "start.png"
+
     if force_new_message:
         if message:
             try:
@@ -673,7 +680,7 @@ async def show_student_main_menu(
             except Exception:
                 pass
         await message.answer_photo(
-            photo=FSInputFile(IMG_DIR / "start.png"),
+            photo=FSInputFile(IMG_DIR / photo_file),
             caption=caption,
             reply_markup=keyboard,
         )
@@ -681,7 +688,7 @@ async def show_student_main_menu(
 
     await _show_photo_menu(
         message,
-        "start.png",
+        photo_file,
         caption,
         keyboard,
         allow_edit=allow_edit,
@@ -701,6 +708,8 @@ async def show_manager_main_menu(
     )
     keyboard = main_menu_keyboard(is_manager=True, is_hr=is_hr, is_developer=is_developer)
     
+    photo_file = "k_menu.jpg" if (IMG_DIR / "k_menu.jpg").exists() else "kerivn.png"
+
     if force_new_message:
         if message:
             try:
@@ -708,7 +717,7 @@ async def show_manager_main_menu(
             except Exception:
                 pass
         await message.answer_photo(
-            photo=FSInputFile(IMG_DIR / "kerivn.png"),
+            photo=FSInputFile(IMG_DIR / photo_file),
             caption=caption,
             reply_markup=keyboard,
         )
@@ -716,7 +725,7 @@ async def show_manager_main_menu(
 
     await _show_photo_menu(
         message,
-        "kerivn.png",
+        photo_file,
         caption,
         keyboard,
         allow_edit=allow_edit,

@@ -321,17 +321,85 @@ def _admin_other_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+async def _show_admin_photo_menu(
+    callback: CallbackQuery,
+    photo_filename: str,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup
+):
+    """
+    Універсальний хелпер для головних панелей адмінки:
+    - Якщо повідомлення вже має фото -> плавно змінює медіа (edit_media) або підпис (edit_caption).
+    - Якщо повідомлення текстове або edit_media падає -> видаляє старе повідомлення і надсилає нове з фото.
+    - Якщо фото файл не знайдено -> плавний текстовий фолбек.
+    """
+    photo_path = Path(photo_filename)
+    if not photo_path.exists():
+        if (Path("img/admin") / photo_filename).exists():
+            photo_path = Path("img/admin") / photo_filename
+        elif (Path("img") / photo_filename).exists():
+            photo_path = Path("img") / photo_filename
+
+    message = callback.message
+    has_photo = bool(getattr(message, "photo", None))
+
+    if has_photo and photo_path.exists():
+        try:
+            media = InputMediaPhoto(media=FSInputFile(str(photo_path)), caption=caption)
+            await message.edit_media(media=media, reply_markup=reply_markup)
+            try:
+                await callback.answer()
+            except Exception:
+                pass
+            return
+        except Exception:
+            pass
+        try:
+            await message.edit_caption(caption=caption, reply_markup=reply_markup)
+            try:
+                await callback.answer()
+            except Exception:
+                pass
+            return
+        except Exception:
+            pass
+
+    # Якщо повідомлення було текстовим (без фото) або редагування не вдалося:
+    if message:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+    if photo_path.exists():
+        try:
+            await message.answer_photo(
+                photo=FSInputFile(str(photo_path)),
+                caption=caption,
+                reply_markup=reply_markup
+            )
+            try:
+                await callback.answer()
+            except Exception:
+                pass
+            return
+        except Exception:
+            pass
+
+    # Фолбек на текст, якщо фото недоступне
+    await message.answer(caption, reply_markup=reply_markup)
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
 async def developer_menu_callback(callback: CallbackQuery):
     has_access, is_admin, is_territorial = await _check_access(callback)
     if not has_access:
         return
     is_main = callback.from_user.id == MAIN_DEVELOPER_ID
     is_observer = await is_observer_user(callback.from_user.id)
-    
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
     
     if is_admin:
         caption_text = "🛠 <b>Панель Адміністратора</b>\nОберіть розділ для керування:"
@@ -340,24 +408,12 @@ async def developer_menu_callback(callback: CallbackQuery):
     else:
         caption_text = "🛠 <b>Панель Територіала</b>\nОберіть розділ для керування:"
     
-    try:
-        photo = FSInputFile("img/admin/admin_cho.jpg")
-        await callback.message.answer_photo(
-            photo=photo,
-            caption=caption_text,
-            reply_markup=_admin_cho_keyboard(is_main, is_admin, is_territorial, is_observer=is_observer)
-        )
-    except Exception:
-        await callback.message.answer(
-            caption_text,
-            reply_markup=_admin_cho_keyboard(is_main, is_admin, is_territorial, is_observer=is_observer)
-        )
-
-    try:
-        await callback.answer()
-    except TelegramBadRequest as e:
-        if "query is too old" not in str(e):
-            raise e
+    await _show_admin_photo_menu(
+        callback,
+        "img/admin/admin_cho.jpg",
+        caption_text,
+        _admin_cho_keyboard(is_main, is_admin, is_territorial, is_observer=is_observer)
+    )
 
 
 async def dev_main_study_handler(callback: CallbackQuery):
@@ -366,23 +422,12 @@ async def dev_main_study_handler(callback: CallbackQuery):
     if not has_access or (not is_admin and not is_observer):
         await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
         return
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    try:
-        photo = FSInputFile("img/admin/admin_study.jpg")
-        await callback.message.answer_photo(
-            photo=photo,
-            caption="📚 <b>Навчальні матеріали</b>",
-            reply_markup=_admin_study_keyboard()
-        )
-    except Exception:
-        await callback.message.answer(
-            "📚 <b>Навчальні матеріали</b>",
-            reply_markup=_admin_study_keyboard()
-        )
-    await callback.answer()
+    await _show_admin_photo_menu(
+        callback,
+        "img/admin/admin_study.jpg",
+        "📚 <b>Навчальні матеріали</b>",
+        _admin_study_keyboard()
+    )
 
 
 async def dev_main_analyt_handler(callback: CallbackQuery):
@@ -390,23 +435,12 @@ async def dev_main_analyt_handler(callback: CallbackQuery):
     if not has_access:
         return
     is_observer = await is_observer_user(callback.from_user.id)
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    try:
-        photo = FSInputFile("img/admin/admin_analyt.jpg")
-        await callback.message.answer_photo(
-            photo=photo,
-            caption="📊 <b>Аналітика</b>",
-            reply_markup=_admin_analyt_keyboard(is_observer=is_observer)
-        )
-    except Exception:
-        await callback.message.answer(
-            "📊 <b>Аналітика</b>",
-            reply_markup=_admin_analyt_keyboard(is_observer=is_observer)
-        )
-    await callback.answer()
+    await _show_admin_photo_menu(
+        callback,
+        "img/admin/admin_analyt.jpg",
+        "📊 <b>Аналітика</b>",
+        _admin_analyt_keyboard(is_observer=is_observer)
+    )
 
 
 async def dev_main_team_handler(callback: CallbackQuery):
@@ -414,23 +448,12 @@ async def dev_main_team_handler(callback: CallbackQuery):
     if not has_access:
         return
     is_observer = await is_observer_user(callback.from_user.id)
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    try:
-        photo = FSInputFile("img/admin/admin_spus.jpg")
-        await callback.message.answer_photo(
-            photo=photo,
-            caption="👥 <b>Команда Bulka</b>",
-            reply_markup=_admin_team_keyboard(is_admin, is_territorial, is_observer=is_observer)
-        )
-    except Exception:
-        await callback.message.answer(
-            "👥 <b>Команда Bulka</b>",
-            reply_markup=_admin_team_keyboard(is_admin, is_territorial, is_observer=is_observer)
-        )
-    await callback.answer()
+    await _show_admin_photo_menu(
+        callback,
+        "img/admin/admin_spus.jpg",
+        "👥 <b>Команда Bulka</b>",
+        _admin_team_keyboard(is_admin, is_territorial, is_observer=is_observer)
+    )
 
 
 async def dev_main_other_handler(callback: CallbackQuery):
@@ -438,23 +461,12 @@ async def dev_main_other_handler(callback: CallbackQuery):
     if not has_access or not is_admin:
         await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
         return
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    try:
-        photo = FSInputFile("img/admin/admin_tools.jpg")
-        await callback.message.answer_photo(
-            photo=photo,
-            caption="🛠 <b>Інше</b>",
-            reply_markup=_admin_other_keyboard()
-        )
-    except Exception:
-        await callback.message.answer(
-            "🛠 <b>Інше</b>",
-            reply_markup=_admin_other_keyboard()
-        )
-    await callback.answer()
+    await _show_admin_photo_menu(
+        callback,
+        "img/admin/admin_tools.jpg",
+        "🛠 <b>Інше</b>",
+        _admin_other_keyboard()
+    )
 
 
 async def _edit_or_answer(message: Message, text: str, reply_markup=None):
