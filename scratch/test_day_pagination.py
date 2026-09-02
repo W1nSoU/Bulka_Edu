@@ -102,6 +102,13 @@ async def test_dev_days_picker_pagination():
     print("✓ Dev days picker keyboard: 2 pages, correct days per page and navigation callbacks.")
 
 
+    # Cleanup
+    from database.positions import delete_position, get_position_by_name
+    p = await get_position_by_name("Тестова Посада 8 Днів")
+    if p:
+        await delete_position(p["id"])
+
+
 async def main():
     test_learning_menu_keyboard_pagination()
     await test_dev_days_picker_pagination()

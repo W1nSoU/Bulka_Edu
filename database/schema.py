@@ -194,6 +194,14 @@ async def init_db():
                 (role_name, 5, t_type)
             )
 
+        # Синхронізація типу посади для фіксованих посад (ВВ -> 'ВВ', інші -> 'ТЗ')
+        await db.execute(
+            "UPDATE positions SET territorial_type = 'ВВ' WHERE name LIKE 'ВВ %' AND territorial_type != 'ВВ'"
+        )
+        await db.execute(
+            "UPDATE positions SET territorial_type = 'ТЗ' WHERE name NOT LIKE 'ВВ %' AND (territorial_type IS NULL OR territorial_type = '' OR territorial_type != 'ТЗ')"
+        )
+
         # ============================================================
         # Таблиця міст (cities)
         # ============================================================
