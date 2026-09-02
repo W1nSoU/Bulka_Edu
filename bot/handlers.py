@@ -2130,6 +2130,7 @@ async def developer_profile_handler(callback: CallbackQuery):
     from database.users import get_all_users
     from database.managers import get_all_managers
     from database.materials import get_all_materials
+    from bot.utils import get_user_avatar_input, _send_or_edit_card_photo
     
     all_users = await get_all_users()
     all_managers = await get_all_managers()
@@ -2138,10 +2139,11 @@ async def developer_profile_handler(callback: CallbackQuery):
     # Safely get names with fallback if user_details is None
     full_name = user_details.get('full_name', 'Без імені') if user_details else callback.from_user.full_name or "Без імені"
     username = user_details.get('username', 'немає') if user_details else callback.from_user.username or "немає"
+    username_str = f"@{username}" if username and username != "немає" else "немає"
 
     text = (
         f"🛠️ <b>Профіль адміністратора</b> 🛠️\n\n"
-        f"👤 <b>{full_name}</b> (@{username})\n\n"
+        f"👤 <b>{full_name}</b> ({username_str})\n\n"
         f"📊 <b>Статистика системи:</b>\n"
         f"— Всього користувачів: <b>{len(all_users)}</b>\n"
         f"— Всього керівників: <b>{len(all_managers)}</b>\n"
@@ -2152,57 +2154,23 @@ async def developer_profile_handler(callback: CallbackQuery):
         [InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")]
     ])
     
-    if callback.message:
-        await callback.message.answer(text, reply_markup=kb)
+    photo_input = await get_user_avatar_input(callback.bot, user_id)
+    await _send_or_edit_card_photo(callback, photo_input, text, reply_markup=kb)
 
 async def manager_profile_handler_new_message(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    manager_info = await get_manager_by_uid(user_id)
-    
-    all_interns = await get_manager_interns(user_id)
-    interns_in_progress = await get_interns_in_progress_for_manager(user_id)
-    inactive_interns = await get_inactive_interns_for_manager(user_id, days=1)
-    completed_interns = len(all_interns) - len(interns_in_progress)
-    
-    if not all_interns:
-        cute_msg = "Ваша команда ще попереду, але кожна велика історія починається з першого стажера! 🐾"
-    elif len(all_interns) < 3:
-        cute_msg = "Ваша команда зростає, як тісто для булочок — з любов'ю та турботою! 🥐"
-    elif len(interns_in_progress) == 0:
-        cute_msg = "Всі ваші стажери вже стали справжніми булочками! 🎉"
-    else:
-        cute_msg = "Ваша підтримка — як тепла булочка для кожного стажера. Разом до нових звершень! 🍞✨"
-
-    manager_display_name = manager_info.get("full_name", "Невідоме ім'я") if manager_info else "Невідоме ім'я"
-    text = (
-        f"🍞 <b>Профіль керівника</b> 🍞\n\n"
-        f"👤 <b>{manager_display_name}</b>\n"
-        f"🔹 Посада: <b>{manager_info.get('process', 'Не вказано') if manager_info else 'Не вказано'}</b>\n\n"
-        f"📈 <b>Аналітика вашої команди:</b>\n"
-        f"— Всього стажерів: <b>{len(all_interns)}</b>\n"
-        f"— В процесі навчання: <b>{len(interns_in_progress)}</b>\n"
-        f"— Завершили навчання: <b>{completed_interns}</b>\n"
-        f"— Неактивні (1+ день): <b>{len(inactive_interns)}</b>\n\n"
-        f"<i>{cute_msg}</i>"
-    )
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")]
-    ])
-    
-    if callback.message:
-        await callback.message.answer(text, reply_markup=kb)
+    await manager_profile_handler(callback)
 
 async def profile_handler_new_message(callback: CallbackQuery):
     user_id = callback.from_user.id
+    from bot.utils import get_user_avatar_input, _send_or_edit_card_photo
     
     user_details = await get_user_details(user_id)
     if not user_details:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="В головне меню", callback_data="main_menu")]
+            [InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")]
         ])
-        if callback.message:
-            await callback.message.answer("⚠️ Помилка: інформація про користувача не знайдена", reply_markup=kb)
+        photo_input = await get_user_avatar_input(callback.bot, user_id)
+        await _send_or_edit_card_photo(callback, photo_input, "⚠️ Помилка: інформація про користувача не знайдена", reply_markup=kb)
         return
         
     manager_id = user_details.get('manager_id')
@@ -2251,8 +2219,10 @@ async def profile_handler_new_message(callback: CallbackQuery):
     else:
         motivation = "✨ Ви дуже близько до початку нових звершень!"
 
+    user_name = user_details.get('full_name') or callback.from_user.full_name or "Булочка"
+
     text = (
-        f"🍞 <b>Персональний профіль Булочки</b> 🍞\n\n"
+        f"🍞 <b>Персональний профіль Булочки: {user_name}</b> 🍞\n\n"
         f"🔹 Поточний день навчання: <b>День {available_day}</b>\n"
         f"🔹 Ваша посада: <b>{user_details.get('role', 'Не вказано')}</b>\n"
         f"🔹 Місто: <b>{user_details.get('city', 'Не вказано')}</b>\n"
@@ -2264,18 +2234,18 @@ async def profile_handler_new_message(callback: CallbackQuery):
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="В головне меню", callback_data="main_menu")]
+        [InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")]
     ])
     
-    if callback.message:
-        await callback.message.answer(text, reply_markup=kb)
+    photo_input = await get_user_avatar_input(callback.bot, user_id)
+    await _send_or_edit_card_photo(callback, photo_input, text, reply_markup=kb)
 
 async def manager_intern_profile_handler(callback: CallbackQuery):
     intern_id = int(callback.data.split("_")[-1])
     intern = await get_user_details(intern_id)
     progress_data = await get_user_progress(intern_id)
     completed_days = len([p for p in progress_data if p.get("completed")])
-    percent = int(completed_days / DAYS_TOTAL * 100) if DAYS_TOTAL else 0
+    from bot.utils import get_user_avatar_input, _send_or_edit_card_photo
 
     last_activity = intern.get('last_activity') if intern else None
     last_activity_str = "Невідомо"
@@ -2314,16 +2284,14 @@ async def manager_intern_profile_handler(callback: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ Повернутися до списку", callback_data="manager_interns_list")],
         [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")],
     ])
-    if callback.message:
-        try:
-            await callback.message.edit_text(text, reply_markup=kb)
-        except Exception:
-            await callback.message.answer(text, reply_markup=kb)
+    photo_input = await get_user_avatar_input(callback.bot, intern_id)
+    await _send_or_edit_card_photo(callback, photo_input, text, reply_markup=kb)
 
 
 async def manager_profile_handler(callback: CallbackQuery):
     user_id = callback.from_user.id
     manager_info = await get_manager_by_uid(user_id)
+    from bot.utils import get_user_avatar_input, _send_or_edit_card_photo
     
     all_interns = await get_manager_interns(user_id)
     interns_in_progress = await get_interns_in_progress_for_manager(user_id)
@@ -2361,14 +2329,11 @@ async def manager_profile_handler(callback: CallbackQuery):
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="В головне меню", callback_data="main_menu")]
+        [InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")]
     ])
 
-    if callback.message:
-        try:
-            await callback.message.edit_text(text, reply_markup=kb)
-        except Exception as e:
-            await callback.message.answer(text, reply_markup=kb)
+    photo_input = await get_user_avatar_input(callback.bot, user_id)
+    await _send_or_edit_card_photo(callback, photo_input, text, reply_markup=kb)
 
 def _format_last_activity(last_activity: Optional[str], now: datetime) -> str:
     if not last_activity:

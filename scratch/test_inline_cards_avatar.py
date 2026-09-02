@@ -193,5 +193,60 @@ class TestInlineCardsAndAvatar(unittest.IsolatedAsyncioTestCase):
             await developer_territorials_menu(mock_cb)
             await developer_observers_menu(mock_cb)
 
+    async def test_user_and_manager_and_developer_profile_avatars(self):
+        """Test that developer_profile_handler, manager_profile_handler, and profile_handler_new_message render avatars."""
+        from bot.handlers import (
+            developer_profile_handler,
+            manager_profile_handler,
+            profile_handler_new_message,
+            manager_intern_profile_handler
+        )
+        mock_cb = MagicMock()
+        mock_cb.from_user.id = MAIN_DEVELOPER_ID
+        mock_cb.from_user.full_name = "Розробник"
+        mock_cb.from_user.username = "dev_tg"
+        mock_cb.message = MagicMock()
+        mock_cb.message.photo = None
+        mock_cb.message.answer_photo = AsyncMock()
+        mock_cb.message.answer = AsyncMock()
+        mock_cb.message.delete = AsyncMock()
+        mock_cb.answer = AsyncMock()
+        mock_cb.bot = MagicMock()
+        mock_cb.bot.get_user_profile_photos = AsyncMock(side_effect=Exception("No photo"))
+
+        # 1. Developer Profile
+        await developer_profile_handler(mock_cb)
+        self.assertTrue(mock_cb.message.answer_photo.called)
+        caption = mock_cb.message.answer_photo.call_args.kwargs.get("caption")
+        self.assertIn("Профіль адміністратора", caption)
+
+        # 2. Manager Profile
+        mock_cb.message.answer_photo.reset_mock()
+        await manager_profile_handler(mock_cb)
+        self.assertTrue(mock_cb.message.answer_photo.called)
+        caption = mock_cb.message.answer_photo.call_args.kwargs.get("caption")
+        self.assertIn("Профіль керівника-Булочки", caption)
+
+        # 3. Regular User Profile
+        mock_cb.message.answer_photo.reset_mock()
+        mock_cb.from_user.id = 12345
+        with patch("bot.handlers.get_user_details", return_value={'user_id': 12345, 'full_name': 'Тестовий Юзер', 'role': 'Стажер', 'manager_id': None}), \
+             patch("bot.handlers.get_progress", return_value=1), \
+             patch("bot.handlers.get_available_day", return_value=2):
+            await profile_handler_new_message(mock_cb)
+            self.assertTrue(mock_cb.message.answer_photo.called)
+            caption = mock_cb.message.answer_photo.call_args.kwargs.get("caption")
+            self.assertIn("Персональний профіль", caption)
+
+        # 4. Manager Intern Profile
+        mock_cb.message.answer_photo.reset_mock()
+        mock_cb.data = "manager_intern_profile_12345"
+        with patch("bot.handlers.get_user_details", return_value={'user_id': 12345, 'full_name': 'Тестовий Юзер', 'role': 'Стажер', 'city': 'Київ', 'shop': 'Магазин 1'}), \
+             patch("bot.handlers.get_user_progress", return_value=[]):
+            await manager_intern_profile_handler(mock_cb)
+            self.assertTrue(mock_cb.message.answer_photo.called)
+            caption = mock_cb.message.answer_photo.call_args.kwargs.get("caption")
+            self.assertIn("Булка Котиків", caption)
+
 if __name__ == "__main__":
     unittest.main()
