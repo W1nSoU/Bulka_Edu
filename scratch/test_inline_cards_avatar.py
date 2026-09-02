@@ -28,6 +28,16 @@ class TestInlineCardsAndAvatar(unittest.IsolatedAsyncioTestCase):
         await init_db()
         await init_managers_db()
 
+    async def asyncTearDown(self):
+        import aiosqlite
+        from database.managers import MANAGERS_DB_PATH
+        async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+            await db.execute("DELETE FROM managers WHERE uid IN (5550001, 7770001)")
+            await db.commit()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM users WHERE user_id IN (99901, 99902, 88801, 88802, 88803, 88804)")
+            await db.commit()
+
     async def test_get_user_avatar_fallback(self):
         """When bot has no photos or fails, returns FSInputFile('img/ava.png')."""
         mock_bot = MagicMock()
