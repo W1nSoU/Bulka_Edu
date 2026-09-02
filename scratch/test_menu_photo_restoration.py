@@ -110,8 +110,8 @@ async def run_tests():
         await show_developer_main_menu(msg3, allow_edit=True)
         msg3.delete.assert_awaited_once()
         msg3.answer_photo.assert_awaited_once()
-        assert "admin_cho.jpg" in str(msg3.answer_photo.call_args[1]["photo"].path)
-        print("  ✓ show_developer_main_menu restores admin_cho.jpg")
+        assert "admin_menu.jpg" in str(msg3.answer_photo.call_args[1]["photo"].path)
+        print("  ✓ show_developer_main_menu restores admin_menu.jpg")
 
         # Observer menu from text message
         msg4 = MagicMock(spec=Message)
@@ -121,8 +121,8 @@ async def run_tests():
         await show_observer_main_menu(msg4, allow_edit=True)
         msg4.delete.assert_awaited_once()
         msg4.answer_photo.assert_awaited_once()
-        assert "admin_cho.jpg" in str(msg4.answer_photo.call_args[1]["photo"].path)
-        print("  ✓ show_observer_main_menu restores admin_cho.jpg")
+        assert "admin_menu.jpg" in str(msg4.answer_photo.call_args[1]["photo"].path)
+        print("  ✓ show_observer_main_menu restores admin_menu.jpg")
     print("✅ All root main menus verified!\n")
 
     # 5. Testing developer category handlers photo restoration from text callback

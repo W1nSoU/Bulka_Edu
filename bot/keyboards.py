@@ -11,26 +11,10 @@ def main_menu_keyboard(is_new_user=False, is_manager=False, is_hr=False, is_deve
     Якщо is_territorial=True, додає кнопку Панелі Територіала.
     Якщо is_observer=True, додає кнопку Панелі Наглядача.
     """
-    if is_observer:
+    if is_observer or is_developer or is_territorial:
         buttons = [
-            [InlineKeyboardButton(text="👁 Панель Наглядача", callback_data="developer_menu")],
-            [InlineKeyboardButton(text="👤 Профіль", callback_data="profile")]
-        ]
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    if is_developer:
-        buttons = [
-            [InlineKeyboardButton(text="🛠 Панель Адміністратора", callback_data="developer_menu")],
-            [InlineKeyboardButton(text="👑 Панель керівника", callback_data="manager_menu")], # Always add for developers
-        ]
-        buttons.append([InlineKeyboardButton(text="👤 Профіль", callback_data="profile")])
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-        
-    if is_territorial:
-        buttons = [
-            [InlineKeyboardButton(text="🗺 Панель Територіала", callback_data="developer_menu")],
-            [InlineKeyboardButton(text="👑 Панель керівника", callback_data="manager_menu")],
-            [InlineKeyboardButton(text="👤 Профіль", callback_data="profile")]
+            [InlineKeyboardButton(text="👤 Профіль", callback_data="profile")],
+            [InlineKeyboardButton(text="🚀 Почати роботу", callback_data="developer_menu")]
         ]
         return InlineKeyboardMarkup(inline_keyboard=buttons)
 

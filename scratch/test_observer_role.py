@@ -99,7 +99,8 @@ async def run_tests():
     # Main menu keyboard
     mm_kb = main_menu_keyboard(is_observer=True)
     all_btn_texts = [btn.text for row in mm_kb.inline_keyboard for btn in row]
-    assert "👁 Панель Наглядача" in all_btn_texts, "Observer main menu missing '👁 Панель Наглядача'"
+    assert "🚀 Почати роботу" in all_btn_texts, "Observer main menu missing '🚀 Почати роботу'"
+    assert "👤 Профіль" in all_btn_texts, "Observer main menu missing '👤 Профіль'"
     assert "🛠 Панель Розробника" not in all_btn_texts, "Observer should not have dev panel button"
     print(" - Main menu keyboard: OK")
 

@@ -241,8 +241,8 @@ async def show_developer_main_menu(
     force_new_message: bool = False,
 ) -> None:
     caption = (
-        "🛠 <b>Панель Адміністратора</b>\n"
-        "Оберіть розділ для керування:"
+        "🛠 <b>Панель управління Булка</b>\n\n"
+        "Вітаємо в системі! Оберіть дію:"
     )
     keyboard = main_menu_keyboard(is_hr=is_hr, is_developer=is_developer)
     
@@ -253,7 +253,7 @@ async def show_developer_main_menu(
             except Exception:
                 pass
         await message.answer_photo(
-            photo=FSInputFile(IMG_DIR / "admin" / "admin_cho.jpg"),
+            photo=FSInputFile(IMG_DIR / "admin" / "admin_menu.jpg"),
             caption=caption,
             reply_markup=keyboard,
         )
@@ -261,7 +261,7 @@ async def show_developer_main_menu(
         
     await _show_photo_menu(
         message,
-        "admin/admin_cho.jpg",
+        "admin/admin_menu.jpg",
         caption,
         keyboard,
         allow_edit=allow_edit,
@@ -274,8 +274,8 @@ async def show_observer_main_menu(
     force_new_message: bool = False,
 ) -> None:
     caption = (
-        "👁 <b>Ви увійшли як Наглядач команди Булка!</b>\n\n"
-        "Вам доступний перегляд навчальних матеріалів, аналітики та команди Булка."
+        "👁 <b>Панель управління Булка (Наглядач)</b>\n\n"
+        "Вітаємо в системі! Оберіть дію:"
     )
     keyboard = main_menu_keyboard(is_observer=True)
     
@@ -286,7 +286,7 @@ async def show_observer_main_menu(
             except Exception:
                 pass
         await message.answer_photo(
-            photo=FSInputFile(IMG_DIR / "admin" / "admin_cho.jpg"),
+            photo=FSInputFile(IMG_DIR / "admin" / "admin_menu.jpg"),
             caption=caption,
             reply_markup=keyboard,
         )
@@ -294,7 +294,7 @@ async def show_observer_main_menu(
         
     await _show_photo_menu(
         message,
-        "admin/admin_cho.jpg",
+        "admin/admin_menu.jpg",
         caption,
         keyboard,
         allow_edit=allow_edit,
