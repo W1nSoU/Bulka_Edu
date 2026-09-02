@@ -2599,7 +2599,7 @@ async def developer_remove_member(callback: CallbackQuery, state: FSMContext):
 
 
 async def developer_team_back(callback: CallbackQuery, state: FSMContext):
-    await developer_manage_devs_menu(callback, state)
+    await developer_dev_team_menu(callback, state)
 
 
 async def hr_team_member_handler(callback: CallbackQuery, state: FSMContext):
