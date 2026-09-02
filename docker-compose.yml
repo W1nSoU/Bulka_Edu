@@ -3,22 +3,8 @@ version: "3.9"
 # ─────────────────────────────────────────────────────────────────────────────
 # Bulka Edu — docker-compose.yml
 # Services:
-#   bot         — Telegram education bot (main.py)
-#   verify-api  — License verification FastAPI server (private_server)
-#   master-bot  — Admin Telegram master-bot (private_server/master_bot.py)
-#
-# Usage:
-#   cp .env.example .env && nano .env      # fill secrets
-#   docker-compose up -d verify-api        # start server first
-#   docker-compose up -d bot master-bot    # then start bots
+#   bot — Telegram education bot (main.py)
 # ─────────────────────────────────────────────────────────────────────────────
-
-x-security-env: &security-env
-  LICENSE_VERIFY_URL:   ${LICENSE_VERIFY_URL:-http://verify-api:8443/api/verify}
-  LICENSE_TIMEOUT:      ${LICENSE_TIMEOUT:-10}
-  LICENSE_SSL_VERIFY:   ${LICENSE_SSL_VERIFY:-false}
-  HARDWARE_ID_OVERRIDE: ${HARDWARE_ID_OVERRIDE}      # MUST be set — unique per deployment
-  SECURITY_DATA_DIR:    /app/security_data
 
 x-telegram-env: &telegram-env
   BOT_API_TOKEN:      ${BOT_API_TOKEN}
@@ -29,106 +15,32 @@ x-telegram-env: &telegram-env
   DEBUG:              ${DEBUG:-false}
   LOG_TO_FILE:        ${LOG_TO_FILE:-true}
 
-x-master-env: &master-env
-  MASTER_BOT_TOKEN:    ${MASTER_BOT_TOKEN}
-  MASTER_CHAT_ID:      ${MASTER_CHAT_ID}
-  MASTER_ALLOWED_IDS:  ${MASTER_ALLOWED_IDS}
-  NOTIFY_ON_OK_FIRST:  ${NOTIFY_ON_OK_FIRST:-true}
-  NOTIFY_ON_OK_REPEAT: ${NOTIFY_ON_OK_REPEAT:-false}
-
-x-server-env: &server-env
-  API_SECRET_KEY: ${API_SECRET_KEY}
-  HOST:           0.0.0.0
-  PORT:           8443
-  SSL_CERTFILE:   ${SSL_CERTFILE:-}
-  SSL_KEYFILE:    ${SSL_KEYFILE:-}
-
 services:
-
-  # ── License Verification API ───────────────────────────────────────────────
-  verify-api:
+  # ── Education Bot ──────────────────────────────────────────────────────────
+  bot:
     build:
       context: .
       dockerfile: Dockerfile
       target: runtime
     image: bulka-edu:latest
-    container_name: bulka-verify-api
-    restart: unless-stopped
-    command: >
-      python3 -m uvicorn private_server.app:app
-      --host 0.0.0.0
-      --port 8443
-      --no-access-log
-    environment:
-      <<: [*security-env, *master-env, *server-env]
-    ports:
-      - "${VERIFY_PORT:-8443}:8443"
-    volumes:
-      - security_data:/app/security_data          # .license .salt .master_secret .chksum
-      - server_data:/app/private_server/data       # activation_log.db
-      # Mount _hashes.py so it can be updated by _seal.py without rebuild
-      - ./security_functions/_hashes.py:/app/security_functions/_hashes.py:ro
-      - ./security_functions/.chksum:/app/security_data/.chksum
-    networks:
-      - bulka-net
-    healthcheck:
-      test: ["CMD", "python3", "-c",
-             "import httpx; httpx.get('http://localhost:8443/api/health',timeout=3)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
-  # ── Education Bot ──────────────────────────────────────────────────────────
-  bot:
-    image: bulka-edu:latest
     container_name: bulka-bot
     restart: unless-stopped
-    depends_on:
-      verify-api:
-        condition: service_healthy
     command: python3 main.py
     environment:
-      <<: [*security-env, *telegram-env]
+      <<: *telegram-env
     volumes:
-      - security_data:/app/security_data
-      - ./security_functions/_hashes.py:/app/security_functions/_hashes.py:ro
-      - ./security_functions/.chksum:/app/security_data/.chksum
       - bot_logs:/app/logs
       # ── Existing databases (mounted from host, preserved across rebuilds) ──
       - ./database/users.db:/app/database/users.db
       - ./database/managers.db:/app/database/managers.db
       - ./database/tokens.db:/app/database/tokens.db
       - ./database/db.sqlite3:/app/database/db.sqlite3
-    networks:
-      - bulka-net
-
-  # ── Admin Master Bot ───────────────────────────────────────────────────────
-  master-bot:
-    image: bulka-edu:latest
-    container_name: bulka-master-bot
-    restart: unless-stopped
-    depends_on:
-      verify-api:
-        condition: service_healthy
-    command: python3 private_server/master_bot.py
-    environment:
-      <<: [*security-env, *master-env, *server-env]
-    volumes:
-      - security_data:/app/security_data
-      - server_data:/app/private_server/data
-      - ./security_functions/_hashes.py:/app/security_functions/_hashes.py:ro
+      - ./database/notifications.db:/app/database/notifications.db
     networks:
       - bulka-net
 
 # ── Named volumes (persist across container restarts) ─────────────────────────
 volumes:
-  security_data:
-    name: bulka-security-data
-    # Contains: .license  .salt  .master_secret  master_keys.db  .chksum
-  server_data:
-    name: bulka-server-data
-    # Contains: activation_log.db
   bot_logs:
     name: bulka-bot-logs
 

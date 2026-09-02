@@ -303,3 +303,19 @@ async def get_test_by_role_and_day(role: str, day: int) -> Optional[dict]:
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+
+async def update_materials_role_name(old_role: str, new_role: str) -> bool:
+    """Каскадно оновлює назву ролі у всіх матеріалах."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE materials 
+            SET role = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE role = ?
+            """,
+            (new_role, old_role)
+        )
+        await db.commit()
+        return True
+

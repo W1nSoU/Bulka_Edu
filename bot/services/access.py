@@ -32,19 +32,19 @@ async def is_privileged_user(user_id: int) -> bool:
 
 async def get_display_role(user_id: int) -> str:
     """
-    Повертає стандартизовану роль користувача для відображення: 'Dev', 'Керівник', 'Стажер'.
+    Повертає стандартизовану роль користувача для відображення: 'Адміністратор', 'Керівник', 'Стажер'.
     """
     if user_id == MAIN_DEVELOPER_ID:
-        return "Dev"
+        return "Адміністратор"
     
     if await is_developer_user(user_id):
-        return "Dev"
+        return "Адміністратор"
     
     # is_manager_user вже перевіряє role='Керівник' в таблиці managers
     if await is_manager_user(user_id):
         return "Керівник"
     
-    # Якщо не є ні Dev, ні Керівник, вважаємо стажером
+    # Якщо не є ні Адміністратор, ні Керівник, вважаємо стажером
     return "Стажер"
 
 

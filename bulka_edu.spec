@@ -14,22 +14,8 @@ from pathlib import Path
 
 ROOT = Path(".").resolve()
 
-# ── Hidden imports (dynamic __import__ calls in security modules) ─────────────
+# ── Hidden imports ────────────────────────────────────────────────────────────
 _hidden = [
-    "security_functions._integrity",
-    "security_functions._hashes",
-    "security_functions._destruct",
-    "security_functions._paths",
-    "security_functions.hardware_id",
-    "security_functions.key_store",
-    "security_functions.master_key",
-    "security_functions.bot_guard",
-    # private server (only needed if bundling server too)
-    "private_server.app",
-    "private_server.db",
-    "private_server.models",
-    "private_server.config",
-    "private_server.telegram_notify",
     # aiogram internals referenced dynamically
     "aiogram.fsm.storage.memory",
     "aiogram.client.default",
@@ -39,20 +25,10 @@ _hidden = [
     # DB
     "aiosqlite",
     "sqlite3",
-    # crypto
-    "cryptography.hazmat.primitives.ciphers.aead",
-    "cryptography.hazmat.primitives.kdf.pbkdf2",
-    "cryptography.hazmat.primitives.hashes",
 ]
 
 # ── Data files to bundle (read-only code assets) ─────────────────────────────
-# Do NOT bundle .license / .salt / .master_secret — those are runtime volumes.
 _datas = [
-    # Security modules shipped as source so _hashes.py can be updated
-    (str(ROOT / "security_functions" / "_hashes.py"),
-     "security_functions"),
-    (str(ROOT / "security_functions" / "_integrity.py"),
-     "security_functions"),
     # Bot assets
     (str(ROOT / "days"),   "days"),
     (str(ROOT / "img"),    "img"),
@@ -77,7 +53,7 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
-# ── One-dir executable (recommended — easier volume mounting) ─────────────────
+# ── One-dir executable ────────────────────────────────────────────────────────
 exe = EXE(
     pyz,
     a.scripts,
@@ -87,7 +63,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,           # UPX can trigger antivirus; disable for stability
+    upx=False,
     console=True,
     disable_windowed_traceback=False,
     target_arch=None,

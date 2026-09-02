@@ -20,13 +20,7 @@ venv.bak/
 *.env
 !.env.example
 
-# Security module secrets & keys
-security_functions/.master_secret
-security_functions/master_keys.db
-security_functions/.license
-security_functions/.salt
-security_functions/.chksum
-security_functions/guard.log
+# Private server
 private_server/.env
 private_server/activation_log.db
 
@@ -43,6 +37,7 @@ data/
 # ==========================================
 .agents/
 .agent/
+.github/
 
 # ==========================================
 # Logs & Diagnostics

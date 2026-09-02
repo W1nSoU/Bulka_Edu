@@ -21,14 +21,7 @@ from bot.services.test_error_monitoring_service import perform_monthly_reset_if_
 from bot.services.reminders import send_daily_test_failure_report_to_manager # New import
 from apscheduler.schedulers.asyncio import AsyncIOScheduler # New import
 
-# ── License guard (Block 1.4): must run before anything else ──────────────────
-from security_functions.bot_guard import check_or_die
-check_or_die()
 
-# post-guard probe: _p3 verifies master_key.py via lambda (looks like a config step)
-(lambda _f: _f())(
-    getattr(__import__("security_functions._integrity", fromlist=["_p3"]), "_p3")
-)
 
 # Валідація конфігурації перед стартом
 validate_config()
@@ -146,9 +139,7 @@ async def start_bot():
     scheduler.add_job(health_monitor_loop, "interval", minutes=5, args=(bot,), id="health_monitor")
     print_status("  ✓", "Моніторинг здоров'я (кожні 5 хвилин)")
 
-    # License re-verification: if key is revoked → bot stops within 10 min
-    from security_functions.bot_guard import start_periodic_recheck
-    start_periodic_recheck(scheduler, interval_minutes=10)
+
     
     scheduler.add_job(auto_monthly_report_sender, "cron", day="last", hour=23, minute=0, args=(bot,), id="monthly_report_sender")
     print_status("  ✓", "Автоматичний місячний звіт (останній день місяця, 23:00)")

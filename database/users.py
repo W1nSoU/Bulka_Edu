@@ -608,6 +608,23 @@ async def get_users_by_city(city: str) -> list[dict]:
         users = await cursor.fetchall()
         return [dict(user) for user in users]
 
+async def get_users_by_managers(manager_ids: list[int], active_only: bool = False) -> list[dict]:
+    """Retrieves a list of users that belong to any of the specified manager IDs."""
+    if not manager_ids:
+        return []
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        placeholders = ', '.join(['?'] * len(manager_ids))
+        query = f"SELECT * FROM users WHERE manager_id IN ({placeholders})"
+        if active_only:
+            query += " AND status = 'Активний'"
+        query += " ORDER BY last_activity DESC"
+        
+        cursor = await db.execute(query, tuple(manager_ids))
+        users = await cursor.fetchall()
+        return [dict(user) for user in users]
+
 async def get_users_by_full_name(full_name: str) -> list[dict]:
     """Retrieves a list of users matching a full name (case-insensitive).
     

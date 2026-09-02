@@ -2,6 +2,30 @@ import aiosqlite
 from . import DB_PATH
 import os
 
+# Список посад за замовчуванням — використовується лише для початкового заповнення
+# Джерело правди — таблиця `positions` у базі даних
+_DEFAULT_ROLES = [
+    "Старший продавець",
+    "Керівник",
+    "Продавець-консультант (каса)",
+    "Продавець відділу гастрономії",
+    "Продавець відділу кулінарії",
+    "Продавець (сер. зміна)",
+    "Продавець-приймальник",
+    "ВВ Завідувач виробництва",
+    "ВВ Старший зміни",
+    "ВВ Пекар",
+    "ВВ Піцейолог",
+    "ВВ Кухар",
+    "ВВ Кондитер",
+    "ВВ Бариста",
+    "ВВ Керівник мережі кавʼярень",
+]
+
+def _infer_territorial_type(role_name: str) -> str:
+    """Автоматично визначає тип посади: 'ВВ' якщо назва починається з 'ВВ ', інакше 'ТЗ'."""
+    return "ВВ" if role_name.startswith("ВВ ") else "ТЗ"
+
 async def init_db():
     """Ініціалізація бази даних"""
     # Переконуємось, що директорія існує
@@ -135,6 +159,64 @@ async def init_db():
         te_columns = [row[1] for row in await cursor.fetchall()]
         if "shop" not in te_columns:
             await db.execute("ALTER TABLE training_events ADD COLUMN shop TEXT")
-        
+
+        # ============================================================
+        # Таблиця посад (positions) — нова архітектура (Крок 1)
+        # ============================================================
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            days_count INTEGER NOT NULL DEFAULT 5,
+            territorial_type TEXT NOT NULL DEFAULT 'ТЗ',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
+        # Міграція: додаємо колонку territorial_type якщо її немає (ідемпотентно)
+        cursor = await db.execute("PRAGMA table_info(positions)")
+        pos_columns = [row[1] for row in await cursor.fetchall()]
+        if "territorial_type" not in pos_columns:
+            await db.execute("ALTER TABLE positions ADD COLUMN territorial_type TEXT NOT NULL DEFAULT 'ТЗ'")
+            # Автоматично призначаємо тип на основі назви для вже існуючих посад
+            await db.execute(
+                "UPDATE positions SET territorial_type = 'ВВ' WHERE name LIKE 'ВВ %'"
+            )
+            await db.execute(
+                "UPDATE positions SET territorial_type = 'ТЗ' WHERE name NOT LIKE 'ВВ %'"
+            )
+
+        # Заповнення посад при першому запуску — INSERT OR IGNORE (ідемпотентно)
+        for role_name in _DEFAULT_ROLES:
+            t_type = _infer_territorial_type(role_name)
+            await db.execute(
+                "INSERT OR IGNORE INTO positions (name, days_count, territorial_type) VALUES (?, ?, ?)",
+                (role_name, 5, t_type)
+            )
+
+        # ============================================================
+        # Таблиця міст (cities)
+        # ============================================================
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS cities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
+        # Ініціалізація міст, які вже є в базі, або дефолтне (Хмельницький)
+        cursor = await db.execute("SELECT DISTINCT city FROM users WHERE city IS NOT NULL AND city != ''")
+        existing_cities = [row[0] for row in await cursor.fetchall()]
+        if not existing_cities:
+            existing_cities = ["Хмельницький"]
+            
+        for city_name in existing_cities:
+            await db.execute(
+                "INSERT OR IGNORE INTO cities (name) VALUES (?)",
+                (city_name,)
+            )
+
         await db.commit()
     # print(f"База даних ініціалізована за шляхом: {DB_PATH}")
+

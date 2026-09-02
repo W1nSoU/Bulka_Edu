@@ -1,9 +1,20 @@
 """
 Global dictionaries and helpers for Bulka roles/cities/content types.
+
+⚠️  ВАЖЛИВО (Крок 1 реформи):
+    Починаючи з цього оновлення, джерело правди для посад — таблиця `positions`
+    у базі даних users.db. Список AVAILABLE_ROLES нижче є FALLBACK-резервом
+    для зворотної сумісності (стара логіка, cold-start без БД).
+
+    Для читання посад використовуй: database.positions.get_all_positions()
+    Для перевірки посади: database.positions.get_position_by_name(name)
 """
 
 from typing import Optional
 
+# FALLBACK: список посад для зворотної сумісності.
+# Основне джерело правди — таблиця `positions` у БД.
+# Не видаляй цей список — він потрібен для is_valid_role() у синхронному коді.
 AVAILABLE_ROLES = [
     "Старший продавець",
     "Керівник",
@@ -63,7 +74,10 @@ CONTENT_TYPES = ["comic", "info", "text"]
 
 
 def is_valid_role(role: Optional[str]) -> bool:
-    """Return True if the role exists in the directory."""
+    """
+    Синхронна перевірка посади — використовує AVAILABLE_ROLES як fallback.
+    Для асинхронної перевірки через БД використовуй get_position_by_name().
+    """
     return bool(role) and role in AVAILABLE_ROLES
 
 
