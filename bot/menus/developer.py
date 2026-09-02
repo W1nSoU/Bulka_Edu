@@ -848,6 +848,9 @@ def _users_menu_keyboard(is_admin: bool, is_territorial: bool, is_observer: bool
             InlineKeyboardButton(text="😴 Неактивні", callback_data="dev_users_inactive"),
         ],
     ]
+    if is_admin or is_territorial:
+        buttons.append([InlineKeyboardButton(text="➕ Додати", callback_data="dev_users_add")])
+
     if is_admin or is_observer:
         buttons.append([InlineKeyboardButton(text="🏙️ За містом", callback_data="dev_users_by_city")])
         if is_admin:
@@ -1508,6 +1511,176 @@ async def developer_process_delete_user(message: Message, state: FSMContext):
     await delete_user(user_id)
     await message.answer(f"✅ Користувача <b>{user.get('full_name', 'Без імені')}</b> (ID: {user_id}) видалено.", reply_markup=await _get_users_menu_kb(message.from_user.id))
     await state.clear()
+
+
+async def developer_users_add_start(callback: CallbackQuery, state: FSMContext):
+    """Початок процесу створення посилання-запрошення для нового користувача/стажера."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or (not is_admin and not is_territorial):
+        await callback.answer("Вам недоступна ця функція.", show_alert=True)
+        return
+
+    await state.clear()
+    
+    cities_data = await get_all_cities()
+    cities = [c["name"] for c in cities_data] if cities_data else AVAILABLE_CITIES
+
+    buttons = []
+    for city in cities:
+        buttons.append([InlineKeyboardButton(text=city, callback_data=f"dev_users_add_city:{city}")])
+    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_users_menu")])
+
+    await _edit_or_answer(
+        callback.message,
+        "🏙️ <b>Звідки стажер / користувач?</b>\n\nОберіть місто:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await callback.answer()
+
+
+def _get_shops_for_city(city: Optional[str]) -> list:
+    if not city:
+        return []
+    if city in AVAILABLE_SHOPS:
+        return AVAILABLE_SHOPS[city]
+    norm = city.replace("'", "ʼ")
+    if norm in AVAILABLE_SHOPS:
+        return AVAILABLE_SHOPS[norm]
+    norm2 = city.replace("ʼ", "'")
+    if norm2 in AVAILABLE_SHOPS:
+        return AVAILABLE_SHOPS[norm2]
+    return []
+
+
+async def developer_users_add_city(callback: CallbackQuery, state: FSMContext):
+    """Обробляє вибір міста та відображає магазини або переходить до посади."""
+    try:
+        city = callback.data.split(":", 1)[1]
+    except IndexError:
+        return await callback.answer("Помилка даних міста.", show_alert=True)
+
+    await state.update_data(dev_add_city=city)
+    shops = _get_shops_for_city(city)
+
+    if shops:
+        buttons = []
+        for i in range(0, len(shops), 2):
+            row = []
+            shop1 = shops[i]
+            label1 = shop1[:30] + "..." if len(shop1) > 30 else shop1
+            row.append(InlineKeyboardButton(text=label1, callback_data=f"dev_users_add_shop:{i}"))
+            if i + 1 < len(shops):
+                shop2 = shops[i + 1]
+                label2 = shop2[:30] + "..." if len(shop2) > 30 else shop2
+                row.append(InlineKeyboardButton(text=label2, callback_data=f"dev_users_add_shop:{i + 1}"))
+            buttons.append(row)
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_add")])
+
+        await _edit_or_answer(
+            callback.message,
+            f"🏙️ Місто: <b>{city}</b>\n\n🏪 <b>Оберіть магазин:</b>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+        await callback.answer()
+    else:
+        await state.update_data(dev_add_shop=None)
+        await _show_dev_users_add_roles(callback, state, city, shop=None)
+
+
+async def developer_users_add_shop(callback: CallbackQuery, state: FSMContext):
+    """Обробляє вибір магазину та переходить до вибору посади."""
+    data = await state.get_data()
+    city = data.get("dev_add_city")
+    if not city:
+        await callback.answer("Помилка: місто не обрано.", show_alert=True)
+        return await developer_users_add_start(callback, state)
+
+    try:
+        shop_idx = int(callback.data.split(":", 1)[1])
+        shops = _get_shops_for_city(city)
+        shop = shops[shop_idx]
+    except (IndexError, ValueError):
+        shop = None
+
+    await state.update_data(dev_add_shop=shop)
+    await _show_dev_users_add_roles(callback, state, city, shop=shop)
+
+
+async def _show_dev_users_add_roles(callback: CallbackQuery, state: FSMContext, city: str, shop: Optional[str]):
+    """Відображає клавіатуру вибору посади для стажера."""
+    positions = await get_all_positions()
+    pos_names = [p["name"] for p in positions] if positions else AVAILABLE_ROLES
+
+    # Якщо викликає територіал, фільтруємо посади за його напрямком (ТЗ або ВВ)
+    from database.managers import get_manager_by_uid
+    mgr = await get_manager_by_uid(callback.from_user.id)
+    if mgr and mgr.get("process") == "Територіал":
+        t_type = (mgr.get("territorial_type") or "ТЗ").strip()
+        if positions:
+            filtered = [p["name"] for p in positions if p.get("territorial_type", "ТЗ") == t_type]
+            if filtered:
+                pos_names = filtered
+
+    await state.update_data(dev_add_roles=pos_names)
+
+    buttons = []
+    for i, role in enumerate(pos_names):
+        label = role[:30] + "..." if len(role) > 30 else role
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"dev_users_add_role:{i}")])
+
+    back_cb = f"dev_users_add_city:{city}" if shop else "dev_users_add"
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)])
+
+    shop_text = f"\n🏪 Магазин: <b>{shop}</b>" if shop else ""
+    await _edit_or_answer(
+        callback.message,
+        f"🏙️ Місто: <b>{city}</b>{shop_text}\n\n💼 <b>Яка посада у стажера / користувача?</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await callback.answer()
+
+
+async def developer_users_add_role(callback: CallbackQuery, state: FSMContext):
+    """Генерує 24-годинне унікальне посилання-запрошення для стажера."""
+    data = await state.get_data()
+    city = data.get("dev_add_city")
+    shop = data.get("dev_add_shop")
+    roles = data.get("dev_add_roles", AVAILABLE_ROLES)
+
+    try:
+        role_idx = int(callback.data.split(":", 1)[1])
+        role = roles[role_idx]
+    except (IndexError, ValueError):
+        await callback.answer("Помилка даних посади.", show_alert=True)
+        return
+
+    creator_id = callback.from_user.id
+    token = await generate_token(creator_id, role, city=city, shop=shop, expires_in_hours=24)
+
+    try:
+        bot_user = await callback.bot.get_me()
+        bot_username = bot_user.username
+    except Exception:
+        bot_username = "BulkaBot"
+
+    link = f"https://t.me/{bot_username}?start={creator_id}-{token}"
+    shop_text = f"\n🏪 Магазин: <b>{shop}</b>" if shop else ""
+
+    text = (
+        f"✅ <b>Посилання створено!</b>\n\n"
+        f"🏙️ Місто: <b>{city}</b>{shop_text}\n"
+        f"💼 Посада: <b>{role}</b>\n\n"
+        f"🔗 <b>Посилання для стажера:</b>\n"
+        f"<code>{link}</code>\n\n"
+        f"⚠️ Посилання діє 24 години і лише для одного користувача."
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ До меню користувачів", callback_data="dev_users_menu")]
+    ])
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await state.clear()
+    await callback.answer()
 
 
 # ---------- Mentors section ----------
@@ -7606,6 +7779,12 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_request_delete_user, lambda c: c.data == "dev_users_delete")
     dp.message.register(developer_process_user_search, DeveloperStates.waiting_user_search)
     dp.message.register(developer_process_delete_user, DeveloperStates.waiting_delete_user)
+
+    # Add user / intern token invite
+    dp.callback_query.register(developer_users_add_start, lambda c: c.data == "dev_users_add")
+    dp.callback_query.register(developer_users_add_city, lambda c: c.data and c.data.startswith("dev_users_add_city:"))
+    dp.callback_query.register(developer_users_add_shop, lambda c: c.data and c.data.startswith("dev_users_add_shop:"))
+    dp.callback_query.register(developer_users_add_role, lambda c: c.data and c.data.startswith("dev_users_add_role:"))
 
     # Managers Team Management
     dp.callback_query.register(developer_manage_managers_menu, lambda c: c.data == "dev_manage_managers")
