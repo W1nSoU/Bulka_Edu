@@ -50,7 +50,7 @@ async def run_tests():
         await register_user(uid, username=f"cashier_{i}", full_name=f"Касир Тестовий {i}")
         shop = test_shop_1 if i <= 40 else test_shop_2
         status = "Працівник" if i % 2 == 0 else None
-        await set_intern_extra(uid, 777000, test_role, "Київ", shop=shop)
+        await set_intern_extra(uid, 777000, test_role, "Хмельницький", shop=shop)
         if status == "Працівник":
             async with aiosqlite.connect(NOTIFICATIONS_DB_PATH.replace("material_notifications.db", "users.db")) as db:
                 await db.execute("UPDATE users SET status = 'Працівник' WHERE user_id = ?", (uid,))
@@ -67,7 +67,7 @@ async def run_tests():
             full_name=f"Керівник Тестовий {i}",
             username=f"mgr_{i}",
             shops=[test_shop_1],
-            city="Київ",
+            city="Хмельницький",
             responsible_uid=777000
         )
 

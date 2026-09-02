@@ -31,8 +31,8 @@ async def run_tests():
     test_trainee_mgr_uid = 777222111
     test_trainee_name = "Тарас Керівниченко"
     test_trainee_username = "taras_mgr"
-    test_city = "Київ"
-    test_shops = "вул. Хрещатик, 1"
+    test_city = "Хмельницький"
+    test_shops = "B-19 вул. Героїв Маріуполя, 62"
 
     # Clean up before testing
     await delete_manager_by_uid(test_trainee_mgr_uid)
