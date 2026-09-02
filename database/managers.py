@@ -47,6 +47,27 @@ async def init_managers_db():
         if 'fired_at' not in columns:
             await db.execute("ALTER TABLE managers ADD COLUMN fired_at TIMESTAMP DEFAULT NULL")
 
+        # Автоматично додаємо/синхронізуємо MAIN_DEVELOPER_ID як Developer
+        try:
+            from bot.config import MAIN_DEVELOPER_ID
+            if MAIN_DEVELOPER_ID > 0:
+                cursor = await db.execute("SELECT uid, status FROM managers WHERE uid = ?", (MAIN_DEVELOPER_ID,))
+                row = await cursor.fetchone()
+                if not row:
+                    async with aiosqlite.connect(DB_PATH) as u_db:
+                        u_cur = await u_db.execute("SELECT full_name, username FROM users WHERE user_id = ?", (MAIN_DEVELOPER_ID,))
+                        u_data = await u_cur.fetchone()
+                    full_name = u_data[0] if u_data and u_data[0] else "Головний Адміністратор"
+                    username = u_data[1] if u_data and u_data[1] else None
+                    await db.execute(
+                        "INSERT INTO managers (uid, process, full_name, username, status) VALUES (?, 'Developer', ?, ?, 'active')",
+                        (MAIN_DEVELOPER_ID, full_name, username)
+                    )
+                elif row[1] == 'fired':
+                    await db.execute("UPDATE managers SET status = 'active', process = 'Developer' WHERE uid = ?", (MAIN_DEVELOPER_ID,))
+        except Exception:
+            pass
+
         await db.commit()
 
 async def add_manager(uid, process, full_name=None, username=None, shops: list = None, city: str = None, responsible_uid: int = None, territorial_type: str = None):
@@ -142,12 +163,67 @@ async def delete_manager_by_uid(uid):
 
         await db.execute("DELETE FROM managers WHERE uid = ?", (uid,))
         await db.commit()
-        return None
+
+    # Також видаляємо з hr_users якщо користувач був там
+    try:
+        async with aiosqlite.connect(DB_PATH) as u_db:
+            await u_db.execute("DELETE FROM hr_users WHERE user_id = ?", (uid,))
+            await u_db.commit()
+    except Exception:
+        pass
+
+    return None
 
 async def get_all_developers():
-    """Отримує список всіх керівників з роллю 'Developer'."""
+    """Отримує список всіх адміністраторів (Developer), включаючи MAIN_DEVELOPER_ID та hr_users."""
+    from bot.config import MAIN_DEVELOPER_ID
+
+    devs_by_uid = {}
+
+    # 1. Головний розробник з конфігурації
+    if MAIN_DEVELOPER_ID > 0:
+        devs_by_uid[MAIN_DEVELOPER_ID] = {
+            "uid": MAIN_DEVELOPER_ID,
+            "process": "Developer",
+            "full_name": "Головний Адміністратор",
+            "username": None,
+            "status": "active"
+        }
+
+    # 2. Адміністратори з managers.db
     managers = await get_all_managers()
-    return [m for m in managers if m.get("process") == "Developer"]
+    for m in managers:
+        if m.get("process") == "Developer" and (m.get("status") == "active" or m.get("status") is None):
+            devs_by_uid[m["uid"]] = m
+
+    # 3. Адміністратори з hr_users (users.db)
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT user_id as uid, username, full_name, 'Developer' as process, 'active' as status FROM hr_users WHERE role = 'Developer'")
+            for row in await cursor.fetchall():
+                d = dict(row)
+                if d["uid"] not in devs_by_uid:
+                    devs_by_uid[d["uid"]] = d
+    except Exception:
+        pass
+
+    # 4. Збагачуємо актуальними іменами з users.db
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            for uid, dev in list(devs_by_uid.items()):
+                cursor = await db.execute("SELECT full_name, username FROM users WHERE user_id = ?", (uid,))
+                u_row = await cursor.fetchone()
+                if u_row:
+                    if u_row["full_name"]:
+                        dev["full_name"] = u_row["full_name"]
+                    if u_row["username"]:
+                        dev["username"] = u_row["username"]
+    except Exception:
+        pass
+
+    return list(devs_by_uid.values())
 
 async def get_all_kerivnyky():
     """Отримує список всіх активних керівників з роллю 'Керівник' або 'Керівник Стажер'."""

@@ -67,12 +67,9 @@ async def get_all_hrs():
         return [dict(hr) for hr in hrs]
 
 async def get_all_developers():
-    """Отримати список всіх розробників"""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT * FROM hr_users WHERE role = 'Developer' ORDER BY added_at DESC")
-        developers = await cursor.fetchall()
-        return [dict(dev) for dev in developers]
+    """Отримати список всіх адміністраторів/розробників"""
+    from database.managers import get_all_developers as get_all_devs
+    return await get_all_devs()
 
 async def is_privileged_user(user_id):
     """
