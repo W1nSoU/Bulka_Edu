@@ -205,12 +205,16 @@ async def init_db():
         )
         ''')
 
-        # Ініціалізація міст, які вже є в базі, або дефолтне (Хмельницький)
+        # Ініціалізація стандартних міст (Хмельницький та Камʼянець-Подільський)
+        default_cities = ["Хмельницький", "Камʼянець-Подільський"]
+        for city_name in default_cities:
+            await db.execute(
+                "INSERT OR IGNORE INTO cities (name) VALUES (?)",
+                (city_name,)
+            )
+
         cursor = await db.execute("SELECT DISTINCT city FROM users WHERE city IS NOT NULL AND city != ''")
         existing_cities = [row[0] for row in await cursor.fetchall()]
-        if not existing_cities:
-            existing_cities = ["Хмельницький"]
-            
         for city_name in existing_cities:
             await db.execute(
                 "INSERT OR IGNORE INTO cities (name) VALUES (?)",
