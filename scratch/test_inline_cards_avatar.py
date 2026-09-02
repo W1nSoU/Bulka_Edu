@@ -165,5 +165,33 @@ class TestInlineCardsAndAvatar(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Працівників (ТЗ): 1", sent_caption)
         self.assertIn("Торговий зал (ТЗ)", sent_caption)
 
+    async def test_developer_menus_render_without_error(self):
+        """Test developer_dev_team_menu, developer_territorials_menu, developer_observers_menu."""
+        from bot.menus.developer import (
+            developer_dev_team_menu,
+            developer_manage_managers_menu,
+            developer_territorials_menu,
+            developer_observers_menu
+        )
+        mock_cb = MagicMock()
+        mock_cb.from_user.id = MAIN_DEVELOPER_ID
+        mock_cb.message = MagicMock()
+        mock_cb.message.photo = None
+        mock_cb.message.answer_photo = AsyncMock()
+        mock_cb.message.answer = AsyncMock()
+        mock_cb.message.delete = AsyncMock()
+        mock_cb.answer = AsyncMock()
+        mock_cb.bot = MagicMock()
+        mock_cb.bot.get_chat = AsyncMock(side_effect=Exception("No chat"))
+        mock_state = MagicMock()
+        mock_state.update_data = AsyncMock()
+
+        with patch("bot.menus.developer._ensure_developer", return_value=True), \
+             patch("bot.menus.developer._check_access", return_value=(True, True, False)):
+            await developer_dev_team_menu(mock_cb, mock_state)
+            await developer_manage_managers_menu(mock_cb, mock_state)
+            await developer_territorials_menu(mock_cb)
+            await developer_observers_menu(mock_cb)
+
 if __name__ == "__main__":
     unittest.main()

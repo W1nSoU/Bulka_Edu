@@ -394,6 +394,10 @@ async def _show_admin_photo_menu(
         pass
 
 
+# Alias for backward compatibility
+_send_or_edit_admin_photo = _show_admin_photo_menu
+
+
 async def developer_menu_callback(callback: CallbackQuery):
     has_access, is_admin, is_territorial = await _check_access(callback)
     if not has_access:
