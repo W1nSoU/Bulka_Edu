@@ -743,7 +743,7 @@ async def _build_managers_team_view(is_admin: bool, is_territorial: bool, user_i
         
         abbr = city_abbr.get(city, "??")
         
-        btn_text = f"👔 {name} | {shops_str} | {abbr}"
+        btn_text = f"👔 {name} | {username} | {abbr}"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_mgr_view:{hr['uid']}")])
     
     # Кнопки навігації
@@ -6983,55 +6983,58 @@ from database.managers import get_all_territorials, update_manager_responsible, 
 
 TERRITORIAL_TYPES = {"ТЗ": "🏪 Торговий зал", "ВВ": "🍞 Власне виробництво"}
 
-def _territorials_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Список територіалів", callback_data="dev_territorials_list")],
-        [InlineKeyboardButton(text="➕ Додати територіала", callback_data="dev_territorial_add")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")]
-    ])
+async def _build_territorials_team_view(bot: Optional[Bot] = None) -> tuple[str, InlineKeyboardMarkup]:
+    """Builds the view for the Territorials management panel with inline cards and Telegram sync."""
+    territorials = await get_all_territorials()
+    
+    city_abbr = {
+        "Хмельницький": "ХМ",
+        "Камʼянець-Подільський": "КП"
+    }
+    
+    lines = [
+        f"🗺 <b>Команда Територіалів (всього: {len(territorials)})</b>",
+        "Натисніть на територіала для перегляду картки:",
+        ""
+    ]
+    buttons = []
+    if not territorials:
+        lines.append("  У системі поки немає територіалів.")
+    else:
+        for t in territorials:
+            name, username = await _format_identity(
+                t["uid"], t.get("full_name"), t.get("username"), bot=bot
+            )
+            city = t.get("city", "")
+            abbr = city_abbr.get(city, city or "??")
+            t_type = t.get("territorial_type") or "ТЗ"
+            
+            btn_text = f"🗺 {name} | {username} | {abbr} · {t_type}"
+            buttons.append([InlineKeyboardButton(
+                text=btn_text,
+                callback_data=f"dev_territorial_view:{t['uid']}"
+            )])
+            
+    buttons.append([InlineKeyboardButton(text="➕ Додати територіала", callback_data="dev_territorial_add")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")])
+    
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 async def developer_territorials_menu(callback: CallbackQuery):
     if not await _ensure_developer(callback):
         return
-    await _send_or_edit_admin_photo(
+    text, kb = await _build_territorials_team_view(bot=callback.bot)
+    await _show_admin_photo_menu(
         callback,
         "admin_spus.jpg",
-        "🗺 <b>Територіали</b>\nОберіть дію:",
-        _territorials_menu_keyboard(),
+        text,
+        kb,
     )
 
 
 async def developer_list_territorials(callback: CallbackQuery):
-    if not await _ensure_developer(callback):
-        return
-    territorials = await get_all_territorials()
-    if not territorials:
-        await _send_or_edit_admin_photo(
-            callback,
-            "admin_spus.jpg",
-            "ℹ️ У системі поки немає територіалів.",
-            _territorials_menu_keyboard(),
-        )
-        return
-
-    buttons = []
-    for t in territorials:
-        name = t.get('full_name', 'Без імені')
-        city = t.get('city', 'Без міста')
-        t_type = t.get('territorial_type') or '—'
-        buttons.append([InlineKeyboardButton(
-            text=f"{name} | {city} · {t_type}",
-            callback_data=f"dev_territorial_view:{t['uid']}"
-        )])
-
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_territorials_menu")])
-
-    await _send_or_edit_admin_photo(
-        callback,
-        "admin_spus.jpg",
-        "🗺 <b>Список територіалів:</b>",
-        InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
+    await developer_territorials_menu(callback)
 
 
 async def developer_territorial_view(callback: CallbackQuery):
@@ -7106,7 +7109,7 @@ async def developer_territorial_view(callback: CallbackQuery):
     buttons = [
         [InlineKeyboardButton(text="👔 Керівники Територіала", callback_data=f"dev_territorial_managers:{t_uid}:0")],
         [InlineKeyboardButton(text="🗑 Видалити", callback_data=f"dev_territorial_del:{t_uid}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_territorials_list")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_territorials_menu")]
     ]
 
     photo_input = await get_user_avatar_input(bot, t_uid)
@@ -7337,7 +7340,7 @@ async def developer_add_territorial_finish(callback: CallbackQuery, state: FSMCo
 # УПРАВЛІННЯ НАГЛЯДАЧАМИ (ПУНКТ 6)
 # ==============================================================================
 
-async def _build_observers_menu_view(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+async def _build_observers_menu_view(page: int = 0, bot: Optional[Bot] = None) -> tuple[str, InlineKeyboardMarkup]:
     """Будує інтерфейс списку наглядачів для адмін-панелі."""
     observers = await get_all_observers()
     
@@ -7360,8 +7363,8 @@ async def _build_observers_menu_view(page: int = 0) -> tuple[str, InlineKeyboard
     
     buttons = []
     for obs in paginated_obs:
-        name, _ = await _format_identity(obs["uid"], obs.get("full_name"), obs.get("username"))
-        btn_text = f"👁 {name}"
+        name, username = await _format_identity(obs["uid"], obs.get("full_name"), obs.get("username"), bot=bot)
+        btn_text = f"👁 {name} | {username}"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_obs_view:{obs['uid']}")])
     
     # Кнопки пагінації
@@ -7393,8 +7396,8 @@ async def developer_observers_menu(callback: CallbackQuery):
         except (ValueError, IndexError):
             page = 0
             
-    text, kb = await _build_observers_menu_view(page=page)
-    await _send_or_edit_admin_photo(callback, "admin_spus.jpg", text, kb)
+    text, kb = await _build_observers_menu_view(page=page, bot=callback.bot)
+    await _show_admin_photo_menu(callback, "admin_spus.jpg", text, kb)
 
 
 async def developer_observer_create_invite(callback: CallbackQuery):
@@ -7421,7 +7424,7 @@ async def developer_observer_create_invite(callback: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ До списку наглядачів", callback_data="dev_observers_menu")]
     ]
     
-    await _send_or_edit_admin_photo(callback, "admin_spus.jpg", text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _show_admin_photo_menu(callback, "admin_spus.jpg", text, InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
 async def developer_observer_view(callback: CallbackQuery):
