@@ -6,11 +6,11 @@ import aiosqlite
 import html
 import pytz
 import calendar
-from typing import Optional
+from typing import Optional, Union
 from pathlib import Path
 from datetime import datetime # NEW IMPORT
 from database import DB_PATH
-from aiogram import Dispatcher
+from aiogram import Dispatcher, Bot
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message, InputMediaPhoto, FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -540,18 +540,129 @@ async def _refresh_panel_view(bot, panel_info: Optional[dict], builder):
         await bot.send_message(chat_id, text, reply_markup=kb)
 
 
-async def _format_identity(user_id: int, fallback_name=None, fallback_username=None):
+async def get_user_avatar_input(bot: Optional[Bot], user_id: int) -> Union[str, FSInputFile, None]:
+    """
+    Tries to fetch the user's Telegram profile photo.
+    Returns the file_id (str) if available, or FSInputFile("img/ava.png") as fallback.
+    """
+    if bot:
+        try:
+            photos = await bot.get_user_profile_photos(user_id, limit=1)
+            if photos and photos.total_count > 0 and photos.photos:
+                # Largest size photo is the last element in the list
+                return photos.photos[0][-1].file_id
+        except Exception:
+            pass
+    
+    fallback_path = Path("img/ava.png")
+    if fallback_path.exists():
+        return FSInputFile(str(fallback_path))
+    return None
+
+
+async def _send_or_edit_card_photo(
+    callback: CallbackQuery,
+    photo_input: Union[str, FSInputFile, None],
+    caption: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None
+):
+    """
+    Renders or edits a card photo message:
+    - If the message already has a photo, calls edit_media or edit_caption.
+    - If it's a text message or edit fails, deletes old message and sends answer_photo.
+    - If photo_input is None, falls back to answer.
+    """
+    message = callback.message
+    has_photo = bool(getattr(message, "photo", None))
+    
+    if has_photo and photo_input:
+        try:
+            media = InputMediaPhoto(media=photo_input, caption=caption)
+            await message.edit_media(media=media, reply_markup=reply_markup)
+            try:
+                await callback.answer()
+            except Exception:
+                pass
+            return
+        except Exception:
+            pass
+        try:
+            await message.edit_caption(caption=caption, reply_markup=reply_markup)
+            try:
+                await callback.answer()
+            except Exception:
+                pass
+            return
+        except Exception:
+            pass
+
+    # Якщо повідомлення було текстовим або редагування не вдалося:
+    if message:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+    if photo_input:
+        try:
+            await message.answer_photo(
+                photo=photo_input,
+                caption=caption,
+                reply_markup=reply_markup
+            )
+            try:
+                await callback.answer()
+            except Exception:
+                pass
+            return
+        except Exception:
+            pass
+
+    # Фолбек на звичайний текст
+    await message.answer(caption, reply_markup=reply_markup)
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+async def _format_identity(user_id: int, fallback_name=None, fallback_username=None, bot: Optional[Bot] = None):
     # Пріоритет віддаємо даним, переданим напряму (з таблиці managers)
     full_name = fallback_name
     username = fallback_username
 
     # Якщо дані відсутні, пробуємо отримати їх з таблиці users як запасний варіант
-    if not full_name:
+    if not full_name or not username:
         profile = await get_user_details(user_id)
         if profile:
-            full_name = profile.get("full_name")
-            if username is None: # Оновлюємо username, тільки якщо він не був переданий
+            if not full_name:
+                full_name = profile.get("full_name")
+            if not username:
                 username = profile.get("username")
+
+    # Якщо досі немає username або full_name за замовчуванням, і є bot - запитуємо Telegram API get_chat
+    if (not username or not full_name or full_name in ("Головний Адміністратор", "Без імені")) and bot:
+        try:
+            chat = await bot.get_chat(user_id)
+            if chat:
+                if not username and chat.username:
+                    username = chat.username
+                t_fullname = f"{chat.first_name or ''} {chat.last_name or ''}".strip()
+                if (not full_name or full_name in ("Головний Адміністратор", "Без імені")) and t_fullname:
+                    full_name = t_fullname
+                # Оновлюємо кеш в managers та users
+                try:
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        if username:
+                            await db.execute("UPDATE managers SET username = ? WHERE uid = ?", (username, user_id))
+                            await db.execute("UPDATE users SET username = ? WHERE user_id = ?", (username, user_id))
+                        if t_fullname and full_name in ("Головний Адміністратор", "Без імені"):
+                            await db.execute("UPDATE managers SET name = ? WHERE uid = ?", (t_fullname, user_id))
+                        await db.commit()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # Фінальні перевірки, щоб уникнути None
     full_name = full_name or "Без імені"
@@ -561,7 +672,7 @@ async def _format_identity(user_id: int, fallback_name=None, fallback_username=N
     return full_name, username_display
 
 
-async def _build_managers_team_view(is_admin: bool, is_territorial: bool, user_id: int, page: int = 0):
+async def _build_managers_team_view(is_admin: bool, is_territorial: bool, user_id: int, page: int = 0, bot: Optional[Bot] = None):
     """Список керівників з пагінацією, пошуком та прямим переходом до карток."""
     is_obs = await is_observer_user(user_id)
     if is_admin or is_obs:
@@ -606,9 +717,15 @@ async def _build_managers_team_view(is_admin: bool, is_territorial: bool, user_i
             hr["uid"],
             hr.get("full_name"),
             hr.get("username"),
+            bot=bot,
         )
         
         shop_list = hr.get("shops") or []
+        if isinstance(shop_list, str):
+            try:
+                shop_list = json.loads(shop_list)
+            except Exception:
+                shop_list = [shop_list] if shop_list else []
         shop_codes = [s.split(" ")[0] for s in shop_list]
         shops_str = ", ".join(shop_codes) if shop_codes else "Не вказано"
         
@@ -643,50 +760,102 @@ async def _build_managers_team_view(is_admin: bool, is_territorial: bool, user_i
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-async def _build_dev_team_view() -> tuple[str, InlineKeyboardMarkup]:
-    """Builds the view for the Dev Team management panel with nice formatting."""
+async def _build_dev_team_view(bot: Optional[Bot] = None) -> tuple[str, InlineKeyboardMarkup]:
+    """Builds the view for the Dev Team management panel with nice formatting and interactive inline cards."""
     developers = await get_all_devs_from_managers_db()
     
     # Сортуємо: головний розробник завжди перший
     developers.sort(key=lambda x: x["uid"] != MAIN_DEVELOPER_ID)
     
-    lines = [f"👨‍💻 <b>Команда Адміністраторів (всього: {len(developers)})</b>", ""]
+    lines = [
+        f"👨‍💻 <b>Команда Адміністраторів (всього: {len(developers)})</b>",
+        "Натисніть на адміністратора для перегляду картки:",
+        ""
+    ]
+    buttons = []
     if not developers:
         lines.append("  Немає адміністраторів у команді.")
     else:
         for idx, dev in enumerate(developers, start=1):
             name, username = await _format_identity(
-                dev["uid"], dev.get("full_name"), dev.get("username")
+                dev["uid"], dev.get("full_name"), dev.get("username"), bot=bot
             )
-            # Екрануємо дані з БД
-            e_name = html.escape(name)
-            e_username = html.escape(username)
-            lines.append(f"{idx}. {e_name} | {e_username} | ID: <code>{dev['uid']}</code>")
-            lines.append("───────────────")
+            btn_text = f"👨‍💻 {name} | {username}"
+            buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_admin_view:{dev['uid']}")])
     
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="➕ Додати", callback_data="dev_add_dev"),
-                InlineKeyboardButton(text="❌ Видалити", callback_data="dev_remove_dev_menu"),
-            ],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")],
-        ]
-    )
-    return "\n".join(lines), kb
+    buttons.append([InlineKeyboardButton(text="➕ Додати адміністратора", callback_data="dev_add_dev")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")])
+    
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 async def developer_dev_team_menu(callback: CallbackQuery, state: FSMContext):
     """Handler to show the Dev Team management menu."""
     if not await _ensure_developer(callback):
         return
-    text, kb = await _build_dev_team_view()
-    msg = await _edit_or_answer(callback.message, text, reply_markup=kb)
-    await _remember_panel(state, "dev_panel", msg or callback.message)
+    text, kb = await _build_dev_team_view(bot=callback.bot)
+    await _send_or_edit_admin_photo(callback, "admin_spus.jpg", text, kb)
+    await _remember_panel(state, "dev_panel", callback.message)
+
+
+async def developer_admin_view(callback: CallbackQuery, state: FSMContext):
+    """Відображає картку адміністратора з фото та системною аналітикою."""
+    if not await _ensure_developer(callback):
+        return
     try:
-        await callback.answer()
-    except TelegramBadRequest as e:
-        if "query is too old" not in str(e):
-            raise e
+        admin_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        return await callback.answer("Помилка ідентифікатора.", show_alert=True)
+
+    bot = callback.bot
+    devs = await get_all_devs_from_managers_db()
+    admin_info = next((d for d in devs if d["uid"] == admin_uid), None)
+    
+    name, username = await _format_identity(
+        admin_uid, 
+        admin_info.get("full_name") if admin_info else None,
+        admin_info.get("username") if admin_info else None,
+        bot=bot
+    )
+    
+    role_label = "👑 Головний адміністратор" if admin_uid == MAIN_DEVELOPER_ID else "👨‍💻 Адміністратор"
+    
+    # Збираємо глобальну статистику
+    async with aiosqlite.connect(DB_PATH) as db:
+        c_all = await db.execute("SELECT COUNT(*) FROM users")
+        total_users = (await c_all.fetchone())[0]
+        
+        c_interns = await db.execute("SELECT COUNT(*) FROM users WHERE status IS NULL OR status != 'Працівник'")
+        total_interns = (await c_interns.fetchone())[0]
+        
+        c_workers = await db.execute("SELECT COUNT(*) FROM users WHERE status = 'Працівник'")
+        total_workers = (await c_workers.fetchone())[0]
+        
+    managers = await get_all_kerivnyky()
+    total_managers = len(managers)
+    territorials = await get_all_territorials()
+    total_territorials = len(territorials)
+    
+    caption = (
+        f"<b>{role_label}:</b> {html.escape(name)}\n"
+        f"👤 <b>Username:</b> {html.escape(username)}\n"
+        f"🆔 <b>Telegram ID:</b> <code>{admin_uid}</code>\n"
+        f"👑 <b>Роль:</b> {role_label}\n\n"
+        f"📊 <b>Загальна статистика системи:</b>\n"
+        f"• 👥 Всього користувачів: {total_users}\n"
+        f"• 🎓 Активних стажерів: {total_interns}\n"
+        f"• 👷 Випущених працівників: {total_workers}\n"
+        f"• 👔 Керівників: {total_managers}\n"
+        f"• 🗺 Територіалів: {total_territorials}"
+    )
+    
+    buttons = []
+    if admin_uid != MAIN_DEVELOPER_ID:
+        buttons.append([InlineKeyboardButton(text="❌ Видалити адміністратора", callback_data=f"dev_remove_confirm:{admin_uid}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад до списку", callback_data="dev_team_menu")])
+    
+    photo_input = await get_user_avatar_input(bot, admin_uid)
+    await _send_or_edit_card_photo(callback, photo_input, caption, InlineKeyboardMarkup(inline_keyboard=buttons))
 
 async def developer_remove_dev_menu(callback: CallbackQuery, state: FSMContext):
     """Shows a menu to select a developer to remove."""
@@ -1697,13 +1866,9 @@ async def developer_manage_managers_menu(callback: CallbackQuery, state: FSMCont
     if not has_access:
         return
     user_id = callback.from_user.id
-    text, kb = await _build_managers_team_view(is_admin, is_territorial, user_id, page=page)
-    msg = await _edit_or_answer(callback.message, text, reply_markup=kb)
-    await _remember_panel(state, "managers_panel", msg or callback.message)
-    try:
-        await callback.answer()
-    except:
-        pass
+    text, kb = await _build_managers_team_view(is_admin, is_territorial, user_id, page=page, bot=callback.bot)
+    await _send_or_edit_admin_photo(callback, "admin_spus.jpg", text, kb)
+    await _remember_panel(state, "managers_panel", callback.message)
 
 async def developer_managers_pagination_handler(callback: CallbackQuery, state: FSMContext):
     """Обробник пагінації для списку керівників."""
@@ -1933,7 +2098,7 @@ async def manager_team_back(callback: CallbackQuery, state: FSMContext):
 # УПРАВЛІННЯ ТА ПОШУК КЕРІВНИКІВ (ПУНКТ 5)
 # ==============================================================================
 
-async def _build_manager_card(manager_uid: int, is_admin: bool, is_territorial: bool, is_observer: bool = False):
+async def _build_manager_card(manager_uid: int, is_admin: bool, is_territorial: bool, is_observer: bool = False, bot: Optional[Bot] = None):
     mgr = await get_manager_by_uid(manager_uid)
     if not mgr:
         return None
@@ -1950,9 +2115,14 @@ async def _build_manager_card(manager_uid: int, is_admin: bool, is_territorial: 
         )
         workers_count = (await c_workers.fetchone())[0]
 
-    name, username = await _format_identity(mgr["uid"], mgr.get("full_name"), mgr.get("username"))
+    name, username = await _format_identity(mgr["uid"], mgr.get("full_name"), mgr.get("username"), bot=bot)
     city = mgr.get("city") or "Не вказано"
     shops_list = mgr.get("shops") or []
+    if isinstance(shops_list, str):
+        try:
+            shops_list = json.loads(shops_list)
+        except Exception:
+            shops_list = [shops_list] if shops_list else []
     shops_str = ", ".join(shops_list) if shops_list else "Не призначено"
     
     resp_uid = mgr.get("responsible_uid")
@@ -1975,7 +2145,7 @@ async def _build_manager_card(manager_uid: int, is_admin: bool, is_territorial: 
         f"👤 <b>Username:</b> {html.escape(username)}\n"
         f"🆔 <b>Telegram ID:</b> <code>{mgr['uid']}</code>\n"
         f"🏙 <b>Місто:</b> {html.escape(city)}\n"
-        f"🏪 <b>Магазини:</b> {html.escape(shops_str)}\n"
+        f"🏪 <b>Магазини ({len(shops_list)}/5):</b> {html.escape(shops_str)}\n"
         f"🗺 <b>Відповідальний:</b> {html.escape(resp_label)}"
         f"{status_tag}\n\n"
         f"📊 <b>Підлеглі:</b>\n"
@@ -2018,7 +2188,7 @@ async def _build_edit_shops_keyboard(city: str, selected_shops: list, manager_ui
 
 
 async def dev_mgr_view(callback: CallbackQuery, state: FSMContext):
-    """Відображає картку керівника."""
+    """Відображає картку керівника з його фото."""
     has_access, is_admin, is_territorial = await _check_access(callback)
     if not has_access:
         return
@@ -2028,16 +2198,13 @@ async def dev_mgr_view(callback: CallbackQuery, state: FSMContext):
         return await callback.answer("Помилка ідентифікатора.", show_alert=True)
         
     is_obs = await is_observer_user(callback.from_user.id)
-    card_data = await _build_manager_card(manager_uid, is_admin, is_territorial, is_observer=is_obs)
+    card_data = await _build_manager_card(manager_uid, is_admin, is_territorial, is_observer=is_obs, bot=callback.bot)
     if not card_data:
         await callback.answer("Керівника не знайдено!", show_alert=True)
         return
     text, kb = card_data
-    await _edit_or_answer(callback.message, text, reply_markup=kb)
-    try:
-        await callback.answer()
-    except Exception:
-        pass
+    photo_input = await get_user_avatar_input(callback.bot, manager_uid)
+    await _send_or_edit_card_photo(callback, photo_input, text, reply_markup=kb)
 
 
 async def dev_mgr_search_start(callback: CallbackQuery, state: FSMContext):
@@ -6822,24 +6989,25 @@ def _territorials_menu_keyboard() -> InlineKeyboardMarkup:
 async def developer_territorials_menu(callback: CallbackQuery):
     if not await _ensure_developer(callback):
         return
-    await _edit_or_answer(
-        callback.message,
+    await _send_or_edit_admin_photo(
+        callback,
+        "admin_spus.jpg",
         "🗺 <b>Територіали</b>\nОберіть дію:",
-        reply_markup=_territorials_menu_keyboard(),
+        _territorials_menu_keyboard(),
     )
-    await callback.answer()
+
 
 async def developer_list_territorials(callback: CallbackQuery):
     if not await _ensure_developer(callback):
         return
     territorials = await get_all_territorials()
     if not territorials:
-        await _edit_or_answer(
-            callback.message,
+        await _send_or_edit_admin_photo(
+            callback,
+            "admin_spus.jpg",
             "ℹ️ У системі поки немає територіалів.",
-            reply_markup=_territorials_menu_keyboard(),
+            _territorials_menu_keyboard(),
         )
-        await callback.answer()
         return
 
     buttons = []
@@ -6847,7 +7015,6 @@ async def developer_list_territorials(callback: CallbackQuery):
         name = t.get('full_name', 'Без імені')
         city = t.get('city', 'Без міста')
         t_type = t.get('territorial_type') or '—'
-        type_label = TERRITORIAL_TYPES.get(t_type, t_type)
         buttons.append([InlineKeyboardButton(
             text=f"{name} | {city} · {t_type}",
             callback_data=f"dev_territorial_view:{t['uid']}"
@@ -6855,12 +7022,13 @@ async def developer_list_territorials(callback: CallbackQuery):
 
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_territorials_menu")])
 
-    await _edit_or_answer(
-        callback.message,
+    await _send_or_edit_admin_photo(
+        callback,
+        "admin_spus.jpg",
         "🗺 <b>Список територіалів:</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        InlineKeyboardMarkup(inline_keyboard=buttons),
     )
-    await callback.answer()
+
 
 async def developer_territorial_view(callback: CallbackQuery):
     if not await _ensure_developer(callback):
@@ -6871,9 +7039,12 @@ async def developer_territorial_view(callback: CallbackQuery):
         await callback.answer("Територіала не знайдено!", show_alert=True)
         return
 
-    t_type = manager.get('territorial_type') or '—'
+    bot = callback.bot
+    t_type = manager.get('territorial_type') or 'ТЗ'
     type_label = TERRITORIAL_TYPES.get(t_type, t_type)
     city = manager.get('city', '')
+
+    name, username = await _format_identity(t_uid, manager.get("full_name"), manager.get("username"), bot=bot)
 
     # Підлеглі керівники
     subordinate_managers = await get_managers_by_responsible(t_uid)
@@ -6884,7 +7055,6 @@ async def developer_territorial_view(callback: CallbackQuery):
     for m in subordinate_managers:
         m_shops = m.get('shops') or []
         if isinstance(m_shops, str):
-            import json
             try:
                 m_shops = json.loads(m_shops)
             except Exception:
@@ -6894,22 +7064,39 @@ async def developer_territorial_view(callback: CallbackQuery):
                 shops_set.add(s)
     shops_count = len(shops_set)
 
-    # Рахуємо стажерів та працівників по місту
+    # Рахуємо стажерів та працівників по місту з урахуванням типу посади (ВВ або ТЗ)
     from database.users import get_users_by_city
+    from bot.services.positions import get_all_positions
+    
+    positions = await get_all_positions()
+    pos_type_map = {p["name"]: p.get("territorial_type", "ТЗ") for p in positions}
+    
     city_users = await get_users_by_city(city) if city else []
-    workers_count = sum(1 for u in city_users if u.get('status') == 'Працівник')
-    trainees_count = sum(1 for u in city_users if u.get('status') in ('Стажер', 'Новачок'))
+    workers_count = 0
+    trainees_count = 0
+    for u in city_users:
+        u_pos = u.get("role") or u.get("position") or ""
+        u_type = pos_type_map.get(u_pos, "ТЗ")
+        if u_type == t_type:
+            if u.get("status") == "Працівник":
+                workers_count += 1
+            else:
+                trainees_count += 1
+
+    total_subordinates = managers_count + workers_count + trainees_count
 
     text = (
-        f"🗺 <b>Територіал:</b> {manager.get('full_name', 'Без імені')}\n"
-        f"👤 <b>Username:</b> @{manager.get('username', 'немає')}\n"
-        f"🏙 <b>Місто:</b> {city or 'не вказано'}\n"
-        f"🏷 <b>Тип:</b> {type_label} ({t_type})\n"
-        f"👔 <b>Підлеглих керівників:</b> {managers_count}\n"
-        f"🏪 <b>Магазинів:</b> {shops_count}\n"
-        f"👷 <b>Працівників по місту:</b> {workers_count}\n"
-        f"🎓 <b>Стажерів по місту:</b> {trainees_count}\n"
-        f"🆔 <b>UID:</b> <code>{manager.get('uid')}</code>\n"
+        f"🗺 <b>Територіал:</b> {html.escape(name)}\n"
+        f"👤 <b>Username:</b> {html.escape(username)}\n"
+        f"🆔 <b>Telegram ID:</b> <code>{manager.get('uid')}</code>\n"
+        f"🏙 <b>Місто:</b> {html.escape(city or 'не вказано')}\n"
+        f"🏷 <b>Тип:</b> {type_label} ({t_type})\n\n"
+        f"📊 <b>Статистика по напрямку ({t_type} — {html.escape(city)}):</b>\n"
+        f"• 👔 Підлеглих керівників: {managers_count}\n"
+        f"• 🏪 Закріплених магазинів: {shops_count}\n"
+        f"• 🎓 Стажерів ({t_type}): {trainees_count}\n"
+        f"• 👷 Працівників ({t_type}): {workers_count}\n"
+        f"• 👥 Всього людей у структурі: {total_subordinates}"
     )
 
     buttons = [
@@ -6918,12 +7105,13 @@ async def developer_territorial_view(callback: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_territorials_list")]
     ]
 
-    await _edit_or_answer(
-        callback.message,
+    photo_input = await get_user_avatar_input(bot, t_uid)
+    await _send_or_edit_card_photo(
+        callback,
+        photo_input,
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
-    await callback.answer()
 
 async def developer_territorial_managers(callback: CallbackQuery):
     """Список керівників конкретного Територіала з пагінацією."""
@@ -7202,8 +7390,7 @@ async def developer_observers_menu(callback: CallbackQuery):
             page = 0
             
     text, kb = await _build_observers_menu_view(page=page)
-    await _edit_or_answer(callback.message, text, reply_markup=kb)
-    await callback.answer()
+    await _send_or_edit_admin_photo(callback, "admin_spus.jpg", text, kb)
 
 
 async def developer_observer_create_invite(callback: CallbackQuery):
@@ -7230,12 +7417,11 @@ async def developer_observer_create_invite(callback: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ До списку наглядачів", callback_data="dev_observers_menu")]
     ]
     
-    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    await callback.answer()
+    await _send_or_edit_admin_photo(callback, "admin_spus.jpg", text, InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
 async def developer_observer_view(callback: CallbackQuery):
-    """Показує картку наглядача."""
+    """Показує картку наглядача з фото."""
     if not await _ensure_developer(callback):
         return
     try:
@@ -7249,7 +7435,7 @@ async def developer_observer_view(callback: CallbackQuery):
         await callback.answer("Наглядача не знайдено або він вже видалений.", show_alert=True)
         return
         
-    name, username = await _format_identity(obs["uid"], obs.get("full_name"), obs.get("username"))
+    name, username = await _format_identity(obs["uid"], obs.get("full_name"), obs.get("username"), bot=callback.bot)
     
     resp_name = "Адміністратор"
     if obs.get("responsible_uid"):
@@ -7271,8 +7457,8 @@ async def developer_observer_view(callback: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ До списку наглядачів", callback_data="dev_observers_menu")]
     ]
     
-    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    await callback.answer()
+    photo_input = await get_user_avatar_input(callback.bot, obs_uid)
+    await _send_or_edit_card_photo(callback, photo_input, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
 async def developer_observer_delete_confirm(callback: CallbackQuery):
@@ -7635,6 +7821,7 @@ def register_developer_menu_handlers(dp: Dispatcher):
 
     # Dev Team Management
     dp.callback_query.register(developer_dev_team_menu, lambda c: c.data == "dev_team_menu")
+    dp.callback_query.register(developer_admin_view, lambda c: c.data and c.data.startswith("dev_admin_view:"))
     dp.callback_query.register(developer_request_add_dev, lambda c: c.data == "dev_add_dev")
     dp.callback_query.register(developer_remove_dev_menu, lambda c: c.data == "dev_remove_dev_menu")
     dp.callback_query.register(developer_remove_dev, lambda c: c.data and c.data.startswith("dev_remove_confirm:"))
