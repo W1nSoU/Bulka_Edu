@@ -17,7 +17,8 @@ import pytz
 import aiosqlite
 import json
 import asyncio
-import re # NEW IMPORT
+import re
+import html
 from database.users import (
     register_user, update_progress, get_user_progress, set_intern_extra,
     get_user_details, get_manager_interns, get_inactive_interns_for_manager, get_interns_in_progress_for_manager,
@@ -94,6 +95,7 @@ async def start_menu(message: types.Message, state: FSMContext):
             message,
             is_hr=is_hr,
             is_developer=is_developer,
+            is_territorial=is_territorial,
             allow_edit=False,
         )
         return
@@ -134,6 +136,9 @@ async def start_menu(message: types.Message, state: FSMContext):
                 role = token_data["role"]
                 city = token_data["city"]
                 shop = token_data.get("shop")  # Get shop from token data
+                shops = token_data.get("shops") or ([shop] if shop else [])
+                extra_data = token_data.get("extra_data") or {}
+                transfer_on_reg = token_data.get("transfer_on_reg", 0)
                 is_valid_payload, error_text = _validate_invite_payload(role, city)
                 if not is_valid_payload:
                     await message.answer(error_text)
@@ -145,6 +150,9 @@ async def start_menu(message: types.Message, state: FSMContext):
                     reg_role=role,
                     reg_city=city,
                     reg_shop=shop,
+                    reg_shops=shops,
+                    reg_extra_data=extra_data,
+                    reg_transfer_on_reg=transfer_on_reg,
                     reg_token=token
                 )
                 await state.set_state(RegistrationStates.waiting_for_full_name)
@@ -237,6 +245,7 @@ async def show_developer_main_menu(
     *,
     is_hr: bool = False,
     is_developer: bool = False,
+    is_territorial: bool = False,
     allow_edit: bool = True,
     force_new_message: bool = False,
 ) -> None:
@@ -244,7 +253,7 @@ async def show_developer_main_menu(
         "🛠 <b>Панель управління Булка</b>\n\n"
         "Вітаємо в системі! Оберіть дію:"
     )
-    keyboard = main_menu_keyboard(is_hr=is_hr, is_developer=is_developer)
+    keyboard = main_menu_keyboard(is_hr=is_hr, is_developer=is_developer, is_territorial=is_territorial)
     
     if force_new_message:
         if message:
@@ -554,7 +563,7 @@ def _build_snippet(text: str, limit: int = 240) -> str:
     return textwrap.shorten(clean, width=limit, placeholder="…")
 
 def _validate_invite_payload(role: Optional[str], city: Optional[str]) -> tuple[bool, Optional[str]]:
-    if role in ["Наглядач", "Територіал"]:
+    if role in ["Наглядач", "Територіал", "Керівник", "Керівник Стажер"]:
         return True, None
     if not is_valid_role(role):
         return False, (
@@ -2602,6 +2611,9 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
     role = data.get("reg_role")
     city = data.get("reg_city")
     shop = data.get("reg_shop")
+    shops = data.get("reg_shops") or ([shop] if shop else [])
+    extra_data = data.get("reg_extra_data") or {}
+    transfer_on_reg = data.get("reg_transfer_on_reg", 0)
     token = data.get("reg_token")
     
     user_id = message.from_user.id
@@ -2613,25 +2625,94 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
         if token:
             await use_token(token, user_id)
         await message.answer(f"Вітаємо, {full_name}! Реєстрацію Наглядача успішно завершено. 👁✅")
+        from bot.menus.developer import show_observer_main_menu
         await show_observer_main_menu(message, allow_edit=False, force_new_message=True)
+        await state.clear()
+        return
+
+    if role == "Територіал":
+        await register_user(user_id, username=username, full_name=full_name)
+        t_type = extra_data.get("territorial_type") or "ТЗ"
+        from database.managers import add_manager, reassign_city_managers_to_territorial
+        await add_manager(
+            uid=user_id,
+            process="Територіал",
+            full_name=full_name,
+            username=username or "",
+            city=city,
+            territorial_type=t_type
+        )
+        if token:
+            await use_token(token, user_id)
+            
+        transferred_count = 0
+        if transfer_on_reg:
+            transferred_count = await reassign_city_managers_to_territorial(city, user_id)
+            
+        # Сповіщення адміністратору, який створив посилання
+        if manager_id:
+            try:
+                from bot.constants import TERRITORIAL_TYPES
+                type_label = TERRITORIAL_TYPES.get(t_type, t_type)
+                report_text = (
+                    f"🗺 <b>Територіал зареєструвався!</b>\n\n"
+                    f"👤 <b>ПІБ:</b> {html.escape(full_name)}\n"
+                    f"🏙 <b>Місто:</b> {city}\n"
+                    f"💼 <b>Тип:</b> {type_label} ({t_type})\n"
+                )
+                if transfer_on_reg:
+                    report_text += f"✅ Керівників міста перепідпорядковано: <b>{transferred_count}</b>"
+                await message.bot.send_message(manager_id, report_text, parse_mode="HTML")
+            except Exception as exc:
+                from bot.services.logger import get_logger
+                get_logger().warning(f"Could not notify admin {manager_id} about territorial registration: {exc}")
+
+        await message.answer(f"Вітаємо, {full_name}! Реєстрацію Територіала успішно завершено. 🗺✅")
+        await show_developer_main_menu(message, is_territorial=True, allow_edit=False, force_new_message=True)
         await state.clear()
         return
 
     if role in ("Керівник", "Керівник Стажер"):
         await register_user(user_id, username=username, full_name=full_name)
-        await set_intern_extra(user_id, manager_id, "Керівник", city, shop=shop)
-        from database.managers import add_manager
+        primary_shop = shops[0] if (shops and isinstance(shops, list)) else (shop if isinstance(shop, str) else None)
+        await set_intern_extra(user_id, manager_id, "Керівник", city, shop=primary_shop)
+        from database.managers import add_manager, transfer_users_by_shops
+        
+        responsible_uid = extra_data.get("responsible_uid") or manager_id
+        mgr_shops = shops if shops else (shop if isinstance(shop, list) else ([shop] if shop else []))
         await add_manager(
             uid=user_id,
             username=username or "",
             full_name=full_name,
             process="Керівник Стажер",
-            shops=shop,
+            shops=mgr_shops,
             city=city,
-            responsible_uid=manager_id
+            responsible_uid=responsible_uid
         )
         if token:
             await use_token(token, user_id)
+            
+        transferred_count = 0
+        if transfer_on_reg and mgr_shops:
+            transferred_count = await transfer_users_by_shops(city, mgr_shops, user_id)
+            
+        # Сповіщення творцю посилання (Територіалу або Адміну)
+        if manager_id:
+            try:
+                shops_str = ", ".join(mgr_shops) if mgr_shops else (shop or "не вказано")
+                report_text = (
+                    f"👔 <b>Керівник зареєструвався!</b>\n\n"
+                    f"👤 <b>ПІБ:</b> {html.escape(full_name)}\n"
+                    f"🏙 <b>Місто:</b> {city}\n"
+                    f"🏪 <b>Магазини:</b> {html.escape(shops_str)}\n"
+                )
+                if transfer_on_reg:
+                    report_text += f"✅ Під його керівництво переведено: <b>{transferred_count}</b> співробітників."
+                await message.bot.send_message(manager_id, report_text, parse_mode="HTML")
+            except Exception as exc:
+                from bot.services.logger import get_logger
+                get_logger().warning(f"Could not notify creator {manager_id} about manager registration: {exc}")
+
         await message.answer(f"Вітаємо, {full_name}! Реєстрацію Керівника-стажера успішно завершено. 👔✅")
         initialize_user_progress(user_id)
         await show_student_main_menu(message, user_id, allow_edit=False)

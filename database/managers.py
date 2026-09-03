@@ -293,14 +293,15 @@ async def update_manager_responsible(manager_uid: int, responsible_uid = None):
         await db.execute("UPDATE managers SET responsible_uid = ? WHERE uid = ?", (responsible_uid, manager_uid))
         await db.commit()
 
-async def reassign_city_managers_to_territorial(city: str, territorial_uid: int):
-    """Призначає нового територіала відповідальним за всіх активних керівників певного міста."""
+async def reassign_city_managers_to_territorial(city: str, territorial_uid: int) -> int:
+    """Призначає нового територіала відповідальним за всіх активних керівників та керівників-стажерів певного міста."""
     async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
-        await db.execute(
-            "UPDATE managers SET responsible_uid = ? WHERE city = ? AND process = 'Керівник' AND (status = 'active' OR status IS NULL)",
+        cursor = await db.execute(
+            "UPDATE managers SET responsible_uid = ? WHERE city = ? AND process IN ('Керівник', 'Керівник Стажер') AND (status = 'active' OR status IS NULL)",
             (territorial_uid, city)
         )
         await db.commit()
+        return cursor.rowcount
 
 async def is_territorial_user(user_id: int) -> bool:
     """Перевіряє, чи користувач є активним територіалом у таблиці managers."""

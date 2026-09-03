@@ -610,7 +610,7 @@ async def _build_managers_team_view(is_admin: bool, is_territorial: bool, user_i
     
     if not all_hrs:
         buttons = []
-        if is_admin:
+        if is_admin or is_territorial:
             buttons.append([InlineKeyboardButton(text="➕ Додати керівника", callback_data="dev_add_manager")])
         buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -674,7 +674,7 @@ async def _build_managers_team_view(is_admin: bool, is_territorial: bool, user_i
     if len(nav_row) > 1:
         buttons.append(nav_row)
         
-    if is_admin:
+    if is_admin or is_territorial:
         buttons.append([InlineKeyboardButton(text="➕ Додати керівника", callback_data="dev_add_manager")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")])
     
@@ -1974,23 +1974,53 @@ async def developer_managers_pagination_handler(callback: CallbackQuery, state: 
 
 
 async def developer_request_add_manager(callback: CallbackQuery, state: FSMContext):
-    """Starts the process of adding a manager by requesting their ID."""
+    """Початок створення інвайт-посилання для керівника (доступно Адміністраторам та Територіалам)."""
     has_access, is_admin, is_territorial = await _check_access(callback)
-    if not has_access or (is_territorial and not is_admin):
-        if has_access: await callback.answer("Вам недоступна ця функція.", show_alert=True)
+    if not has_access or (not is_admin and not is_territorial):
+        await callback.answer("Вам недоступна ця функція.", show_alert=True)
         return
-    await state.set_state(DeveloperStates.waiting_add_manager_id)
+
+    # Якщо викликає територіал, автоматично беремо його місто
+    if is_territorial and not is_admin:
+        mgr = await get_manager_by_uid(callback.from_user.id)
+        city = mgr.get("city") if mgr else None
+        if city:
+            await state.update_data(manager_city=city, selected_shops=[])
+            await state.set_state(DeveloperStates.waiting_add_manager_shops)
+            kb = await _build_manager_shops_keyboard(city, [], is_territorial=True)
+            await _edit_or_answer(
+                callback.message,
+                f"🏪 <b>Створення посилання для Керівника</b>\n"
+                f"🏙️ Місто: <b>{city}</b>\n\n"
+                f"Оберіть магазини (до 5), які закріплюються за цим керівником:",
+                reply_markup=kb
+            )
+            await callback.answer()
+            return
+        else:
+            await callback.answer("⚠️ Не вдалося визначити ваше місто. Зверніться до адміністратора.", show_alert=True)
+            return
+
+    # Для Адміністратора показуємо вибір міста
+    await state.clear()
+    cities_data = await get_all_cities()
+    active_cities = [c["name"] for c in cities_data] if cities_data else AVAILABLE_CITIES
+
+    buttons = []
+    for c in active_cities:
+        buttons.append([InlineKeyboardButton(text=c, callback_data=f"dev_mgr_city_select:{c}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_manage_managers")])
+
     await _edit_or_answer(
         callback.message,
-        "👔 Введіть ID користувача, якого потрібно призначити керівником:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_manage_managers")]
-        ])
+        "🏪 <b>Створення посилання для Керівника</b>\n\nОберіть місто для нового керівника:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
+    await state.set_state(DeveloperStates.waiting_add_manager_city)
     await callback.answer()
 
 async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
-    """Processes the city selection and shows the shop selection menu."""
+    """Обробляє вибір міста адміністратором та відкриває меню вибору магазинів."""
     try:
         city = callback.data.split(":", 1)[1]
     except IndexError:
@@ -1999,17 +2029,19 @@ async def developer_process_add_manager_city(callback: CallbackQuery, state: FSM
     await state.update_data(manager_city=city, selected_shops=[])
     await state.set_state(DeveloperStates.waiting_add_manager_shops)
     
-    kb = await _build_manager_shops_keyboard(city, [])
+    kb = await _build_manager_shops_keyboard(city, [], is_territorial=False)
     await _edit_or_answer(
         callback.message,
-        f"Місто: {city}.\nТепер оберіть магазини. Можна обрати до 5.",
+        f"🏪 <b>Створення посилання для Керівника</b>\n"
+        f"🏙️ Місто: <b>{city}</b>\n\n"
+        f"Оберіть магазини (до 5), які закріплюються за цим керівником:",
         reply_markup=kb
     )
     await callback.answer()
 
-async def _build_manager_shops_keyboard(city: str, selected_shops: list) -> InlineKeyboardMarkup:
-    """Builds the keyboard for shop multi-selection for a specific city."""
-    shops_in_city = AVAILABLE_SHOPS.get(city, [])
+async def _build_manager_shops_keyboard(city: str, selected_shops: list, is_territorial: bool = False) -> InlineKeyboardMarkup:
+    """Будує інлайн-клавіатуру для мульти-вибору магазинів (максимум 5)."""
+    shops_in_city = _get_shops_for_city(city)
     
     buttons = []
     for i in range(0, len(shops_in_city), 2):
@@ -2024,61 +2056,26 @@ async def _build_manager_shops_keyboard(city: str, selected_shops: list) -> Inli
             row.append(InlineKeyboardButton(text=text2, callback_data=f"dev_mgr_shop_toggle:{i+1}"))
         buttons.append(row)
     
-    buttons.append([InlineKeyboardButton(text="✅ Готово", callback_data="dev_mgr_shop_done")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад до міст", callback_data="dev_add_manager")])
+    buttons.append([InlineKeyboardButton(text=f"✅ Готово ({len(selected_shops)}/5)", callback_data="dev_mgr_shop_done")])
+    if is_territorial:
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_manage_managers")])
+    else:
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад до міст", callback_data="dev_add_manager")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-async def developer_process_add_manager_id(message: Message, state: FSMContext):
-    """Processes the manager ID and asks for their Full Name."""
-    if not message.text or not message.text.isdigit():
-        await message.answer("❌ ID повинен бути числом. Спробуйте ще раз.")
-        return
-    
-    user_id = int(message.text)
-    await state.update_data(new_manager_id=user_id, selected_shops=[])
-    await state.set_state(DeveloperStates.waiting_add_manager_name)
-    
-    await message.answer(
-        f"ID: {user_id}. Тепер введіть ПІБ керівника:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_manage_managers")]
-        ])
-    )
-
-async def developer_process_add_manager_name(message: Message, state: FSMContext):
-    """Processes the manager Name and shows the city selection menu."""
-    full_name = message.text.strip()
-    if len(full_name.split()) < 2:
-        await message.answer("Будь ласка, введіть повне ім'я та прізвище (мінімум 2 слова).")
-        return
-
-    await state.update_data(new_manager_name=full_name)
-    await state.set_state(DeveloperStates.waiting_add_manager_city)
-    
-    buttons = []
-    for city in AVAILABLE_CITIES:
-        buttons.append([InlineKeyboardButton(text=city, callback_data=f"dev_mgr_city_select:{city}")])
-    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_manage_managers")])
-    
-    await message.answer(
-        f"Керівник: <b>{full_name}</b>.\nТепер оберіть місто, до якого належать його магазини:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-    )
-
 async def developer_process_shop_selection(callback: CallbackQuery, state: FSMContext):
-    """Handles toggling a shop in the selection menu."""
+    """Обробляє перемикання вибору магазину з обмеженням максимум 5."""
     data = await state.get_data()
     city = data.get("manager_city")
     if not city:
-        # Якщо місто не знайдено у стані, це помилка флоу. Повертаємося в головне меню керівників.
         await callback.answer("Помилка: місто не обрано. Поверніться до меню додавання керівника.", show_alert=True)
         await state.clear()
-        await developer_manage_managers_menu(callback, state) # Go back to managers menu
+        await developer_manage_managers_menu(callback, state)
         return
         
     try:
         shop_index = int(callback.data.split(":", 1)[1])
-        shops_in_city = AVAILABLE_SHOPS.get(city, [])
+        shops_in_city = _get_shops_for_city(city)
         shop_name = shops_in_city[shop_index]
     except (IndexError, ValueError):
         return await callback.answer("Помилка даних магазину.", show_alert=True)
@@ -2095,42 +2092,127 @@ async def developer_process_shop_selection(callback: CallbackQuery, state: FSMCo
         
     await state.update_data(selected_shops=selected_shops)
     
-    kb = await _build_manager_shops_keyboard(city, selected_shops)
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    kb = await _build_manager_shops_keyboard(city, selected_shops, is_territorial=(is_territorial and not is_admin))
     await callback.message.edit_reply_markup(reply_markup=kb)
     await callback.answer()
 
 async def developer_finish_shop_selection(callback: CallbackQuery, state: FSMContext):
-    """Finalizes adding the manager with the selected shops."""
+    """Завершення вибору магазинів: якщо є працівники/стажери, запитує переведення, інакше генерує посилання."""
     data = await state.get_data()
-    user_id = data.get("new_manager_id")
-    selected_shops = data.get("selected_shops", [])
-    full_name = data.get("new_manager_name", "Керівник")
     city = data.get("manager_city")
+    selected_shops = data.get("selected_shops", [])
     
-    if not user_id:
-        await callback.answer("Помилка: ID керівника не знайдено.", show_alert=True)
+    if not city:
+        await callback.answer("Помилка: місто не обрано.", show_alert=True)
         return await developer_manage_managers_menu(callback, state)
 
-    # Get username if possible, but rely on provided full_name
-    try:
-        chat_info = await callback.bot.get_chat(user_id)
-        username = chat_info.username
-    except Exception:
-        username = ""
+    shops_in_city = _get_shops_for_city(city)
+    if shops_in_city and not selected_shops:
+        await callback.answer("⚠️ Будь ласка, оберіть хоча б один магазин.", show_alert=True)
+        return
 
-    await register_user(user_id, username=username, full_name=full_name)
-    await add_manager(
-        uid=user_id,
-        process="Керівник",
-        full_name=full_name,
-        username=username,
-        shops=selected_shops,
-        city=city
-    )
+    interns_c, workers_c = await count_users_in_shops(city, selected_shops)
+    total_users = interns_c + workers_c
     
+    if total_users > 0:
+        shops_joined = ", ".join(selected_shops)
+        text = (
+            f"🏪 <b>Створення посилання для Керівника</b>\n"
+            f"🏙️ Місто: <b>{city}</b>\n"
+            f"🏪 Обрані магазини: <b>{html.escape(shops_joined)}</b>\n\n"
+            f"👥 У цих магазинах знайдено <b>{interns_c}</b> стажерів та <b>{workers_c}</b> працівників (закріплені за Територіалом/Адміністратором).\n\n"
+            f"<b>Перевести їх під керівництво цього керівника після його реєстрації?</b>"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Так, перевести", callback_data="dev_mgr_link_tr:yes")],
+            [InlineKeyboardButton(text="❌ Ні, залишити як є", callback_data="dev_mgr_link_tr:no")],
+            [InlineKeyboardButton(text="⬅️ Назад до магазинів", callback_data="dev_mgr_back_to_shops")]
+        ])
+        await _edit_or_answer(callback.message, text, reply_markup=kb)
+        await callback.answer()
+    else:
+        await _create_manager_invite_link(callback, state, transfer_on_reg=0)
+
+async def developer_mgr_link_transfer_choice(callback: CallbackQuery, state: FSMContext):
+    """Обробляє рішення щодо переведення працівників і генерує посилання."""
+    choice = callback.data.split(":")[1]
+    transfer_on_reg = 1 if choice == "yes" else 0
+    await _create_manager_invite_link(callback, state, transfer_on_reg=transfer_on_reg)
+
+async def developer_mgr_back_to_shops(callback: CallbackQuery, state: FSMContext):
+    """Повернення до вибору магазинів."""
+    data = await state.get_data()
+    city = data.get("manager_city")
+    selected_shops = data.get("selected_shops", [])
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    kb = await _build_manager_shops_keyboard(city, selected_shops, is_territorial=(is_territorial and not is_admin))
+    await _edit_or_answer(
+        callback.message,
+        f"🏪 <b>Створення посилання для Керівника</b>\n"
+        f"🏙️ Місто: <b>{city}</b>\n\n"
+        f"Оберіть магазини (до 5), які закріплюються за цим керівником:",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+async def _create_manager_invite_link(callback: CallbackQuery, state: FSMContext, transfer_on_reg: int):
+    """Генерує 24-годинний інвайт-токен та виводить повідомлення з посиланням."""
+    data = await state.get_data()
+    city = data.get("manager_city")
+    selected_shops = data.get("selected_shops", [])
+    creator_id = callback.from_user.id
+    
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if is_territorial and not is_admin:
+        responsible_uid = creator_id
+    else:
+        city_territorials = await get_territorials_by_city(city)
+        if city_territorials:
+            responsible_uid = city_territorials[0]["uid"]
+        else:
+            responsible_uid = creator_id
+
+    extra_data = {
+        "shops": selected_shops,
+        "responsible_uid": responsible_uid,
+        "transfer_on_reg": transfer_on_reg
+    }
+
+    token = await generate_token(
+        manager_id=creator_id,
+        role="Керівник Стажер",
+        city=city,
+        shop=selected_shops,
+        expires_in_hours=24,
+        extra_data=extra_data,
+        transfer_on_reg=transfer_on_reg
+    )
+
+    bot_user = await callback.bot.get_me()
+    bot_username = bot_user.username
+    invite_link = f"https://t.me/{bot_username}?start={creator_id}-{token}"
+
+    shops_str = ", ".join(selected_shops) if selected_shops else "Усі магазини міста"
+    transfer_label = "✅ Так (автоматично при реєстрації)" if transfer_on_reg else "❌ Ні (залишити як є)"
+
+    text = (
+        f"🔗 <b>Посилання для запрошення Керівника створено!</b>\n\n"
+        f"🏙️ <b>Місто:</b> {city}\n"
+        f"🏪 <b>Магазини:</b> {html.escape(shops_str)}\n"
+        f"👥 <b>Переведення людей:</b> {transfer_label}\n"
+        f"⏱️ <b>Термін дії:</b> 24 години\n\n"
+        f"Надішліть це посилання майбутньому керівнику для проходження реєстрації:\n"
+        f"<code>{invite_link}</code>"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ До списку керівників", callback_data="dev_manage_managers")]
+    ])
+
     await state.clear()
-    await callback.answer("✅ Керівника успішно додано/оновлено!", show_alert=True)
-    await developer_manage_managers_menu(callback, state)
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await callback.answer("✅ Посилання успішно згенеровано!", show_alert=True)
 
 
 async def developer_remove_manager_menu(callback: CallbackQuery, state: FSMContext):
@@ -7111,6 +7193,13 @@ async def _build_territorials_team_view(bot: Optional[Bot] = None) -> tuple[str,
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def _territorials_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Додати територіала", callback_data="dev_territorial_add")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")]
+    ])
+
+
 async def developer_territorials_menu(callback: CallbackQuery):
     if not await _ensure_developer(callback):
         return
@@ -7310,44 +7399,40 @@ async def developer_territorial_del_confirm(callback: CallbackQuery):
     await callback.answer("Територіала видалено! Підлеглих передано Адміністратору.", show_alert=True)
     await developer_list_territorials(callback)
 
-# ADDING TERRITORIAL — FSM: uid → city → type → transfer
+# ADDING TERRITORIAL — 24H INVITE LINK WIZARD: city → type → transfer prompt → generate link
 async def developer_add_territorial_start(callback: CallbackQuery, state: FSMContext):
-    if not await _ensure_developer(callback):
-        return
-    await _edit_or_answer(
-        callback.message,
-        "Введіть Telegram ID (UID) нового територіала:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Скасувати", callback_data="dev_territorials_menu")]])
-    )
-    await state.set_state(DeveloperStates.waiting_add_territorial_uid)
-    await callback.answer()
-
-async def developer_add_territorial_uid(message: Message, state: FSMContext):
-    try:
-        uid = int(message.text.strip())
-    except ValueError:
-        await message.answer("Будь ласка, введіть коректний числовий UID.")
+    """Початок створення інвайт-посилання для Територіала (тільки для Адміністраторів)."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or not is_admin:
+        await callback.answer("Ця дія доступна лише Адміністратору.", show_alert=True)
         return
 
-    await state.update_data(t_uid=uid)
+    await state.clear()
     cities = await get_all_cities()
-
     if not cities:
-        await message.answer("У базі немає міст. Додайте міста спочатку.")
-        await state.clear()
+        await callback.answer("У базі немає міст. Додайте міста спочатку.", show_alert=True)
         return
 
     buttons = []
     for c in cities:
         buttons.append([InlineKeyboardButton(text=c['name'], callback_data=f"dev_t_city:{c['id']}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_territorials_menu")])
 
-    await message.answer(
-        "Оберіть місто для цього територіала:",
+    await _edit_or_answer(
+        callback.message,
+        "🗺 <b>Створення посилання для Територіала</b>\n\nОберіть місто для цього територіала:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     await state.set_state(DeveloperStates.waiting_add_territorial_city)
+    await callback.answer()
 
 async def developer_add_territorial_city(callback: CallbackQuery, state: FSMContext):
+    """Обробляє вибір міста і пропонує обрати тип територіала."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or not is_admin:
+        await callback.answer("Ця дія доступна лише Адміністратору.", show_alert=True)
+        return
+
     city_id = int(callback.data.split(":")[1])
     city_data = await get_city_by_id(city_id)
     city_name = city_data['name']
@@ -7370,19 +7455,27 @@ async def developer_add_territorial_city(callback: CallbackQuery, state: FSMCont
                 text=f"{label} ({code})",
                 callback_data=f"dev_t_type:{code}"
             )])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_territorial_add")])
 
     warning = ""
     if existing_types:
         warning = f"\n\n⚠️ У місті <b>{city_name}</b> вже є: {', '.join(existing_types)}."
 
-    await callback.message.edit_text(
-        f"Оберіть тип Територіала для міста <b>{city_name}</b>:{warning}",
+    await _edit_or_answer(
+        callback.message,
+        f"🗺 <b>Створення посилання для Територіала</b>\n\nОберіть тип Територіала для міста <b>{city_name}</b>:{warning}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     await state.set_state(DeveloperStates.waiting_add_territorial_type)
     await callback.answer()
 
 async def developer_add_territorial_type(callback: CallbackQuery, state: FSMContext):
+    """Обробляє вибір типу територіала та запитує про перенесення керівників міста."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or not is_admin:
+        await callback.answer("Ця дія доступна лише Адміністратору.", show_alert=True)
+        return
+
     t_type = callback.data.split(":")[1]  # "ТЗ" або "ВВ"
     await state.update_data(t_type=t_type)
     data = await state.get_data()
@@ -7390,38 +7483,73 @@ async def developer_add_territorial_type(callback: CallbackQuery, state: FSMCont
 
     buttons = [
         [InlineKeyboardButton(text="✅ Так, перенести", callback_data="dev_t_transfer:yes")],
-        [InlineKeyboardButton(text="❌ Ні, залишити як є", callback_data="dev_t_transfer:no")]
+        [InlineKeyboardButton(text="❌ Ні, залишити як є", callback_data="dev_t_transfer:no")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_territorial_add")]
     ]
 
     type_label = TERRITORIAL_TYPES.get(t_type, t_type)
-    await callback.message.edit_text(
-        f"Перенести <b>всіх керівників</b> міста <b>{city_name}</b> під управління цього Територіала ({type_label})?\n\n"
-        f"💡 Після перенесення можна перепривʼязати окремих керівників вручну.",
+    await _edit_or_answer(
+        callback.message,
+        f"🗺 <b>Створення посилання для Територіала</b>\n\n"
+        f"Перенести <b>всіх керівників</b> міста <b>{city_name}</b> під управління цього Територіала ({type_label}) після його реєстрації?\n\n"
+        f"💡 Після проходження реєстрації за посиланням керівники міста автоматично закріпляться за новим територіалом.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     await state.set_state(DeveloperStates.waiting_add_territorial_transfer)
     await callback.answer()
 
 async def developer_add_territorial_finish(callback: CallbackQuery, state: FSMContext):
+    """Генерує 24-годинний інвайт-токен та виводить посилання для Територіала."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or not is_admin:
+        await callback.answer("Ця дія доступна лише Адміністратору.", show_alert=True)
+        return
+
     transfer = callback.data.split(":")[1] == "yes"
     data = await state.get_data()
-    uid = data.get("t_uid")
     city = data.get("t_city")
     t_type = data.get("t_type")
+    creator_id = callback.from_user.id
 
-    await add_manager(uid, "Територіал", city=city, territorial_type=t_type)
+    extra_data = {
+        "territorial_type": t_type,
+        "transfer_on_reg": 1 if transfer else 0
+    }
 
-    if transfer:
-        await reassign_city_managers_to_territorial(city, uid)
+    token = await generate_token(
+        manager_id=creator_id,
+        role="Територіал",
+        city=city,
+        shop=None,
+        expires_in_hours=24,
+        extra_data=extra_data,
+        transfer_on_reg=1 if transfer else 0
+    )
+
+    bot_user = await callback.bot.get_me()
+    bot_username = bot_user.username
+    invite_link = f"https://t.me/{bot_username}?start={creator_id}-{token}"
 
     type_label = TERRITORIAL_TYPES.get(t_type, t_type)
-    await callback.message.edit_text(
-        f"✅ Територіала <b>{type_label} ({t_type})</b> для міста <b>{city}</b> успішно додано!" +
-        ("\n👔 Всіх керівників міста перенесено." if transfer else ""),
-        reply_markup=_territorials_menu_keyboard()
+    transfer_label = "✅ Так (автоматично при реєстрації)" if transfer else "❌ Ні (залишити як є)"
+
+    text = (
+        f"🔗 <b>Посилання для запрошення Територіала створено!</b>\n\n"
+        f"🏙️ <b>Місто:</b> {city}\n"
+        f"💼 <b>Тип:</b> {type_label} ({t_type})\n"
+        f"👔 <b>Перенесення керівників міста:</b> {transfer_label}\n"
+        f"⏱️ <b>Термін дії:</b> 24 години\n\n"
+        f"Надішліть це посилання майбутньому територіалу для проходження реєстрації:\n"
+        f"<code>{invite_link}</code>"
     )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ До списку територіалів", callback_data="dev_territorials_menu")]
+    ])
+
     await state.clear()
-    await callback.answer()
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await callback.answer("✅ Посилання успішно згенеровано!", show_alert=True)
 
 
 
@@ -7713,7 +7841,6 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_territorial_del_confirm, lambda c: c.data and c.data.startswith("dev_territorial_del_confirm:"))
 
     dp.callback_query.register(developer_add_territorial_start, lambda c: c.data == "dev_territorial_add")
-    dp.message.register(developer_add_territorial_uid, DeveloperStates.waiting_add_territorial_uid)
     dp.callback_query.register(developer_add_territorial_city, DeveloperStates.waiting_add_territorial_city, lambda c: c.data and c.data.startswith("dev_t_city:"))
     dp.callback_query.register(developer_add_territorial_type, DeveloperStates.waiting_add_territorial_type, lambda c: c.data and c.data.startswith("dev_t_type:"))
     dp.callback_query.register(developer_add_territorial_finish, DeveloperStates.waiting_add_territorial_transfer, lambda c: c.data and c.data.startswith("dev_t_transfer:"))
@@ -7791,11 +7918,11 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_managers_pagination_handler, lambda c: c.data and c.data.startswith("dev_mgr_page:"))
     dp.callback_query.register(developer_list_managers, lambda c: c.data == "dev_managers_list")
     dp.callback_query.register(developer_request_add_manager, lambda c: c.data == "dev_add_manager")
-    dp.message.register(developer_process_add_manager_id, DeveloperStates.waiting_add_manager_id)
-    dp.message.register(developer_process_add_manager_name, DeveloperStates.waiting_add_manager_name) # NEW
-    dp.callback_query.register(developer_process_add_manager_city, DeveloperStates.waiting_add_manager_city, lambda c: c.data.startswith("dev_mgr_city_select:"))
-    dp.callback_query.register(developer_process_shop_selection, DeveloperStates.waiting_add_manager_shops, lambda c: c.data.startswith("dev_mgr_shop_toggle:"))
-    dp.callback_query.register(developer_finish_shop_selection, DeveloperStates.waiting_add_manager_shops, lambda c: c.data == "dev_mgr_shop_done")
+    dp.callback_query.register(developer_process_add_manager_city, lambda c: c.data and c.data.startswith("dev_mgr_city_select:"))
+    dp.callback_query.register(developer_process_shop_selection, lambda c: c.data and c.data.startswith("dev_mgr_shop_toggle:"))
+    dp.callback_query.register(developer_finish_shop_selection, lambda c: c.data == "dev_mgr_shop_done")
+    dp.callback_query.register(developer_mgr_link_transfer_choice, lambda c: c.data and c.data.startswith("dev_mgr_link_tr:"))
+    dp.callback_query.register(developer_mgr_back_to_shops, lambda c: c.data == "dev_mgr_back_to_shops")
     dp.callback_query.register(developer_remove_manager_menu, lambda c: c.data == "dev_remove_manager_menu")
     dp.callback_query.register(developer_remove_manager, lambda c: c.data and c.data.startswith("mgr_remove:"))
     dp.callback_query.register(manager_cancel_add, lambda c: c.data == "mgr_cancel_add")

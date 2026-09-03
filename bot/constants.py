@@ -72,6 +72,11 @@ AVAILABLE_SHOPS = {
 
 CONTENT_TYPES = ["comic", "info", "text"]
 
+TERRITORIAL_TYPES = {
+    "ТЗ": "🏪 Торговий зал",
+    "ВВ": "🍞 Власне виробництво",
+}
+
 
 def is_valid_role(role: Optional[str]) -> bool:
     """
@@ -91,6 +96,7 @@ __all__ = [
     "AVAILABLE_CITIES",
     "AVAILABLE_SHOPS",
     "CONTENT_TYPES",
+    "TERRITORIAL_TYPES",
     "is_valid_role",
     "is_valid_city",
 ]
