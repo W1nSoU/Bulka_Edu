@@ -9,6 +9,7 @@ from typing import Optional
 
 import pytz
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.config import TIMEZONE
@@ -224,6 +225,10 @@ async def send_daily_test_failure_report_to_manager(bot: Bot, manager_id: int, i
     try:
         await bot.send_message(manager_id, "\n".join(text_lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
         return True
+    except (TelegramBadRequest, TelegramForbiddenError) as exc:
+        from bot.services.logger import get_logger
+        get_logger().warning(f"Could not send daily test failure report to manager {manager_id} (chat not found or blocked: {exc})")
+        return False
     except Exception as exc:
         from bot.services.logger import get_logger
         get_logger().error(f"Failed to send daily test failure report to manager {manager_id}: {exc}", exc_info=True)
@@ -361,7 +366,10 @@ async def send_manager_lagging_report(bot: Bot, manager_id: int, interns: list) 
                 continue
                 
             from bot.services.logger import get_logger
-            get_logger().error(f"Failed to send lagging report to manager {manager_id}: {e}", exc_info=True)
+            if isinstance(e, (TelegramBadRequest, TelegramForbiddenError)):
+                get_logger().warning(f"Could not send lagging report to manager {manager_id} (chat not found or blocked: {e})")
+            else:
+                get_logger().error(f"Failed to send lagging report to manager {manager_id}: {e}", exc_info=True)
             return False
     return False
 

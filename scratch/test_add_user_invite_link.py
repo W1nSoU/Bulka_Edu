@@ -23,6 +23,15 @@ class TestAddUserInviteLink(unittest.IsolatedAsyncioTestCase):
         await init_db()
         await init_managers_db()
         await init_tokens_db()
+        self.created_tokens = []
+
+    async def asyncTearDown(self):
+        import aiosqlite
+        from database.tokens import TOKENS_DB_PATH
+        async with aiosqlite.connect(TOKENS_DB_PATH) as db:
+            for t in self.created_tokens:
+                await db.execute("DELETE FROM tokens WHERE token = ?", (t,))
+            await db.commit()
 
     def test_users_menu_keyboard_has_add_button(self):
         """Admin and Territorial keyboards should have '➕ Додати' button."""
@@ -95,6 +104,7 @@ class TestAddUserInviteLink(unittest.IsolatedAsyncioTestCase):
             # Format: https://t.me/Bulka_Test_Bot?start={creator_id}-{token}
             start_param = sent_text.split("start=")[1].split("</code>")[0]
             creator_id_str, token_str = start_param.split("-")
+            self.created_tokens.append(token_str)
             self.assertEqual(int(creator_id_str), MAIN_DEVELOPER_ID)
 
             # Verify token in database

@@ -143,6 +143,8 @@ async def run_tests():
     print("\n6. Cleaning up test data...")
     await delete_manager_by_uid(test_trainee_mgr_uid)
     await delete_manager_by_uid(test_territorial_uid)
+    await delete_user(test_trainee_mgr_uid)
+    await delete_user(test_territorial_uid)
     print("✅ Cleaned up!")
 
     print("\n🎉 ALL TESTS PASSED SUCCESSFULLY! Manager Training & Trainee Manager role works 100% as specified.")

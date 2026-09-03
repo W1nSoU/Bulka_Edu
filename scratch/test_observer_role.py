@@ -16,6 +16,7 @@ from database.managers import (
     is_territorial_user
 )
 from database.hr import is_privileged_user, is_developer_user
+from database.users import delete_user
 from bot.menus.developer import (
     _check_access,
     _ensure_developer,
@@ -172,9 +173,19 @@ async def run_tests():
     # 9. Test Deletion of Observer
     print("\n9. Testing Deletion of Observer...")
     await delete_observer_by_uid(test_obs_uid)
+    await delete_user(test_obs_uid)
+    import aiosqlite
+    from database.tokens import TOKENS_DB_PATH
+    from database.managers import MANAGERS_DB_PATH
+    async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+        await db.execute("DELETE FROM managers WHERE uid = ?", (test_obs_uid,))
+        await db.commit()
+    async with aiosqlite.connect(TOKENS_DB_PATH) as db:
+        await db.execute("DELETE FROM tokens WHERE manager_id = ?", (test_admin_uid,))
+        await db.commit()
     is_obs_after_del = await is_observer_user(test_obs_uid)
     assert is_obs_after_del is False, "Observer should no longer exist after deletion"
-    print("✅ Deletion verified!")
+    print("✅ Deletion and cleanup verified!")
 
     print("\n🎉 ALL TESTS PASSED SUCCESSFULLY! Role 'Наглядач' works 100% as specified.")
 
