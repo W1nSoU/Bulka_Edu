@@ -249,13 +249,18 @@ def _admin_cho_keyboard(is_main_dev: bool, is_admin: bool, is_territorial: bool,
         buttons.append([InlineKeyboardButton(text="📚 Навчальні матеріали", callback_data="dev_main_study")])
     buttons.append([InlineKeyboardButton(text="📊 Аналітика", callback_data="dev_main_analyt")])
     buttons.append([InlineKeyboardButton(text="👥 Команда Bulka", callback_data="dev_main_team")])
-    if is_admin:
+    if is_admin or is_observer:
         buttons.append([InlineKeyboardButton(text="🛠 Інше", callback_data="dev_main_other")])
     buttons.append([InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def _admin_study_keyboard() -> InlineKeyboardMarkup:
+def _admin_study_keyboard(is_observer: bool = False) -> InlineKeyboardMarkup:
+    row3 = []
+    if not is_observer:
+        row3.append(InlineKeyboardButton(text="📚 Змінити змісти", callback_data="dev_syllabus_menu"))
+    row3.append(InlineKeyboardButton(text="🧠 Нагадати тему", callback_data="remind_topic_global"))
+
     buttons = [
         [
             InlineKeyboardButton(text="📝 Матеріали", callback_data="dev_materials_menu"),
@@ -265,10 +270,7 @@ def _admin_study_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📝 Тести", callback_data="dev_tests_menu"),
             InlineKeyboardButton(text="🖼 Фото", callback_data="dev_photos_menu")
         ],
-        [
-            InlineKeyboardButton(text="📚 Змінити змісти", callback_data="dev_syllabus_menu"),
-            InlineKeyboardButton(text="🧠 Нагадати тему", callback_data="remind_topic_global")
-        ],
+        row3,
         [InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -310,21 +312,24 @@ def _admin_team_keyboard(is_admin: bool, is_territorial: bool, is_observer: bool
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def _admin_other_keyboard() -> InlineKeyboardMarkup:
+def _admin_other_keyboard(is_observer: bool = False) -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton(text="👔 Посади", callback_data="dev_positions_menu"),
             InlineKeyboardButton(text="🏙 Міста", callback_data="dev_cities_menu")
         ],
-        [
+    ]
+    if is_observer:
+        buttons.append([InlineKeyboardButton(text="💚 Health Status", callback_data="dev_health_status")])
+    else:
+        buttons.append([
             InlineKeyboardButton(text="🎟 Токени", callback_data="dev_tokens_menu"),
             InlineKeyboardButton(text="💚 Health Status", callback_data="dev_health_status")
-        ],
-        [
+        ])
+        buttons.append([
             InlineKeyboardButton(text="⚙️ Сервісні функції", callback_data="dev_service_functions_menu")
-        ],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")]
-    ]
+        ])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -446,7 +451,7 @@ async def dev_main_study_handler(callback: CallbackQuery):
         callback,
         "img/admin/admin_study.jpg",
         "📚 <b>Навчальні матеріали</b>",
-        _admin_study_keyboard()
+        _admin_study_keyboard(is_observer=is_observer)
     )
 
 
@@ -478,14 +483,15 @@ async def dev_main_team_handler(callback: CallbackQuery):
 
 async def dev_main_other_handler(callback: CallbackQuery):
     has_access, is_admin, is_territorial = await _check_access(callback)
-    if not has_access or not is_admin:
+    is_observer = await is_observer_user(callback.from_user.id)
+    if not has_access or (not is_admin and not is_observer):
         await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
         return
     await _show_admin_photo_menu(
         callback,
         "img/admin/admin_tools.jpg",
         "🛠 <b>Інше</b>",
-        _admin_other_keyboard()
+        _admin_other_keyboard(is_observer=is_observer)
     )
 
 
@@ -1710,16 +1716,23 @@ async def _show_user_profile_card(
         return
 
     card_back_cb = f"dev_u_cback:{ret_code}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{user_id}:{ret_code}"),
-            InlineKeyboardButton(text="✍️ Змінити", callback_data=f"dev_user_modify:{user_id}:{ret_code}")
-        ],
-        [
-            InlineKeyboardButton(text="❌ Видалити", callback_data=f"dev_user_delete_confirm:{user_id}:{ret_code}"),
-            InlineKeyboardButton(text="⬅️ Назад", callback_data=card_back_cb)
-        ]
-    ])
+    viewer_id = event.from_user.id
+    is_obs = await is_observer_user(viewer_id)
+    if is_obs:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=card_back_cb)]
+        ])
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{user_id}:{ret_code}"),
+                InlineKeyboardButton(text="✍️ Змінити", callback_data=f"dev_user_modify:{user_id}:{ret_code}")
+            ],
+            [
+                InlineKeyboardButton(text="❌ Видалити", callback_data=f"dev_user_delete_confirm:{user_id}:{ret_code}"),
+                InlineKeyboardButton(text="⬅️ Назад", callback_data=card_back_cb)
+            ]
+        ])
 
     photo_input = await get_user_avatar_input(bot, user_id)
     if isinstance(event, CallbackQuery):
@@ -3495,7 +3508,7 @@ def _materials_menu_keyboard() -> InlineKeyboardMarkup:
 
 async def developer_materials_menu(callback: CallbackQuery):
     """Головне меню редагування матеріалів — вибір посади."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     
     # Використовуємо AVAILABLE_ROLES з constants
@@ -3552,7 +3565,7 @@ async def _build_dev_days_picker_keyboard(role: str, callback_prefix: str, back_
 
 async def developer_materials_select_day(callback: CallbackQuery, state: FSMContext):
     """Вибір дня для редагування."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     
     try:
@@ -3582,7 +3595,7 @@ async def developer_materials_select_day(callback: CallbackQuery, state: FSMCont
 
 async def developer_materials_select_type(callback: CallbackQuery, state: FSMContext):
     """Вибір типу контенту (текст/відео)."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     
     try:
@@ -3651,7 +3664,7 @@ def parse_material_content(content: str) -> list[dict]:
 
 async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
     """Показ поточного матеріалу з можливістю редагування."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     
     try:
@@ -3667,6 +3680,7 @@ async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
     
     # Отримуємо матеріал з БД
     material = await get_material_by_role_day_type(role, day, content_type)
+    is_obs = await is_observer_user(callback.from_user.id)
     
     if material:
         current_content = material.get("content", "")
@@ -3685,40 +3699,43 @@ async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
             else:
                 preview_text = "(порожньо)"
 
+            hint = "" if is_obs else "\n\nНатисніть «Редагувати», щоб змінити текст."
             text = (
                 f"📝 <b>Текстовий матеріал</b>\n\n"
                 f"Посада: <b>{role}</b>\n"
                 f"День: <b>{day}</b>\n\n"
                 f"<b>Поточний контент:</b>\n"
-                f"<code>{preview_text}</code>\n\n"
-                f"Натисніть «Редагувати», щоб змінити текст."
+                f"<code>{preview_text}</code>"
+                f"{hint}"
             )
         else:
             preview = current_url if current_url else "(не встановлено)"
+            hint = "" if is_obs else "\n\nНатисніть «Редагувати», щоб змінити посилання."
             text = (
                 f"🎥 <b>Відео матеріал</b>\n\n"
                 f"Посада: <b>{role}</b>\n"
                 f"День: <b>{day}</b>\n\n"
                 f"<b>Поточне посилання:</b>\n"
-                f"<code>{preview}</code>\n\n"
-                f"Натисніть «Редагувати», щоб змінити посилання."
+                f"<code>{preview}</code>"
+                f"{hint}"
             )
     else:
         await state.update_data(edit_material_id=None)
+        hint = "" if is_obs else "\n\nНатисніть «Редагувати», щоб створити новий матеріал."
         text = (
             f"📝 <b>Матеріал не знайдено</b>\n\n"
             f"Посада: <b>{role}</b>\n"
             f"День: <b>{day}</b>\n"
-            f"Тип: <b>{content_type}</b>\n\n"
-            f"Натисніть «Редагувати», щоб створити новий матеріал."
+            f"Тип: <b>{content_type}</b>"
+            f"{hint}"
         )
     
     buttons = []
-        
-    buttons.append([InlineKeyboardButton(text="➕ Додати навчання", callback_data=f"dev_mat_edit|{content_type}")])
-    if material:
-        buttons.append([InlineKeyboardButton(text="➕ Доповнити", callback_data=f"dev_mat_complement|{content_type}")])
-        buttons.append([InlineKeyboardButton(text="🔄 Змінити діапазон сторінок", callback_data=f"dev_mat_replace|{content_type}")])
+    if not is_obs:
+        buttons.append([InlineKeyboardButton(text="➕ Додати навчання", callback_data=f"dev_mat_edit|{content_type}")])
+        if material:
+            buttons.append([InlineKeyboardButton(text="➕ Доповнити", callback_data=f"dev_mat_complement|{content_type}")])
+            buttons.append([InlineKeyboardButton(text="🔄 Змінити діапазон сторінок", callback_data=f"dev_mat_replace|{content_type}")])
     buttons.append([InlineKeyboardButton(text="🔍 Повний перегляд", callback_data=f"dev_mat_full_view|{content_type}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_mat_day|{day}")])
     
@@ -3732,6 +3749,9 @@ async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
 async def developer_material_complement_menu(callback: CallbackQuery, state: FSMContext):
     """Shows the menu to choose how to complement the material."""
     if not await _ensure_developer(callback): return
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
     
     try:
         _, content_type = callback.data.split("|", 1)
@@ -4278,7 +4298,7 @@ async def developer_material_menu_back(callback: CallbackQuery, state: FSMContex
     await state.set_state(None)
     await developer_materials_view(callback, state) # Go back to material view
 
-def _get_dev_pagination_keyboard(current_page, total_pages, material_id, day, content_type):
+def _get_dev_pagination_keyboard(current_page, total_pages, material_id, day, content_type, is_observer: bool = False):
     buttons = []
     
     # Navigation row (arrows)
@@ -4295,19 +4315,26 @@ def _get_dev_pagination_keyboard(current_page, total_pages, material_id, day, co
     if nav_row:
         buttons.append(nav_row)
     
-    # "Fix" button on every page
-    buttons.append([InlineKeyboardButton(text="🛠 Виправити", callback_data=f"dev_mat_fix:{material_id}:{day}:{current_page}")])
-    # "Delete" button on every page
-    buttons.append([InlineKeyboardButton(text="🗑 Видалити сторінку", callback_data=f"dev_mat_del_req:{material_id}:{day}:{current_page}:{content_type}")])
+    if not is_observer:
+        # "Fix" button on every page
+        buttons.append([InlineKeyboardButton(text="🛠 Виправити", callback_data=f"dev_mat_fix:{material_id}:{day}:{current_page}")])
+        # "Delete" button on every page
+        buttons.append([InlineKeyboardButton(text="🗑 Видалити сторінку", callback_data=f"dev_mat_del_req:{material_id}:{day}:{current_page}:{content_type}")])
 
     # Action buttons: on the last page OR if there is only 1 page
+    back_cb = "dev_photos_menu" if content_type == "photo_files" else f"dev_mat_type|{content_type}"
     if current_page == total_pages - 1:
-        buttons.append([InlineKeyboardButton(text="➕ Додати навчання", callback_data=f"dev_mat_edit|{content_type}")])
-        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_mat_type|{content_type}")])
+        if not is_observer:
+            buttons.append([InlineKeyboardButton(text="➕ Додати навчання", callback_data=f"dev_mat_edit|{content_type}")])
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)])
+    elif is_observer:
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)])
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 async def developer_pagination_handler(callback: CallbackQuery):
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
     try:
         _, mid_str, day_str, page_str, ctype = callback.data.split(":")
         material_id = int(mid_str)
@@ -4337,8 +4364,9 @@ async def developer_pagination_handler(callback: CallbackQuery):
         from bot.utils.paginator import split_text
         pages = [{"text": p} for p in split_text(material.get("content", ""))]
 
+    is_obs = await is_observer_user(callback.from_user.id)
     if 0 <= page < len(pages):
-        kb = _get_dev_pagination_keyboard(page, len(pages), material_id, day, ctype)
+        kb = _get_dev_pagination_keyboard(page, len(pages), material_id, day, ctype, is_observer=is_obs)
         
         page_data = pages[page]
         text = page_data.get("text", "")
@@ -4368,7 +4396,7 @@ async def developer_pagination_handler(callback: CallbackQuery):
 
 async def developer_materials_full_view(callback: CallbackQuery, state: FSMContext):
     """Надсилає повний текст матеріалу розробнику з пагінацією."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
 
     try:
@@ -4406,7 +4434,8 @@ async def developer_materials_full_view(callback: CallbackQuery, state: FSMConte
         pages = [{"text": "(Матеріал порожній)"}]
     
     # Show page 0
-    kb = _get_dev_pagination_keyboard(0, len(pages), material_id, day, content_type)
+    is_obs = await is_observer_user(callback.from_user.id)
+    kb = _get_dev_pagination_keyboard(0, len(pages), material_id, day, content_type, is_observer=is_obs)
     
     # Always delete the old message (which might be a menu) and send a new message
     try:
@@ -4624,7 +4653,7 @@ async def _finalize_video_update(message: Message, state: FSMContext, video_file
 
 async def developer_tests_menu(callback: CallbackQuery):
     """Головне меню редагування тестів — вибір посади."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     
     buttons = []
@@ -4648,7 +4677,7 @@ async def developer_tests_menu(callback: CallbackQuery):
 
 async def developer_tests_select_day(callback: CallbackQuery, state: FSMContext):
     """Вибір дня для тесту."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     
     try:
@@ -4675,7 +4704,7 @@ async def developer_tests_select_day(callback: CallbackQuery, state: FSMContext)
 
 async def developer_videos_select_day(callback: CallbackQuery, state: FSMContext):
     """Вибір дня для редагування відео."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     
     try:
@@ -4705,7 +4734,7 @@ async def developer_videos_select_day(callback: CallbackQuery, state: FSMContext
 
 async def developer_tests_view(callback: CallbackQuery, state: FSMContext, day: Optional[int] = None, role_index: Optional[int] = None):
     """Перегляд поточного тесту."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     
     data = await state.get_data()
@@ -4730,6 +4759,7 @@ async def developer_tests_view(callback: CallbackQuery, state: FSMContext, day: 
     await state.update_data(test_day=day, test_role=role, test_role_index=role_index)
     
     test_material = await get_test_by_role_and_day(role, day)
+    is_obs = await is_observer_user(callback.from_user.id)
     
     display_text = "Тест ще не створено."
     is_enabled = True # Default enabled
@@ -4747,21 +4777,26 @@ async def developer_tests_view(callback: CallbackQuery, state: FSMContext, day: 
     status_icon = "✅" if is_enabled else "zzz"
     status_text_display = "АКТИВНИЙ" if is_enabled else "ВИМКНЕНИЙ (не враховується)"
     
+    hint = "" if is_obs else "\n\nНатисніть «Редагувати», щоб змінити або створити тест."
     text = (
         f"📝 <b>Тест: {role} — День {day}</b>\n"
         f"Статус: {status_icon} <b>{status_text_display}</b>\n\n"
-        f"{display_text}\n\n"
-        f"Натисніть «Редагувати», щоб змінити або створити тест."
+        f"{display_text}"
+        f"{hint}"
     )
     
-    toggle_btn_text = "🔴 Вимкнути тест" if is_enabled else "🟢 Увімкнути тест"
-    toggle_action = "disable" if is_enabled else "enable"
-    
-    buttons = [
-        [InlineKeyboardButton(text="✏️ Редагувати", callback_data="dev_test_edit")],
-        [InlineKeyboardButton(text=toggle_btn_text, callback_data=f"dev_test_toggle:{toggle_action}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_test_role|{role_index}")]
-    ]
+    if is_obs:
+        buttons = [
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_test_role|{role_index}")]
+        ]
+    else:
+        toggle_btn_text = "🔴 Вимкнути тест" if is_enabled else "🟢 Увімкнути тест"
+        toggle_action = "disable" if is_enabled else "enable"
+        buttons = [
+            [InlineKeyboardButton(text="✏️ Редагувати", callback_data="dev_test_edit")],
+            [InlineKeyboardButton(text=toggle_btn_text, callback_data=f"dev_test_toggle:{toggle_action}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_test_role|{role_index}")]
+        ]
     
     await _edit_or_answer(
         callback.message,
@@ -4772,6 +4807,9 @@ async def developer_tests_view(callback: CallbackQuery, state: FSMContext, day: 
 
 async def developer_test_toggle(callback: CallbackQuery, state: FSMContext):
     if not await _ensure_developer(callback): return
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
     
     try:
         action = callback.data.split(":")[1]
@@ -4806,7 +4844,7 @@ async def developer_test_toggle(callback: CallbackQuery, state: FSMContext):
 
 async def developer_videos_view(callback: CallbackQuery, state: FSMContext):
     """Показ поточного відео матеріалу з можливістю редагування."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     
     try:
@@ -4822,6 +4860,7 @@ async def developer_videos_view(callback: CallbackQuery, state: FSMContext):
     
     # Отримуємо матеріал з БД, використовуючи новий тип для завантажених відео
     video_material = await get_material_by_role_day_type(role, day, "video_files")
+    is_obs = await is_observer_user(callback.from_user.id)
     
     current_file_ids = []
     video_material_id = None
@@ -4836,26 +4875,33 @@ async def developer_videos_view(callback: CallbackQuery, state: FSMContext):
     
     if current_file_ids:
         preview = f"Завантажено відеофайлів: {len(current_file_ids)}"
+        hint = "" if is_obs else "\n\nНатисніть «Редагувати», щоб змінити відеофайли."
         text = (
             f"🎥 <b>Відео матеріал</b>\n\n"
             f"Посада: <b>{role}</b>\n"
             f"День: <b>{day}</b>\n\n"
             f"<b>Поточний контент:</b>\n"
-            f"{preview}\n\n"
-            f"Натисніть «Редагувати», щоб змінити відеофайли."
+            f"{preview}"
+            f"{hint}"
         )
     else:
+        hint = "" if is_obs else "\n\nНатисніть «Редагувати», щоб завантажити новий відео матеріал."
         text = (
             f"🎥 <b>Відео матеріал не знайдено</b>\n\n"
             f"Посада: <b>{role}</b>\n"
-            f"День: <b>{day}</b>\n\n"
-            f"Натисніть «Редагувати», щоб завантажити новий відео матеріал."
+            f"День: <b>{day}</b>"
+            f"{hint}"
         )
     
-    buttons = [
-        [InlineKeyboardButton(text="✏️ Редагувати", callback_data="dev_video_edit")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_video_role|{data.get('edit_video_role_index')}")],
-    ]
+    if is_obs:
+        buttons = [
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_video_role|{data.get('edit_video_role_index')}")]
+        ]
+    else:
+        buttons = [
+            [InlineKeyboardButton(text="✏️ Редагувати", callback_data="dev_video_edit")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_video_role|{data.get('edit_video_role_index')}")],
+        ]
     
     await _edit_or_answer(
         callback.message,
@@ -4868,6 +4914,9 @@ async def developer_videos_view(callback: CallbackQuery, state: FSMContext):
 async def developer_tests_edit_start(callback: CallbackQuery, state: FSMContext):
     """Початок редагування тесту."""
     if not await _ensure_developer(callback):
+        return
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
         return
         
     data = await state.get_data()
@@ -4905,6 +4954,9 @@ async def developer_tests_edit_start(callback: CallbackQuery, state: FSMContext)
 async def developer_video_edit_start(callback: CallbackQuery, state: FSMContext):
     """Початок редагування відео — запит нових відеофайлів."""
     if not await _ensure_developer(callback):
+        return
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
         return
     
     data = await state.get_data()
@@ -5024,7 +5076,7 @@ async def developer_process_video_uploads(message: Message, state: FSMContext):
 
 async def developer_videos_menu(callback: CallbackQuery):
     """Головне меню редагування відео матеріалів — вибір посади."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     
     buttons = []
@@ -5048,7 +5100,7 @@ async def developer_videos_menu(callback: CallbackQuery):
 
 async def developer_photos_menu(callback: CallbackQuery):
     """Головне меню редагування фото матеріалів — вибір посади."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     
     buttons = []
@@ -5071,7 +5123,7 @@ async def developer_photos_menu(callback: CallbackQuery):
 
 async def developer_photos_select_day(callback: CallbackQuery, state: FSMContext):
     """Вибір дня для редагування фото."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     
     try:
@@ -5101,7 +5153,7 @@ async def developer_photos_select_day(callback: CallbackQuery, state: FSMContext
 
 async def developer_days_page_callback(callback: CallbackQuery, state: FSMContext):
     """Обробляє пагінацію вибору днів у панелі розробника."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     try:
         prefix, page_str = callback.data.split("|", 1)
@@ -5137,7 +5189,7 @@ async def developer_days_page_callback(callback: CallbackQuery, state: FSMContex
 
 async def developer_photos_view(callback: CallbackQuery, state: FSMContext):
     """Показ поточного фото матеріалу з можливістю редагування."""
-    if not await _ensure_developer(callback):
+    if not await _ensure_developer(callback, allow_observer=True):
         return
     
     try:
@@ -5153,6 +5205,7 @@ async def developer_photos_view(callback: CallbackQuery, state: FSMContext):
     
     # Отримуємо матеріал з БД, використовуючи новий тип для завантажених фото
     photo_material = await get_material_by_role_day_type(role, day, "photo_files")
+    is_obs = await is_observer_user(callback.from_user.id)
     
     current_file_ids = []
     photo_material_id = None
@@ -5169,30 +5222,43 @@ async def developer_photos_view(callback: CallbackQuery, state: FSMContext):
     
     if current_file_ids:
         preview = f"Завантажено фотофайлів: {len(current_file_ids)}"
+        hint = "" if is_obs else "\n\nНатисніть «Повний перегляд», щоб побачити або виправити фото."
         text = (
             f"🖼 <b>Фото матеріал</b>\n\n"
             f"Посада: <b>{role}</b>\n"
             f"День: <b>{day}</b>\n\n"
             f"<b>Поточний контент:</b>\n"
-            f"{preview}\n\n"
-            f"Натисніть «Повний перегляд», щоб побачити або виправити фото."
+            f"{preview}"
+            f"{hint}"
         )
-        buttons = [
-            [InlineKeyboardButton(text="➕ Додати навчання", callback_data="dev_photo_edit")],
-            [InlineKeyboardButton(text="🔍 Повний перегляд", callback_data="dev_mat_full_view|photo_files")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_photo_role|{data.get('edit_photo_role_index')}")],
-        ]
+        if is_obs:
+            buttons = [
+                [InlineKeyboardButton(text="🔍 Повний перегляд", callback_data="dev_mat_full_view|photo_files")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_photo_role|{data.get('edit_photo_role_index')}")],
+            ]
+        else:
+            buttons = [
+                [InlineKeyboardButton(text="➕ Додати навчання", callback_data="dev_photo_edit")],
+                [InlineKeyboardButton(text="🔍 Повний перегляд", callback_data="dev_mat_full_view|photo_files")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_photo_role|{data.get('edit_photo_role_index')}")],
+            ]
     else:
+        hint = "" if is_obs else "\n\nНатисніть «Додати навчання», щоб завантажити новий фото матеріал."
         text = (
             f"🖼 <b>Фото матеріал не знайдено</b>\n\n"
             f"Посада: <b>{role}</b>\n"
-            f"День: <b>{day}</b>\n\n"
-            f"Натисніть «Додати навчання», щоб завантажити новий фото матеріал."
+            f"День: <b>{day}</b>"
+            f"{hint}"
         )
-        buttons = [
-            [InlineKeyboardButton(text="➕ Додати навчання", callback_data="dev_photo_edit")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_photo_role|{data.get('edit_photo_role_index')}")],
-        ]
+        if is_obs:
+            buttons = [
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_photo_role|{data.get('edit_photo_role_index')}")],
+            ]
+        else:
+            buttons = [
+                [InlineKeyboardButton(text="➕ Додати навчання", callback_data="dev_photo_edit")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_photo_role|{data.get('edit_photo_role_index')}")],
+            ]
     
     await _edit_or_answer(
         callback.message,
@@ -5204,6 +5270,9 @@ async def developer_photos_view(callback: CallbackQuery, state: FSMContext):
 async def developer_photo_edit_start(callback: CallbackQuery, state: FSMContext):
     """Початок редагування фото — запит нових фотофайлів."""
     if not await _ensure_developer(callback):
+        return
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
         return
     
     data = await state.get_data()
@@ -7126,7 +7195,7 @@ async def developer_training_rejected_export(callback: CallbackQuery):
 # УПРАВЛІННЯ ПОСАДАМИ
 # ==============================================================================
 
-def _positions_keyboard(positions: list, page: int = 1) -> InlineKeyboardMarkup:
+def _positions_keyboard(positions: list, page: int = 1, is_observer: bool = False) -> InlineKeyboardMarkup:
     items_per_page = 6
     total_pages = (len(positions) - 1) // items_per_page + 1
     start_idx = (page - 1) * items_per_page
@@ -7147,17 +7216,19 @@ def _positions_keyboard(positions: list, page: int = 1) -> InlineKeyboardMarkup:
     if nav_row:
         buttons.append(nav_row)
 
-    buttons.append([InlineKeyboardButton(text="➕ Додати посаду", callback_data="dev_pos_add")])
+    if not is_observer:
+        buttons.append([InlineKeyboardButton(text="➕ Додати посаду", callback_data="dev_pos_add")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_main_other")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 async def dev_positions_menu(callback: CallbackQuery):
     positions = await get_all_positions()
+    is_obs = await is_observer_user(callback.from_user.id)
     await _edit_or_answer(
         callback.message,
-        "👔 <b>Управління посадами</b>\nОберіть посаду для редагування або додайте нову:",
-        reply_markup=_positions_keyboard(positions, 1)
+        "👔 <b>Управління посадами</b>\n" + ("Список доступних посад:" if is_obs else "Оберіть посаду для редагування або додайте нову:"),
+        reply_markup=_positions_keyboard(positions, 1, is_observer=is_obs)
     )
     await callback.answer()
 
@@ -7165,15 +7236,19 @@ async def dev_positions_menu(callback: CallbackQuery):
 async def dev_positions_page(callback: CallbackQuery):
     page = int(callback.data.split(":")[1])
     positions = await get_all_positions()
+    is_obs = await is_observer_user(callback.from_user.id)
     await _edit_or_answer(
         callback.message,
-        "👔 <b>Управління посадами</b>\nОберіть посаду для редагування або додайте нову:",
-        reply_markup=_positions_keyboard(positions, page)
+        "👔 <b>Управління посадами</b>\n" + ("Список доступних посад:" if is_obs else "Оберіть посаду для редагування або додайте нову:"),
+        reply_markup=_positions_keyboard(positions, page, is_observer=is_obs)
     )
     await callback.answer()
 
 
 async def dev_pos_add_start(callback: CallbackQuery, state: FSMContext):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
     await _edit_or_answer(
         callback.message,
         "Введіть назву нової посади:",
@@ -7251,6 +7326,7 @@ async def dev_pos_add_type_callback(callback: CallbackQuery, state: FSMContext):
     days = data.get('pos_days', 5)
     if not pos_name:
         await state.clear()
+        return
         await callback.answer("Дані сесії застаріли.", show_alert=True)
         return
 
@@ -7299,15 +7375,19 @@ async def dev_pos_view(callback: CallbackQuery):
         f"• Всього: {stats['total']}"
     )
     
-    other_type = "ВВ" if t_type == "ТЗ" else "ТЗ"
-    other_label = "🍞 Змінити на ВВ" if t_type == "ТЗ" else "🏪 Змінити на ТЗ"
-    
-    buttons = [
-        [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_pos_edit_name:{pos_id}")],
-        [InlineKeyboardButton(text="✏️ Змінити кількість днів", callback_data=f"dev_pos_edit_days:{pos_id}")],
-        [InlineKeyboardButton(text=other_label, callback_data=f"dev_pos_toggle_type:{pos_id}:{other_type}")],
-        [InlineKeyboardButton(text="🔙 До списку посад", callback_data="dev_positions_menu")]
-    ]
+    if await is_observer_user(callback.from_user.id):
+        buttons = [
+            [InlineKeyboardButton(text="🔙 До списку посад", callback_data="dev_positions_menu")]
+        ]
+    else:
+        other_type = "ВВ" if t_type == "ТЗ" else "ТЗ"
+        other_label = "🍞 Змінити на ВВ" if t_type == "ТЗ" else "🏪 Змінити на ТЗ"
+        buttons = [
+            [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_pos_edit_name:{pos_id}")],
+            [InlineKeyboardButton(text="✏️ Змінити кількість днів", callback_data=f"dev_pos_edit_days:{pos_id}")],
+            [InlineKeyboardButton(text=other_label, callback_data=f"dev_pos_toggle_type:{pos_id}:{other_type}")],
+            [InlineKeyboardButton(text="🔙 До списку посад", callback_data="dev_positions_menu")]
+        ]
     
     await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
@@ -7315,6 +7395,9 @@ async def dev_pos_view(callback: CallbackQuery):
 
 async def dev_pos_toggle_type(callback: CallbackQuery):
     """Перемикає тип посади між ТЗ та ВВ."""
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
     parts = callback.data.split(":")
     pos_id = int(parts[1])
     new_type = parts[2]  # 'ТЗ' або 'ВВ'
@@ -7354,6 +7437,9 @@ async def dev_pos_toggle_type(callback: CallbackQuery):
 
 
 async def dev_pos_edit_name_start(callback: CallbackQuery, state: FSMContext):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
     pos_id = int(callback.data.split(":")[1])
     pos = await get_position_by_id(pos_id)
     
@@ -7401,6 +7487,9 @@ async def dev_pos_edit_name_process(message: Message, state: FSMContext):
 
 
 async def dev_pos_edit_days_start(callback: CallbackQuery, state: FSMContext):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
     pos_id = int(callback.data.split(":")[1])
     pos = await get_position_by_id(pos_id)
     
@@ -7454,7 +7543,7 @@ async def dev_pos_edit_days_process(message: Message, state: FSMContext):
 # УПРАВЛІННЯ МІСТАМИ
 # ==============================================================================
 
-def _cities_keyboard(cities: list, page: int = 1) -> InlineKeyboardMarkup:
+def _cities_keyboard(cities: list, page: int = 1, is_observer: bool = False) -> InlineKeyboardMarkup:
     items_per_page = 10
     total_pages = (len(cities) - 1) // items_per_page + 1
     start_idx = (page - 1) * items_per_page
@@ -7475,17 +7564,19 @@ def _cities_keyboard(cities: list, page: int = 1) -> InlineKeyboardMarkup:
     if nav_row:
         buttons.append(nav_row)
 
-    buttons.append([InlineKeyboardButton(text="➕ Додати місто", callback_data="dev_city_add")])
+    if not is_observer:
+        buttons.append([InlineKeyboardButton(text="➕ Додати місто", callback_data="dev_city_add")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_main_other")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 async def dev_cities_menu(callback: CallbackQuery):
     cities = await get_all_cities()
+    is_obs = await is_observer_user(callback.from_user.id)
     await _edit_or_answer(
         callback.message,
-        "🏙 <b>Управління містами</b>\nОберіть місто для редагування або додайте нове:",
-        reply_markup=_cities_keyboard(cities, 1)
+        "🏙 <b>Управління містами</b>\n" + ("Список доступних міст:" if is_obs else "Оберіть місто для редагування або додайте нове:"),
+        reply_markup=_cities_keyboard(cities, 1, is_observer=is_obs)
     )
     await callback.answer()
 
@@ -7493,15 +7584,19 @@ async def dev_cities_menu(callback: CallbackQuery):
 async def dev_cities_page(callback: CallbackQuery):
     page = int(callback.data.split(":")[1])
     cities = await get_all_cities()
+    is_obs = await is_observer_user(callback.from_user.id)
     await _edit_or_answer(
         callback.message,
-        "🏙 <b>Управління містами</b>\nОберіть місто для редагування або додайте нове:",
-        reply_markup=_cities_keyboard(cities, page)
+        "🏙 <b>Управління містами</b>\n" + ("Список доступних міст:" if is_obs else "Оберіть місто для редагування або додайте нове:"),
+        reply_markup=_cities_keyboard(cities, page, is_observer=is_obs)
     )
     await callback.answer()
 
 
 async def dev_city_add_start(callback: CallbackQuery, state: FSMContext):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
     await _edit_or_answer(
         callback.message,
         "Введіть назву нового міста:",
@@ -7536,17 +7631,25 @@ async def dev_city_view(callback: CallbackQuery):
         
     text = f"🏙 <b>Місто:</b> {city['name']}"
     
-    buttons = [
-        [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_city_edit_name:{city_id}")],
-        [InlineKeyboardButton(text="🗑 Видалити місто", callback_data=f"dev_city_delete:{city_id}")],
-        [InlineKeyboardButton(text="🔙 До списку міст", callback_data="dev_cities_menu")]
-    ]
+    if await is_observer_user(callback.from_user.id):
+        buttons = [
+            [InlineKeyboardButton(text="🔙 До списку міст", callback_data="dev_cities_menu")]
+        ]
+    else:
+        buttons = [
+            [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_city_edit_name:{city_id}")],
+            [InlineKeyboardButton(text="🗑 Видалити місто", callback_data=f"dev_city_delete:{city_id}")],
+            [InlineKeyboardButton(text="🔙 До списку міст", callback_data="dev_cities_menu")]
+        ]
     
     await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 
 async def dev_city_edit_name_start(callback: CallbackQuery, state: FSMContext):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
     city_id = int(callback.data.split(":")[1])
     city = await get_city_by_id(city_id)
     
@@ -7585,6 +7688,9 @@ async def dev_city_edit_name_process(message: Message, state: FSMContext):
 
 
 async def dev_city_delete(callback: CallbackQuery):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
     city_id = int(callback.data.split(":")[1])
     city = await get_city_by_id(city_id)
     
@@ -7607,6 +7713,9 @@ async def dev_city_delete(callback: CallbackQuery):
 
 
 async def dev_city_delete_confirm(callback: CallbackQuery):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
     city_id = int(callback.data.split(":")[1])
     success = await delete_city(city_id)
     

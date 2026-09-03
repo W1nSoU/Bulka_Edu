@@ -2120,6 +2120,11 @@ async def profile_handler_router(callback: CallbackQuery):
         await developer_profile_handler(callback)
         return
 
+    is_observer = await is_observer_user(user_id)
+    if is_observer:
+        await observer_profile_handler(callback)
+        return
+
     manager_info = await get_manager_by_uid(user_id)
     
     if manager_info:
@@ -2160,6 +2165,53 @@ async def developer_profile_handler(callback: CallbackQuery):
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")]
+    ])
+    
+    photo_input = await get_user_avatar_input(callback.bot, user_id)
+    await _send_or_edit_card_photo(callback, photo_input, text, reply_markup=kb)
+
+
+async def observer_profile_handler(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_details = await get_user_details(user_id)
+    
+    from database.users import get_all_users
+    from database.managers import get_all_managers, get_manager_by_uid
+    from bot.utils import get_user_avatar_input, _send_or_edit_card_photo
+    
+    all_users = await get_all_users()
+    all_managers = await get_all_managers()
+    
+    interns_count = sum(1 for u in all_users if not u.get("is_worker"))
+    workers_count = sum(1 for u in all_users if u.get("is_worker"))
+    managers_count = len(all_managers)
+    total_users = len(all_users)
+    
+    manager_info = await get_manager_by_uid(user_id)
+    full_name = (
+        (manager_info.get("full_name") if manager_info else None)
+        or (user_details.get("full_name") if user_details else None)
+        or callback.from_user.full_name
+        or "Наглядач"
+    )
+    username = callback.from_user.username or (user_details.get("username") if user_details else None) or "немає"
+    username_str = f"@{username}" if username and username != "немає" else "немає"
+    
+    text = (
+        f"🍞 <b>Профіль наглядача-Булочки</b> 🍞\n\n"
+        f"👤 <b>{html.escape(full_name)}</b> ({username_str})\n"
+        f"💼 Посада: <b>Наглядач</b>\n\n"
+        f"📊 <b>Загальна статистика мережі:</b>\n"
+        f"— Всього зареєстровано: <b>{total_users}</b>\n"
+        f"— Активних стажерів: <b>{interns_count}</b>\n"
+        f"— Працівників мережі: <b>{workers_count}</b>\n"
+        f"— Керівників та наставників: <b>{managers_count}</b>\n\n"
+        f"👁️ <i>Режим спостереження: у вас є повний доступ до перегляду списків, аналітики та навчальних матеріалів.</i>"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Меню наглядача", callback_data="developer_menu")],
         [InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")]
     ])
     

@@ -111,8 +111,19 @@ async def run_tests():
     assert "dev_main_study" in cho_callbacks, "Observer should have access to study materials"
     assert "dev_main_analyt" in cho_callbacks, "Observer should have access to analytics"
     assert "dev_main_team" in cho_callbacks, "Observer should have access to team"
-    assert "dev_main_other" not in cho_callbacks, "Observer must NOT have access to 'Інше' (positions, cities, tokens, health)"
+    assert "dev_main_other" in cho_callbacks, "Observer should have access to 'Інше' (positions, cities, health) per user specification"
     print(" - Admin CHO keyboard: OK")
+
+    # Other keyboard
+    from bot.menus.developer import _admin_other_keyboard
+    other_kb = _admin_other_keyboard(is_observer=True)
+    other_callbacks = [btn.callback_data for row in other_kb.inline_keyboard for btn in row]
+    assert "dev_tokens_menu" not in other_callbacks, "Observer must NOT have tokens menu"
+    assert "dev_service_menu" not in other_callbacks, "Observer must NOT have service functions menu"
+    assert "dev_health_status" in other_callbacks, "Observer should have health status"
+    assert "dev_positions_menu" in other_callbacks, "Observer should have positions menu"
+    assert "dev_cities_menu" in other_callbacks, "Observer should have cities menu"
+    print(" - Admin Other keyboard: OK")
 
     # Analytics keyboard
     analyt_kb = _admin_analyt_keyboard(is_observer=True)
