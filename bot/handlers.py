@@ -1360,21 +1360,26 @@ async def remind_topic_global_callback(callback: CallbackQuery, state: FSMContex
     user_id = callback.from_user.id
     is_hr = await is_hr_user(user_id)
     is_dev = await is_developer_user(user_id)
-    if not (is_hr or is_dev):
-        await callback.answer("Ця функція доступна лише HR та Адміністраторам.", show_alert=True)
+    is_obs = await is_observer_user(user_id)
+    is_mgr = await is_manager_user(user_id)
+    if not (is_hr or is_dev or is_obs or is_mgr):
+        await callback.answer("Ця функція доступна лише для керівництва.", show_alert=True)
         return
 
-    if is_dev or is_hr:
+    if is_dev or is_hr or is_obs or is_mgr:
         from bot.constants import AVAILABLE_ROLES
+        filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")] if is_mgr else AVAILABLE_ROLES
         buttons = []
         for i, role in enumerate(AVAILABLE_ROLES):
-            buttons.append([InlineKeyboardButton(
-                text=f"👤 {role}",
-                callback_data=f"remind_role_select:{i}"
-            )])
-        buttons.append([InlineKeyboardButton(text="🌐 Всі посади", callback_data="remind_role_select:ALL")])
+            if role in filtered_roles:
+                buttons.append([InlineKeyboardButton(
+                    text=f"👤 {role}",
+                    callback_data=f"remind_role_select:{i}"
+                )])
+        if not is_mgr:
+            buttons.append([InlineKeyboardButton(text="🌐 Всі посади", callback_data="remind_role_select:ALL")])
         
-        back_button_cb = "dev_main_study" if is_dev else "manager_menu"
+        back_button_cb = "mgr_materials_catalog" if is_mgr else ("dev_main_study" if (is_dev or is_obs) else "manager_menu")
         buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_button_cb)])
         
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -1411,9 +1416,11 @@ async def remind_role_select_callback(callback: CallbackQuery, state: FSMContext
     user_id = callback.from_user.id
     is_hr = await is_hr_user(user_id)
     is_dev = await is_developer_user(user_id)
+    is_obs = await is_observer_user(user_id)
+    is_mgr = await is_manager_user(user_id)
 
-    if not (is_hr or is_dev):
-        await callback.answer("Ця функція доступна лише для HR та Адміністраторів.", show_alert=True)
+    if not (is_hr or is_dev or is_obs or is_mgr):
+        await callback.answer("Ця функція доступна лише для керівництва.", show_alert=True)
         return
     
     parts = callback.data.split(":", 1)
@@ -1874,20 +1881,28 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
 
 async def main_menu_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
-    manager_info = await get_manager_by_uid(user_id)
-    is_hr = await is_hr_user(user_id)
     is_developer = await is_developer_user(user_id)
+    is_hr = await is_hr_user(user_id)
+    is_territorial = await is_territorial_user(user_id)
+    is_observer = await is_observer_user(user_id)
+    is_manager = await is_manager_user(user_id)
 
     if callback.message:
-        if manager_info or is_hr:
-            await show_manager_main_menu(
+        if is_observer:
+            await show_observer_main_menu(
+                callback.message,
+                allow_edit=True,
+            )
+        elif is_developer or is_territorial:
+            await show_developer_main_menu(
                 callback.message,
                 is_hr=is_hr,
                 is_developer=is_developer,
+                is_territorial=is_territorial,
                 allow_edit=True,
             )
-        elif is_developer:
-            await show_developer_main_menu(
+        elif is_manager or is_hr:
+            await show_manager_main_menu(
                 callback.message,
                 is_hr=is_hr,
                 is_developer=is_developer,
@@ -1905,20 +1920,28 @@ async def main_menu_callback(callback: CallbackQuery):
 
 async def main_menu_callback_force_photo(callback: CallbackQuery):
     user_id = callback.from_user.id
-    manager_info = await get_manager_by_uid(user_id)
-    is_hr = await is_hr_user(user_id)
     is_developer = await is_developer_user(user_id)
+    is_hr = await is_hr_user(user_id)
+    is_territorial = await is_territorial_user(user_id)
+    is_observer = await is_observer_user(user_id)
+    is_manager = await is_manager_user(user_id)
 
     if callback.message:
-        if manager_info or is_hr:
-            await show_manager_main_menu(
+        if is_observer:
+            await show_observer_main_menu(
+                callback.message,
+                force_new_message=True,
+            )
+        elif is_developer or is_territorial:
+            await show_developer_main_menu(
                 callback.message,
                 is_hr=is_hr,
                 is_developer=is_developer,
+                is_territorial=is_territorial,
                 force_new_message=True,
             )
-        elif is_developer:
-            await show_developer_main_menu(
+        elif is_manager or is_hr:
+            await show_manager_main_menu(
                 callback.message,
                 is_hr=is_hr,
                 is_developer=is_developer,
@@ -2125,9 +2148,13 @@ async def profile_handler_router(callback: CallbackQuery):
         await observer_profile_handler(callback)
         return
 
-    manager_info = await get_manager_by_uid(user_id)
-    
-    if manager_info:
+    is_territorial = await is_territorial_user(user_id)
+    if is_territorial:
+        await developer_profile_handler(callback)
+        return
+
+    is_manager = await is_manager_user(user_id)
+    if is_manager:
         if callback.message and callback.message.photo:
             await manager_profile_handler_new_message(callback)
         else:

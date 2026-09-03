@@ -1,4 +1,5 @@
 import asyncio
+import html
 from datetime import datetime, timedelta
 import pytz
 
@@ -22,14 +23,18 @@ from database.users import (
     delete_user,
     update_user_role,
     log_training_event,
-    get_user_progress
+    get_user_progress,
+    get_manager_team_users,
+    get_manager_workers,
+    get_manager_interns_full,
 )
-from bot.services.developer_actions import get_user_days_report
+from bot.services.developer_actions import get_user_days_report, _format_last_activity
 from bot.constants import AVAILABLE_ROLES, AVAILABLE_CITIES, AVAILABLE_SHOPS
 from database.tokens import generate_token
 
 class ManagerStates(StatesGroup):
     waiting_search_intern = State()
+    waiting_search_worker = State()
     waiting_add_intern_city = State()
     waiting_add_intern_shop = State()
     waiting_add_intern_role = State()
@@ -38,35 +43,20 @@ class ManagerStates(StatesGroup):
 
 async def _ensure_manager(callback: CallbackQuery) -> bool:
     user_id = callback.from_user.id
-    if not await is_privileged_user(user_id):
+    from database.managers import is_manager_user
+    from database.hr import is_developer_user, is_hr_user
+    if not (await is_manager_user(user_id) or await is_hr_user(user_id) or await is_developer_user(user_id)):
         await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
         return False
     return True
 
+PAGE_SIZE = 10
+
 def _manager_main_keyboard() -> InlineKeyboardMarkup:
     buttons = [
-        [
-            InlineKeyboardButton(text="🚀 Активні стажери", callback_data="mgr_active"),
-            InlineKeyboardButton(text="🎉 Завершили навчання", callback_data="mgr_completed")
-        ],
-        [
-            InlineKeyboardButton(text="😴 Неактивні ≥3 дн.", callback_data="mgr_inactive"),
-            InlineKeyboardButton(text="📋 Усі стажери", callback_data="mgr_all")
-        ],
-        [
-            InlineKeyboardButton(text="🏙️ За містом", callback_data="mgr_by_city"),
-            InlineKeyboardButton(text="💼 За посадою", callback_data="mgr_by_role")
-        ],
-        [
-            InlineKeyboardButton(text="📊 Звіт стажерів", callback_data="mgr_report"),
-            InlineKeyboardButton(text="🧠 Нагадати тему", callback_data="mgr_remind_menu")
-        ],
-        [
-            InlineKeyboardButton(text="➕ Додати стажера", callback_data="mgr_add"),
-            InlineKeyboardButton(text="❌ Видалити стажера", callback_data="mgr_remove_menu")
-        ],
-        [InlineKeyboardButton(text="📅 Керування днями стажерів", callback_data="mgr_manage_days")],
-        [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")]
+        [InlineKeyboardButton(text="👥 Мої працівники", callback_data="mgr_my_team")],
+        [InlineKeyboardButton(text="📚 Навчання", callback_data="mgr_study_root")],
+        [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -97,10 +87,282 @@ async def manager_menu(callback: CallbackQuery, state: FSMContext):
         return
     
     await state.clear()
-    text = "👔 <b>Панель Керівника</b>\n\nОберіть дію:"
+    text = "👔 <b>Панель Керівника</b>\n\nОберіть потрібний розділ:"
     kb = _manager_main_keyboard()
     
     await _edit_menu_message(callback.message, text, kb)     
+    await callback.answer()
+
+# --- Section 1: Мої працівники ---
+
+async def manager_my_team_menu(callback: CallbackQuery, state: FSMContext):
+    if not await _ensure_manager(callback):
+        return
+    await state.clear()
+    text = (
+        "👥 <b>Мої працівники</b>\n\n"
+        "Керування працівниками та стажерами вашого магазину.\n"
+        "Оберіть дію:"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="👥 Усі працівники", callback_data="mgr_all_workers_menu")],
+        [InlineKeyboardButton(text="🔎 Пошук", callback_data="mgr_search_worker")],
+        [InlineKeyboardButton(text="🔍 Фільтри", callback_data="mgr_filters_menu")],
+        [InlineKeyboardButton(text="➕ Додати стажера", callback_data="mgr_add")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")]
+    ]
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+async def manager_all_workers_menu(callback: CallbackQuery):
+    if not await _ensure_manager(callback):
+        return
+    text = (
+        "👥 <b>Усі працівники та стажери</b>\n\n"
+        "Оберіть формат перегляду команди вашого магазину:"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="📋 Список усіх (текстом)", callback_data="mgr_list_all_text")],
+        [InlineKeyboardButton(text="🎓 Стажери (картки)", callback_data="mgr_interns_list:0")],
+        [InlineKeyboardButton(text="💼 Працівники (картки)", callback_data="mgr_workers_list:0")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_my_team")]
+    ]
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+async def manager_list_all_text(callback: CallbackQuery):
+    if not await _ensure_manager(callback):
+        return
+    team = await get_manager_team_users(callback.from_user.id)
+    if not team:
+        await _edit_menu_message(
+            callback.message,
+            "📭 У вашому магазині поки що немає закріплених працівників або стажерів.",
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")]])
+        )
+        await callback.answer()
+        return
+
+    interns = [u for u in team if not u.get("is_worker") and u.get("role") != "Працівник" and u.get("status") != "Працівник"]
+    workers = [u for u in team if u.get("is_worker") or u.get("role") == "Працівник" or u.get("status") == "Працівник"]
+
+    lines = ["📋 <b>Список команди вашого магазину:</b>\n"]
+    if interns:
+        lines.append(f"🎓 <b>Стажери ({len(interns)}):</b>")
+        for idx, u in enumerate(interns, 1):
+            name = html.escape(u.get("full_name") or u.get("username") or f"ID {u.get('user_id')}")
+            role = html.escape(u.get("role") or "Стажер")
+            day = u.get("current_block") or 1
+            lines.append(f"{idx}. {name} — <i>{role}</i> (День {day})")
+        lines.append("")
+
+    if workers:
+        lines.append(f"💼 <b>Працівники ({len(workers)}):</b>")
+        for idx, u in enumerate(workers, 1):
+            name = html.escape(u.get("full_name") or u.get("username") or f"ID {u.get('user_id')}")
+            role = html.escape(u.get("role") or "Працівник")
+            lines.append(f"{idx}. {name} — <i>{role}</i>")
+        lines.append("")
+
+    lines.append(f"<i>Всього людей у команді: {len(team)}</i>")
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3950] + "\n\n<i>...частину списку скорочено...</i>"
+
+    buttons = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")]]
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+async def manager_interns_list(callback: CallbackQuery):
+    if not await _ensure_manager(callback):
+        return
+    page = int(callback.data.split(":")[1])
+    interns = await get_manager_interns_full(callback.from_user.id)
+    if not interns:
+        await _edit_menu_message(
+            callback.message,
+            "📭 Немає стажерів у вашому магазині.",
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")]])
+        )
+        await callback.answer()
+        return
+
+    total = len(interns)
+    total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    slice_interns = interns[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+
+    buttons = []
+    for intern in slice_interns:
+        name = intern.get("full_name") or intern.get("username") or f"ID {intern.get('user_id')}"
+        uid = intern.get("user_id")
+        day = intern.get("current_block", 1)
+        buttons.append([InlineKeyboardButton(
+            text=f"🎓 {name} (День {day})",
+            callback_data=f"mgr_view_intern_{uid}"
+        )])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"mgr_interns_list:{page - 1}"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"mgr_interns_list:{page + 1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")])
+    text = f"🎓 <b>Стажери магазину</b> (Стор. {page + 1}/{total_pages})\nОберіть для перегляду картки:"
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+async def manager_workers_list(callback: CallbackQuery):
+    if not await _ensure_manager(callback):
+        return
+    page = int(callback.data.split(":")[1])
+    workers = await get_manager_workers(callback.from_user.id)
+    if not workers:
+        await _edit_menu_message(
+            callback.message,
+            "📭 Немає постійних працівників у вашому магазині.",
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")]])
+        )
+        await callback.answer()
+        return
+
+    total = len(workers)
+    total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    slice_workers = workers[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+
+    buttons = []
+    for worker in slice_workers:
+        name = worker.get("full_name") or worker.get("username") or f"ID {worker.get('user_id')}"
+        uid = worker.get("user_id")
+        role = worker.get("role") or "Працівник"
+        buttons.append([InlineKeyboardButton(
+            text=f"💼 {name} ({role})",
+            callback_data=f"mgr_view_intern_{uid}"
+        )])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"mgr_workers_list:{page - 1}"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"mgr_workers_list:{page + 1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")])
+    text = f"💼 <b>Працівники магазину</b> (Стор. {page + 1}/{total_pages})\nОберіть для перегляду картки:"
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+# --- Isolated Search ---
+
+async def manager_search_worker_start(callback: CallbackQuery, state: FSMContext):
+    if not await _ensure_manager(callback):
+        return
+    await state.set_state(ManagerStates.waiting_search_worker)
+    text = (
+        "🔎 <b>Пошук працівника або стажера</b>\n\n"
+        "Введіть Telegram ID або ім'я/прізвище людини для пошуку серед працівників вашого магазину:"
+    )
+    buttons = [[InlineKeyboardButton(text="❌ Скасувати", callback_data="mgr_my_team")]]
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+async def manager_search_worker_process(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    from database.managers import is_manager_user
+    from database.hr import is_developer_user, is_hr_user
+    if not (await is_manager_user(user_id) or await is_hr_user(user_id) or await is_developer_user(user_id)):
+        return
+
+    query = (message.text or "").strip().lower()
+    await state.clear()
+
+    team = await get_manager_team_users(user_id)
+    matched = []
+    for u in team:
+        uid_str = str(u.get("user_id", ""))
+        full_name = (u.get("full_name") or "").lower()
+        username = (u.get("username") or "").lower()
+        if query == uid_str or query in full_name or query in username:
+            matched.append(u)
+
+    if not matched:
+        await message.answer(
+            f"🔍 За запитом «{message.text}» серед команди вашого магазину нікого не знайдено.\n\n"
+            "<i>Зверніть увагу: пошук здійснюється виключно серед працівників та стажерів вашого магазину.</i>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔎 Спробувати знову", callback_data="mgr_search_worker")],
+                [InlineKeyboardButton(text="👥 До працівників", callback_data="mgr_my_team")]
+            ]),
+            parse_mode="HTML"
+        )
+        return
+
+    buttons = []
+    for u in matched[:15]:
+        name = u.get("full_name") or u.get("username") or f"ID {u.get('user_id')}"
+        uid = u.get("user_id")
+        role = u.get("role") or ("Працівник" if u.get("is_worker") else "Стажер")
+        prefix = "💼" if (u.get("is_worker") or role == "Працівник") else "🎓"
+        buttons.append([InlineKeyboardButton(text=f"{prefix} {name} ({role})", callback_data=f"mgr_view_intern_{uid}")])
+
+    buttons.append([InlineKeyboardButton(text="👥 До працівників", callback_data="mgr_my_team")])
+    await message.answer(
+        f"🔍 <b>Знайдено ({len(matched)}):</b>\nОберіть для перегляду картки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML"
+    )
+
+# --- Filters Menu ---
+
+async def manager_filters_menu(callback: CallbackQuery):
+    if not await _ensure_manager(callback):
+        return
+    text = (
+        "🔍 <b>Фільтри працівників</b>\n\n"
+        "Оберіть критерій для фільтрації:"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="💼 За посадою", callback_data="mgr_by_role")],
+        [InlineKeyboardButton(text="🚀 Активні стажери", callback_data="mgr_active")],
+        [InlineKeyboardButton(text="🎉 Завершили навчання", callback_data="mgr_completed")],
+        [InlineKeyboardButton(text="⏱️ Активні працівники (взаємодія)", callback_data="mgr_filter_recent_activity")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_my_team")]
+    ]
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+async def manager_filter_recent_activity(callback: CallbackQuery):
+    if not await _ensure_manager(callback):
+        return
+    team = await get_manager_team_users(callback.from_user.id)
+    if not team:
+        await _edit_menu_message(
+            callback.message,
+            "📭 Немає працівників чи стажерів у вашому магазині.",
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")]])
+        )
+        await callback.answer()
+        return
+
+    lines = ["⏱️ <b>Активність команди (остання взаємодія з ботом):</b>\n"]
+    for idx, u in enumerate(team, 1):
+        name = html.escape(u.get("full_name") or u.get("username") or f"ID {u.get('user_id')}")
+        role = html.escape(u.get("role") or ("Працівник" if u.get("is_worker") else "Стажер"))
+        last_act = _format_last_activity(u.get("last_activity"))
+        prefix = "💼" if (u.get("is_worker") or role == "Працівник") else "🎓"
+        lines.append(f"{idx}. {prefix} <b>{name}</b> ({role})\n    🕒 {last_act}")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3950] + "\n\n<i>...частину списку скорочено...</i>"
+
+    buttons = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")]]
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 # --- Helper to list interns ---
@@ -111,12 +373,13 @@ async def _list_interns_generic(
     empty_msg: str,
     *,
     mark_completed: bool = False,
+    back_callback: str = "mgr_my_team"
 ):
     if not interns:
         await _edit_menu_message(
             callback.message,
             f"{empty_msg}",
-            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")]])
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)]])
         )
         await callback.answer()
         return
@@ -124,33 +387,48 @@ async def _list_interns_generic(
     text = f"{title}\n\n"
     buttons = []
     
-    # Pagination or simple list? Assume simple list for now, up to 50
     for intern in interns[:50]:
-        name = intern.get("full_name", "Без імені")
+        name = intern.get("full_name") or intern.get("username") or f"ID {intern.get('user_id')}"
         uid = intern.get("user_id")
-        current_block = intern.get("current_block", 1)
-        suffix = "Завершено" if mark_completed else f"День {current_block}"
+        role = intern.get("role", "Стажер")
+        is_worker = intern.get("is_worker") or role == "Працівник" or intern.get("status") == "Працівник"
+        if is_worker:
+            suffix = f"Працівник ({role})"
+            prefix = "💼"
+        elif mark_completed:
+            suffix = "Завершено"
+            prefix = "🎉"
+        else:
+            current_block = intern.get("current_block", 1)
+            suffix = f"День {current_block}"
+            prefix = "🎓"
         buttons.append([InlineKeyboardButton(
-            text=f"{name} ({suffix})",
+            text=f"{prefix} {name} ({suffix})",
             callback_data=f"mgr_view_intern_{uid}"
         )])
     
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)])
     
     await _edit_menu_message(
         callback.message,
-        text + "Оберіть стажера для перегляду деталей:", 
+        text + "Оберіть людину для перегляду деталей:", 
         InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     await callback.answer()
 
-# --- Handlers for main menu buttons ---
+# --- Handlers for filter buttons ---
 
 async def manager_active_interns(callback: CallbackQuery):
     if not await _ensure_manager(callback):
         return
     interns = await get_interns_in_progress_for_manager(callback.from_user.id)
-    await _list_interns_generic(callback, interns, "🚀 <b>Активні стажери:</b>", "📭 Немає активних стажерів.")
+    await _list_interns_generic(
+        callback, 
+        interns, 
+        "🚀 <b>Активні стажери:</b>", 
+        "📭 Немає активних стажерів.",
+        back_callback="mgr_filters_menu"
+    )
 
 async def manager_completed_interns(callback: CallbackQuery):
     if not await _ensure_manager(callback):
@@ -160,9 +438,7 @@ async def manager_completed_interns(callback: CallbackQuery):
     completed = []
     
     for intern in all_interns:
-        # Check if they completed all days. This logic might need optimization in DB, but doing in code for now.
         progress = await get_user_progress(intern['user_id'])
-        # A simplified check: if count of completed days >= DAYS_TOTAL
         completed_count = sum(1 for p in progress if p.get('completed'))
         if completed_count >= DAYS_TOTAL:
             completed.append(intern)
@@ -173,22 +449,32 @@ async def manager_completed_interns(callback: CallbackQuery):
         "🎉 <b>Завершили навчання:</b>",
         "📭 Немає стажерів, що завершили навчання.",
         mark_completed=True,
+        back_callback="mgr_filters_menu"
     )
 
 async def manager_inactive_interns(callback: CallbackQuery):
     if not await _ensure_manager(callback):
         return
     interns = await get_inactive_interns_for_manager(callback.from_user.id, days=3)
-    await _list_interns_generic(callback, interns, "😴 <b>Неактивні ≥3 дн.:</b>", "🎉 Всі стажери активні!")
+    await _list_interns_generic(
+        callback, 
+        interns, 
+        "😴 <b>Неактивні ≥3 дн.:</b>", 
+        "🎉 Всі стажери активні!",
+        back_callback="mgr_filters_menu"
+    )
 
 async def manager_all_interns(callback: CallbackQuery):
     if not await _ensure_manager(callback):
         return
-    # Shows only interns assigned to this manager (filtered by manager_id)
     interns = await get_manager_interns(callback.from_user.id)
-    await _list_interns_generic(callback, interns, "📋 <b>Усі стажери:</b>", "📭 Список стажерів порожній.")
-
-# --- Filtering by City/Role ---
+    await _list_interns_generic(
+        callback, 
+        interns, 
+        "📋 <b>Усі стажери:</b>", 
+        "📭 Список стажерів порожній.",
+        back_callback="mgr_all_workers_menu"
+    )
 
 async def manager_by_city_menu(callback: CallbackQuery):
     if not await _ensure_manager(callback):
@@ -205,8 +491,7 @@ async def manager_by_city_menu(callback: CallbackQuery):
         await callback.answer("Міста не вказані у стажерів.", show_alert=True)
         return
 
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")])
-    
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")])
     await _edit_menu_message(callback.message, "🏙️ Оберіть місто:", InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
@@ -222,27 +507,37 @@ async def manager_filter_city(callback: CallbackQuery):
 
     interns = await get_manager_interns(callback.from_user.id)
     filtered = [i for i in interns if i.get('city') == city]
-    await _list_interns_generic(callback, filtered, f"🏙️ <b>Стажери: {city}</b>", "📭 Немає стажерів у цьому місті.")
+    await _list_interns_generic(
+        callback, 
+        filtered, 
+        f"🏙️ <b>Стажери: {city}</b>", 
+        "📭 Немає стажерів у цьому місті.",
+        back_callback="mgr_by_city"
+    )
 
 async def manager_by_role_menu(callback: CallbackQuery):
     if not await _ensure_manager(callback):
         return
-    interns = await get_manager_interns(callback.from_user.id)
-    roles_in_db = set(i.get('role') for i in interns if i.get('role'))
+    team = await get_manager_team_users(callback.from_user.id)
+    roles_in_db = set(i.get('role') for i in team if i.get('role'))
     
     buttons = []
     for i, role in enumerate(AVAILABLE_ROLES):
         if role in roles_in_db:
             label = role[:30] + "..." if len(role) > 30 else role
-            buttons.append([InlineKeyboardButton(text=label, callback_data=f"mgr_filter_role:{i}")])
+            buttons.append([InlineKeyboardButton(text=f"💼 {label}", callback_data=f"mgr_filter_role:{i}")])
     
     if not buttons:
-        await callback.answer("Посади не вказані у стажерів.", show_alert=True)
+        await _edit_menu_message(
+            callback.message,
+            "📭 У працівників вашого магазину ще не вказано посад.",
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")]])
+        )
+        await callback.answer()
         return
 
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")])
-    
-    await _edit_menu_message(callback.message, "💼 Оберіть посаду:", InlineKeyboardMarkup(inline_keyboard=buttons))
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")])
+    await _edit_menu_message(callback.message, "💼 <b>Фільтр за посадою</b>\n\nОберіть посаду:", InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 async def manager_filter_role(callback: CallbackQuery):
@@ -255,11 +550,214 @@ async def manager_filter_role(callback: CallbackQuery):
         await callback.answer("Помилка вибору посади.", show_alert=True)
         return
 
-    interns = await get_manager_interns(callback.from_user.id)
-    filtered = [i for i in interns if i.get('role') == role]
-    await _list_interns_generic(callback, filtered, f"💼 <b>Стажери: {role}</b>", "📭 Немає стажерів на цій посаді.")
+    team = await get_manager_team_users(callback.from_user.id)
+    filtered = [i for i in team if i.get('role') == role]
+    await _list_interns_generic(
+        callback, 
+        filtered, 
+        f"💼 <b>Працівники та стажери: {role}</b>", 
+        "📭 Немає людей на цій посаді.",
+        back_callback="mgr_by_role"
+    )
 
-# --- Report ---
+# --- Section 2: Навчання (Курс керівника & Матеріали) ---
+
+async def manager_study_root_menu(callback: CallbackQuery):
+    if not await _ensure_manager(callback):
+        return
+    text = (
+        "📚 <b>Розділ «Навчання»</b>\n\n"
+        "Оберіть необхідний розділ:\n\n"
+        "• <b>Навчання керівника</b> — програма навчання та матеріали курсу для посади «Керівник»\n"
+        "• <b>Матеріали</b> — навчальні матеріали інших посад (режим читання) та нагадування тем"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="🎓 Навчання керівника", callback_data="mgr_training_course")],
+        [InlineKeyboardButton(text="📚 Матеріали", callback_data="mgr_materials_catalog")],
+        [InlineKeyboardButton(text="🏠 Головне меню", callback_data="manager_menu")]
+    ]
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+async def manager_training_course_menu(callback: CallbackQuery):
+    if not await _ensure_manager(callback):
+        return
+    role = "Керівник"
+    from database.materials import get_days_for_role
+    days = await get_days_for_role(role)
+    if not days:
+        days = [1, 2, 3, 4, 5]
+    else:
+        days = sorted(set(days))
+
+    text = (
+        "🎓 <b>Навчання керівника</b>\n\n"
+        "Матеріали та завдання навчального курсу для посади «Керівник».\n"
+        "Оберіть день для перегляду:"
+    )
+    buttons = []
+    row = []
+    for d in days:
+        row.append(InlineKeyboardButton(text=f"День {d}", callback_data=f"mgr_tr_day:{d}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_study_root")])
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+async def manager_training_day_view(callback: CallbackQuery):
+    if not await _ensure_manager(callback):
+        return
+    day = int(callback.data.split(":")[1])
+    role = "Керівник"
+
+    from database.materials import get_materials_for_day, get_test_by_role_and_day
+    materials = await get_materials_for_day(role, day)
+    test = await get_test_by_role_and_day(role, day)
+
+    lines = [f"🎓 <b>Курс керівника: День {day}</b>\n"]
+    if not materials and not test:
+        lines.append("<i>Для цього дня курсу керівника поки що немає матеріалів.</i>")
+    else:
+        if materials:
+            for idx, m in enumerate(materials, 1):
+                m_type = m.get("content_type", "матеріал")
+                title = m.get("title") or f"{m_type.capitalize()} #{idx}"
+                content = m.get("content") or ""
+                url = m.get("resource_url")
+                lines.append(f"<b>{idx}. {html.escape(title)}</b> ({m_type})")
+                if content:
+                    lines.append(html.escape(content))
+                if url:
+                    lines.append(f"🔗 Посилання: {html.escape(url)}")
+                lines.append("")
+        if test:
+            lines.append("📝 <b>Тест для керівника наявний.</b>")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3950] + "\n\n<i>...частину тексту скорочено...</i>"
+
+    buttons = [
+        [InlineKeyboardButton(text="⬅️ До днів навчання", callback_data="mgr_training_course")],
+        [InlineKeyboardButton(text="📚 Навчання", callback_data="mgr_study_root")]
+    ]
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+async def manager_materials_catalog(callback: CallbackQuery):
+    if not await _ensure_manager(callback):
+        return
+    filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
+
+    text = (
+        "📚 <b>Матеріали навчання за посадами</b>\n\n"
+        "Доступний перегляд матеріалів усіх посад у режимі читання (без редагування):\n"
+        "<i>(Оберіть посаду або скористайтесь швидким нагадуванням теми)</i>"
+    )
+    buttons = []
+    row = []
+    for idx, role in enumerate(filtered_roles):
+        row.append(InlineKeyboardButton(text=f"👤 {role}", callback_data=f"mgr_mat_role:{idx}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+
+    buttons.append([InlineKeyboardButton(text="🧠 Нагадати тему", callback_data="remind_topic_global")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_study_root")])
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+async def manager_materials_role_days(callback: CallbackQuery):
+    if not await _ensure_manager(callback):
+        return
+    try:
+        role_idx = int(callback.data.split(":")[1])
+        filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
+        role = filtered_roles[role_idx]
+    except (ValueError, IndexError):
+        await callback.answer("Некоректна посада.", show_alert=True)
+        return
+
+    from database.materials import get_days_for_role
+    days = await get_days_for_role(role)
+    if not days:
+        days = [1, 2, 3, 4, 5]
+    else:
+        days = sorted(set(days))
+
+    text = (
+        f"📖 <b>Матеріали: {role}</b>\n\n"
+        "Оберіть день для перегляду матеріалів (режим читання):"
+    )
+    buttons = []
+    row = []
+    for d in days:
+        row.append(InlineKeyboardButton(text=f"День {d}", callback_data=f"mgr_mat_view:{role_idx}:{d}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад до посад", callback_data="mgr_materials_catalog")])
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+async def manager_material_view_day(callback: CallbackQuery):
+    if not await _ensure_manager(callback):
+        return
+    parts = callback.data.split(":")
+    role_idx = int(parts[1])
+    day = int(parts[2])
+
+    filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
+    if role_idx >= len(filtered_roles):
+        await callback.answer("Роль не знайдено.", show_alert=True)
+        return
+    role = filtered_roles[role_idx]
+
+    from database.materials import get_materials_for_day, get_test_by_role_and_day
+    materials = await get_materials_for_day(role, day)
+    test = await get_test_by_role_and_day(role, day)
+
+    lines = [f"📖 <b>Матеріали: {role} · День {day}</b>\n"]
+    if not materials and not test:
+        lines.append("<i>Для цього дня поки що немає матеріалів.</i>")
+    else:
+        if materials:
+            for idx, m in enumerate(materials, 1):
+                m_type = m.get("content_type", "матеріал")
+                title = m.get("title") or f"{m_type.capitalize()} #{idx}"
+                content = m.get("content") or ""
+                url = m.get("resource_url")
+                lines.append(f"<b>{idx}. {html.escape(title)}</b> ({m_type})")
+                if content:
+                    lines.append(html.escape(content[:500]) + ("..." if len(content) > 500 else ""))
+                if url:
+                    lines.append(f"🔗 Посилання: {html.escape(url)}")
+                lines.append("")
+        if test:
+            lines.append("📝 <b>Тест доступний:</b> перевірочні запитання наявні.")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3950] + "\n\n<i>...частину тексту скорочено...</i>"
+
+    buttons = [
+        [InlineKeyboardButton(text="⬅️ До днів посади", callback_data=f"mgr_mat_role:{role_idx}")],
+        [InlineKeyboardButton(text="📚 До каталогу посад", callback_data="mgr_materials_catalog")]
+    ]
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+# --- Legacy Reports (Kept for compatibility) ---
 async def manager_report(callback: CallbackQuery):
     if not await _ensure_manager(callback):
         return
@@ -269,10 +767,7 @@ async def manager_report(callback: CallbackQuery):
         await callback.answer("Немає стажерів для звіту.", show_alert=True)
         return
 
-    # Simple stats
     total = len(interns)
-    
-    # Ті, хто закінчили (пройшли всі дні)
     completed_list = []
     for i in interns:
         progress = await get_user_progress(i['user_id'])
@@ -280,8 +775,6 @@ async def manager_report(callback: CallbackQuery):
             completed_list.append(i)
     completed = len(completed_list)
     
-    # Ті, хто ще в процесі (total - completed)
-    # Але ми їх ділимо на активних та неактивних за останні 3 дні
     active_list = await get_interns_in_progress_for_manager(callback.from_user.id, active_only=True)
     active = len(active_list)
     
@@ -299,23 +792,18 @@ async def manager_report(callback: CallbackQuery):
     await _edit_menu_message(
         callback.message,
         report_text,
-        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")]])
+        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")]])
     )
     await callback.answer()
 
-# --- Remind Topic ---
 async def manager_remind_menu(callback: CallbackQuery):
     if not await _ensure_manager(callback):
         return
-    
-    # Показуємо список посад для пошуку
     buttons = []
     for i, role in enumerate(AVAILABLE_ROLES):
         label = role[:30] + "..." if len(role) > 30 else role
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"mgr_remind_role:{i}")])
-    
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")])
-    
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_study_root")])
     await _edit_menu_message(
         callback.message,
         "🧠 <b>База знань</b>\n\nОберіть посаду для пошуку матеріалів:", 
@@ -326,7 +814,6 @@ async def manager_remind_menu(callback: CallbackQuery):
 async def manager_process_remind_role(callback: CallbackQuery, state: FSMContext):
     if not await _ensure_manager(callback):
         return
-    
     try:
         role_idx = int(callback.data.split(":")[1])
         role = AVAILABLE_ROLES[role_idx]
@@ -336,7 +823,6 @@ async def manager_process_remind_role(callback: CallbackQuery, state: FSMContext
 
     await state.update_data(role=role, mode="manager_global")
     await state.set_state(SearchStates.waiting_for_query)
-    
     await _edit_menu_message(
         callback.message,
         f"🧠 <b>Пошук матеріалів ({role})</b>\n\n"
@@ -354,7 +840,7 @@ async def manager_add_intern(callback: CallbackQuery, state: FSMContext):
     buttons = []
     for city in AVAILABLE_CITIES:
         buttons.append([InlineKeyboardButton(text=city, callback_data=f"add_city:{city}")])
-    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="manager_menu")])
+    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="mgr_my_team")])
     
     await _edit_menu_message(
         callback.message,
@@ -590,8 +1076,8 @@ async def _show_intern_details(message_or_msg: Message, intern_id: int, is_callb
     report = await get_user_days_report(intern_id)
     
     buttons = [
-        [InlineKeyboardButton(text="⬅️ Назад до списку", callback_data="mgr_active")],
-        [InlineKeyboardButton(text="🏠 В меню", callback_data="manager_menu")]
+        [InlineKeyboardButton(text="⬅️ До працівників", callback_data="mgr_my_team")],
+        [InlineKeyboardButton(text="🏠 Головне меню", callback_data="manager_menu")]
     ]
     
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -753,6 +1239,29 @@ async def intern_dismiss_handler(callback: CallbackQuery):
 def register_manager_handlers(dp: Dispatcher):
     dp.callback_query.register(manager_menu, lambda c: c.data == "manager_menu")
     
+    # Restructured Manager Navigation
+    dp.callback_query.register(manager_my_team_menu, lambda c: c.data == "mgr_my_team")
+    dp.callback_query.register(manager_all_workers_menu, lambda c: c.data == "mgr_all_workers_menu")
+    dp.callback_query.register(manager_list_all_text, lambda c: c.data == "mgr_list_all_text")
+    dp.callback_query.register(manager_interns_list, lambda c: c.data and c.data.startswith("mgr_interns_list:"))
+    dp.callback_query.register(manager_workers_list, lambda c: c.data and c.data.startswith("mgr_workers_list:"))
+    
+    # Isolated Search
+    dp.callback_query.register(manager_search_worker_start, lambda c: c.data == "mgr_search_worker")
+    dp.message.register(manager_search_worker_process, ManagerStates.waiting_search_worker)
+
+    # Filters
+    dp.callback_query.register(manager_filters_menu, lambda c: c.data == "mgr_filters_menu")
+    dp.callback_query.register(manager_filter_recent_activity, lambda c: c.data == "mgr_filter_recent_activity")
+
+    # Training & Materials
+    dp.callback_query.register(manager_study_root_menu, lambda c: c.data == "mgr_study_root")
+    dp.callback_query.register(manager_training_course_menu, lambda c: c.data == "mgr_training_course")
+    dp.callback_query.register(manager_training_day_view, lambda c: c.data and c.data.startswith("mgr_tr_day:"))
+    dp.callback_query.register(manager_materials_catalog, lambda c: c.data == "mgr_materials_catalog")
+    dp.callback_query.register(manager_materials_role_days, lambda c: c.data and c.data.startswith("mgr_mat_role:"))
+    dp.callback_query.register(manager_material_view_day, lambda c: c.data and c.data.startswith("mgr_mat_view:"))
+
     # Daily Report Actions
     dp.callback_query.register(manager_remind_all_lagging, lambda c: c.data == "mgr_remind_all_lagging")
     dp.callback_query.register(manager_dismiss_report, lambda c: c.data == "mgr_dismiss_report")
@@ -766,9 +1275,8 @@ def register_manager_handlers(dp: Dispatcher):
     dp.callback_query.register(manager_completed_interns, lambda c: c.data == "mgr_completed")
     dp.callback_query.register(manager_inactive_interns, lambda c: c.data == "mgr_inactive")
     dp.callback_query.register(manager_all_interns, lambda c: c.data == "mgr_all")
-    # dp.callback_query.register(manager_my_interns, lambda c: c.data == "mgr_my_interns") # Removed as function was deleted
     
-    # Filters
+    # Filters by city/role
     dp.callback_query.register(manager_by_city_menu, lambda c: c.data == "mgr_by_city")
     dp.callback_query.register(manager_filter_city, lambda c: c.data and c.data.startswith("mgr_filter_city:"))
     dp.callback_query.register(manager_by_role_menu, lambda c: c.data == "mgr_by_role")

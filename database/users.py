@@ -208,8 +208,69 @@ async def get_manager_interns(manager_id):
         )
 
         interns = await cursor.fetchall()
-
         return [dict(intern) for intern in interns]
+
+async def get_manager_team_users(manager_id: int) -> list[dict]:
+    """
+    Отримує всіх закріплених за керівником користувачів (і стажерів, і працівників):
+    як за manager_id, так і за прив'язкою до магазинів керівника (city + shops).
+    """
+    from database.managers import get_manager_by_uid
+    manager = await get_manager_by_uid(manager_id)
+    
+    m_city = manager.get("city") if manager else None
+    m_shops = manager.get("shops") if manager else []
+    if isinstance(m_shops, str):
+        try:
+            import json
+            m_shops = json.loads(m_shops)
+        except Exception:
+            m_shops = [s.strip() for s in m_shops.split(",") if s.strip()]
+    if not isinstance(m_shops, list):
+        m_shops = []
+
+    privileged_ids = await _get_privileged_user_ids()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        
+        # Базовий запит за manager_id
+        conditions = ["manager_id = ?"]
+        params = [manager_id]
+        
+        # Додаткова умова за містом і магазинами
+        if m_city and m_shops:
+            placeholders = ",".join("?" for _ in m_shops)
+            conditions.append(f"(city = ? AND shop IN ({placeholders}))")
+            params.append(m_city)
+            params.extend(m_shops)
+            
+        where_clause = " OR ".join(conditions)
+        query = f"SELECT * FROM users WHERE ({where_clause}) ORDER BY last_activity DESC"
+        
+        cursor = await db.execute(query, tuple(params))
+        rows = await cursor.fetchall()
+        
+        # Дедуплікація за user_id та виключення привілейованих
+        seen = set()
+        team = []
+        for r in rows:
+            uid = r["user_id"]
+            if uid not in seen and uid not in privileged_ids and uid != manager_id:
+                seen.add(uid)
+                team.append(dict(r))
+                
+        return team
+
+async def get_manager_workers(manager_id: int) -> list[dict]:
+    """Отримує лише працівників (випускників), закріплених за керівником"""
+    team = await get_manager_team_users(manager_id)
+    return [u for u in team if u.get("is_worker") or u.get("status") == "Працівник"]
+
+async def get_manager_interns_full(manager_id: int) -> list[dict]:
+    """Отримує лише стажерів, закріплених за керівником"""
+    team = await get_manager_team_users(manager_id)
+    return [u for u in team if not (u.get("is_worker") or u.get("status") == "Працівник")]
 
 async def get_all_active_users(days=3):
     """Отримує список активних стажерів (виключаючи Dev/Керівників)"""
