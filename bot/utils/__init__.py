@@ -7,6 +7,7 @@ from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardMarkup, Inpu
 from .avatar import get_user_avatar_input, _send_or_edit_card_photo
 from .message_utils import send_long_message, send_message_with_debug, truncate_text
 from .paginator import split_text
+from .manager import get_manager_display_title
 
 def format_datetime(dt: datetime) -> str:
     """Форматує datetime в строку для зручного виводу"""
@@ -31,6 +32,7 @@ def validate_answer(user_answer: str, correct_answer: str) -> bool:
 __all__ = [
     'get_user_avatar_input',
     '_send_or_edit_card_photo',
+    'get_manager_display_title',
     'send_long_message',
     'send_message_with_debug',
     'truncate_text',

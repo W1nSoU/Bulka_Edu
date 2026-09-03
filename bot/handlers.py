@@ -2171,7 +2171,7 @@ async def manager_profile_handler_new_message(callback: CallbackQuery):
 
 async def profile_handler_new_message(callback: CallbackQuery):
     user_id = callback.from_user.id
-    from bot.utils import get_user_avatar_input, _send_or_edit_card_photo
+    from bot.utils import get_user_avatar_input, _send_or_edit_card_photo, get_manager_display_title
     
     user_details = await get_user_details(user_id)
     if not user_details:
@@ -2183,32 +2183,7 @@ async def profile_handler_new_message(callback: CallbackQuery):
         return
         
     manager_id = user_details.get('manager_id')
-    manager_name_display = "Не призначено"
-    if manager_id:
-        manager_info = await get_manager_by_uid(manager_id)
-        if manager_info:
-            full_name = manager_info.get('full_name')
-            username = manager_info.get('username')
-            if full_name and full_name.strip():
-                manager_name_display = full_name
-            elif username and username.strip():
-                manager_name_display = f"@{username}"
-            else:
-                manager_name_display = f"ID: {manager_id}"
-        else:
-            # Fallback: check users table (e.g. for Developers who are not in managers table)
-            manager_user = await get_user_details(manager_id)
-            if manager_user:
-                full_name = manager_user.get('full_name')
-                username = manager_user.get('username')
-                if full_name and full_name.strip():
-                    manager_name_display = full_name
-                elif username and username.strip():
-                    manager_name_display = f"@{username}"
-                else:
-                    manager_name_display = f"ID: {manager_id}"
-            else:
-                manager_name_display = f"ID: {manager_id}"
+    manager_name_display = await get_manager_display_title(callback.bot, manager_id)
 
     initialize_user_progress(user_id)
     progress_count = get_progress(user_id)
@@ -2236,7 +2211,7 @@ async def profile_handler_new_message(callback: CallbackQuery):
         f"🔹 Ваша посада: <b>{user_details.get('role', 'Не вказано')}</b>\n"
         f"🔹 Місто: <b>{user_details.get('city', 'Не вказано')}</b>\n"
         f"🔹 Магазин: <b>{user_details.get('shop', 'Не вказано')}</b>\n"
-        f"🔹 Керівник: <b>{manager_name_display}</b>\n\n"
+        f"🔹 Керівник: <b>{html.escape(manager_name_display)}</b>\n\n"
         f"📊 <b>Ваш прогрес:</b>\n"
         f"{progress_bar} {percent}% ({progress_count}/{DAYS_TOTAL})\n\n"
         f"{motivation}"
