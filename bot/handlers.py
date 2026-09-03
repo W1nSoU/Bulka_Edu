@@ -2696,7 +2696,40 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
 
     # Register/Update user with provided full_name
     await register_user(user_id, username=username, full_name=full_name)
-    await set_intern_extra(user_id, manager_id, role, city, shop=shop)
+    
+    # Динамічно визначаємо дійсного керівника:
+    # 1. Якщо у магазині є активний керівник -> закріплюємо за ним
+    # 2. Якщо в магазині немає керівника -> закріплюємо за Територіалом міста за напрямком (ВВ або ТЗ)
+    from database.managers import get_manager_by_shop, get_appropriate_territorial_for_user, is_manager_user
+    assigned_manager_id = None
+    if shop:
+        shop_mgr = await get_manager_by_shop(city, shop)
+        if shop_mgr:
+            assigned_manager_id = shop_mgr["uid"]
+            
+    if not assigned_manager_id:
+        if manager_id and await is_manager_user(manager_id):
+            assigned_manager_id = manager_id
+        else:
+            assigned_manager_id = await get_appropriate_territorial_for_user(city, role)
+            if not assigned_manager_id:
+                assigned_manager_id = manager_id
+
+    await set_intern_extra(user_id, assigned_manager_id, role, city, shop=shop)
+    
+    if assigned_manager_id:
+        try:
+            await message.bot.send_message(
+                assigned_manager_id,
+                f"👤 <b>Новий співробітник зареєструвався!</b>\n\n"
+                f"👤 <b>ПІБ:</b> {html.escape(full_name)}\n"
+                f"💼 <b>Посада:</b> {role}\n"
+                f"🏙 <b>Місто:</b> {city}\n"
+                f"🏪 <b>Магазин:</b> {shop or 'не вказано'}",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
     
     if token:
         await use_token(token, user_id)

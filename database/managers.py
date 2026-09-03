@@ -535,6 +535,158 @@ async def transfer_users_by_shops(city: str, shop_names: list[str], target_manag
         await db.commit()
         return count
 
+
+async def get_appropriate_territorial_for_user(city: str, role: str) -> int | None:
+    """
+    Знаходить найбільш підходящого активного Територіала для міста та посади:
+    - За напрямком посади (ТЗ або ВВ)
+    - Якщо точного збігу немає - першого активного територіала міста
+    - Якщо в місті немає територіалів - None
+    """
+    from database.positions import get_position_direction
+    direction = await get_position_direction(role or "")
+    territorials = await get_territorials_by_city(city)
+    if not territorials:
+        return None
+    for t in territorials:
+        if t.get("territorial_type") == direction:
+            return t["uid"]
+    return territorials[0]["uid"]
+
+
+async def get_manager_by_shop(city: str, shop: str) -> dict | None:
+    """
+    Шукає активного керівника, закріпленого за зазначеним магазином у місті.
+    """
+    if not shop:
+        return None
+    managers = await get_all_kerivnyky()
+    for m in managers:
+        m_city = m.get("city")
+        if m_city and city and m_city != city:
+            continue
+        m_shops = m.get("shops") or []
+        if isinstance(m_shops, str):
+            try:
+                m_shops = json.loads(m_shops)
+            except Exception:
+                m_shops = [m_shops]
+        if shop in m_shops:
+            return m
+    return None
+
+
+async def reassign_removed_shops_users_to_territorial(city: str, removed_shops: list[str], manager_uid: int) -> int:
+    """
+    Переводить користувачів (стажерів і працівників) відкріплених магазинів від цього керівника
+    до відповідного Територіала міста (ТЗ або ВВ) та закриває відкриті бесіди з колишнім керівником.
+    """
+    if not removed_shops:
+        return 0
+    placeholders = ",".join("?" for _ in removed_shops)
+    reassigned_count = 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            f"SELECT user_id, role FROM users WHERE city = ? AND shop IN ({placeholders}) AND manager_id = ?",
+            (city, *removed_shops, manager_uid)
+        )
+        users_to_move = await cursor.fetchall()
+        for u in users_to_move:
+            u_id = u["user_id"]
+            u_role = u["role"] or ""
+            target_t_uid = await get_appropriate_territorial_for_user(city, u_role)
+            await db.execute("UPDATE users SET manager_id = ? WHERE user_id = ?", (target_t_uid, u_id))
+            reassigned_count += 1
+            
+        if reassigned_count > 0:
+            await db.execute(
+                "UPDATE conversations SET status = 'closed' WHERE manager_id = ? AND status = 'open'",
+                (manager_uid,)
+            )
+            await db.commit()
+            
+    return reassigned_count
+
+
+async def count_unassigned_or_territorial_users_in_shops(city: str, shop_names: list[str], exclude_manager_uid: int = None) -> tuple[int, int]:
+    """
+    Рахує кількість стажерів та працівників у заданих магазинах, які закріплені за Територіалом або Адміністратором
+    (тобто не підпорядковані іншому діючому керівнику магазину).
+    """
+    if not shop_names:
+        return 0, 0
+    placeholders = ",".join("?" for _ in shop_names)
+    active_store_managers = await get_all_kerivnyky()
+    other_store_mgr_uids = set(
+        m["uid"] for m in active_store_managers
+        if exclude_manager_uid is None or m.get("uid") != exclude_manager_uid
+    )
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            f"SELECT user_id, manager_id, status FROM users WHERE city = ? AND shop IN ({placeholders})",
+            (city, *shop_names)
+        )
+        rows = await cursor.fetchall()
+        
+    interns_count = 0
+    workers_count = 0
+    for r in rows:
+        m_id = r["manager_id"]
+        # Якщо вже під цим керівником - пропускаємо
+        if exclude_manager_uid and m_id == exclude_manager_uid:
+            continue
+        # Якщо під іншим діючим керівником магазину - не чіпаємо
+        if m_id in other_store_mgr_uids:
+            continue
+        # Інакше (під Територіалом, Адміном або NULL)
+        if r["status"] == "Працівник":
+            workers_count += 1
+        else:
+            interns_count += 1
+            
+    return interns_count, workers_count
+
+
+async def transfer_shop_users_to_manager(city: str, shop_names: list[str], target_manager_uid: int) -> int:
+    """
+    Переводить стажерів та працівників обраних магазинів (які були під Територіалом/Адміном) під target_manager_uid.
+    """
+    if not shop_names:
+        return 0
+    placeholders = ",".join("?" for _ in shop_names)
+    active_store_managers = await get_all_kerivnyky()
+    other_store_mgr_uids = set(
+        m["uid"] for m in active_store_managers
+        if m.get("uid") != target_manager_uid
+    )
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            f"SELECT user_id, manager_id FROM users WHERE city = ? AND shop IN ({placeholders})",
+            (city, *shop_names)
+        )
+        rows = await cursor.fetchall()
+        
+        target_user_ids = [
+            r["user_id"] for r in rows
+            if r["manager_id"] != target_manager_uid and r["manager_id"] not in other_store_mgr_uids
+        ]
+        
+        if target_user_ids:
+            u_placeholders = ",".join("?" for _ in target_user_ids)
+            await db.execute(
+                f"UPDATE users SET manager_id = ? WHERE user_id IN ({u_placeholders})",
+                (target_manager_uid, *target_user_ids)
+            )
+            await db.commit()
+            
+        return len(target_user_ids)
+
+
 async def get_all_observers() -> list[dict]:
     """Отримує список всіх активних наглядачів (process='Наглядач')."""
     managers = await get_all_managers()

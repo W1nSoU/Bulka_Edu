@@ -144,6 +144,7 @@ async def run_tests():
     mock_message.answer_photo = AsyncMock()
     mock_state = MagicMock()
     mock_state.clear = AsyncMock()
+    mock_state.set_state = AsyncMock()
 
     with patch("bot.menus.developer._check_access", return_value=(True, True, False)):
         await developer_process_user_search(mock_message, mock_state)
@@ -154,16 +155,65 @@ async def run_tests():
         assert "📅 <b>Статус днів</b>" in caption
         reply_markup = kwargs.get("reply_markup")
         card_callbacks = [btn.callback_data for row in reply_markup.inline_keyboard for btn in row]
-        assert f"dev_days_manage:{test_user_id}" in card_callbacks
-        assert f"dev_user_modify:{test_user_id}" in card_callbacks
-        assert f"dev_user_delete_confirm:{test_user_id}" in card_callbacks
-        assert "dev_users_search" in card_callbacks
-    print("  ✅ Search directly resolves single user to photo card with action buttons!")
+        assert any(c.startswith(f"dev_days_manage:{test_user_id}") for c in card_callbacks)
+        assert any(c.startswith(f"dev_user_modify:{test_user_id}") for c in card_callbacks)
+        assert any(c.startswith(f"dev_user_delete_confirm:{test_user_id}") for c in card_callbacks)
+        assert "dev_u_cback:srch" in card_callbacks
+    print("  ✅ Search directly resolves single user to photo card with action buttons and dev_u_cback:srch!")
+
+    # 9. Test _developer_show_users_list has NO inline user buttons
+    print("9. Testing _developer_show_users_list does NOT have inline user buttons...")
+    from bot.menus.developer import _developer_show_users_list
+    mock_cb = MagicMock()
+    mock_cb.from_user.id = 123456
+    mock_cb.message = MagicMock()
+    mock_cb.message.photo = None
+    mock_cb.message.edit_text = AsyncMock()
+    mock_cb.message.answer = AsyncMock()
+    mock_cb.answer = AsyncMock()
+
+    sample_users = [
+        {"user_id": 111, "full_name": "Іван Тест", "role": "Стажер", "shop": "B-1", "city": "Київ"},
+        {"user_id": 222, "full_name": "Петро Тест", "role": "Працівник", "shop": "B-2", "city": "Київ"},
+    ]
+    await _developer_show_users_list(mock_cb, sample_users, "👥 <b>Всі користувачі</b>", "all", 0)
+    assert mock_cb.message.edit_text.called or mock_cb.message.answer.called
+    call_args = mock_cb.message.edit_text.call_args or mock_cb.message.answer.call_args
+    list_markup = call_args[1].get("reply_markup") or call_args[0][1]
+    list_callbacks = [btn.callback_data for row in list_markup.inline_keyboard for btn in row]
+    # Ensure NO dev_u_card callbacks in the general list!
+    assert not any(c.startswith("dev_u_card:") for c in list_callbacks), "Found dev_u_card in user list! Should not be there."
+    assert "dev_users_staff" in list_callbacks
+    print("  ✅ _developer_show_users_list is clean text with pagination only, NO user inline buttons!")
+
+    # 10. Test developer_user_card_back_handler strictly deletes card photo message
+    print("10. Testing developer_user_card_back_handler strictly deletes card photo message...")
+    from bot.menus.developer import developer_user_card_back_handler
+    mock_card_cb = MagicMock()
+    mock_card_cb.from_user.id = 123456
+    mock_card_cb.data = "dev_u_cback:srch"
+    mock_card_cb.message = MagicMock()
+    mock_card_cb.message.photo = [MagicMock()]
+    mock_card_cb.message.delete = AsyncMock()
+    mock_card_cb.message.answer = AsyncMock()
+    mock_card_cb.answer = AsyncMock()
+
+    with patch("bot.menus.developer._check_access", return_value=(True, True, False)):
+        await developer_user_card_back_handler(mock_card_cb, mock_state)
+        # Verify photo message delete was called!
+        assert mock_card_cb.message.delete.called, "Card message delete was not called!"
+        assert mock_card_cb.message.photo is None, "message.photo was not reset to None!"
+        # Verify it answered with text search prompt
+        assert mock_card_cb.message.answer.called, "Search prompt was not answered!"
+        args, kwargs = mock_card_cb.message.answer.call_args
+        prompt_text = args[0] if args else kwargs.get("text", "")
+        assert "Пошук користувача" in prompt_text
+    print("  ✅ developer_user_card_back_handler deleted the card photo message and sent clean search prompt!")
 
     from database.users import delete_user
     await delete_user(test_user_id)
 
-    print("\n🎉 ALL 8 USERS MENU RESTRUCTURING & ADVANCED FILTERS TESTS PASSED 100%!")
+    print("\n🎉 ALL 10 USERS MENU RESTRUCTURING & ADVANCED FILTERS TESTS PASSED 100%!")
 
 
 if __name__ == "__main__":
