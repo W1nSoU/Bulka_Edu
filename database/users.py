@@ -641,6 +641,48 @@ async def get_users_by_full_name(full_name: str) -> list[dict]:
         users = await cursor.fetchall()
         return [dict(user) for user in users]
 
+async def get_users_by_shop(city: str, shop: str) -> list[dict]:
+    """Retrieves a list of users filtered by city and shop."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM users WHERE city = ? AND shop = ? ORDER BY last_activity DESC",
+            (city, shop)
+        )
+        users = await cursor.fetchall()
+        return [dict(user) for user in users]
+
+async def get_users_by_manager(manager_id: int) -> list[dict]:
+    """Retrieves a list of all users assigned to a specific manager."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM users WHERE manager_id = ? ORDER BY last_activity DESC",
+            (manager_id,)
+        )
+        users = await cursor.fetchall()
+        return [dict(user) for user in users]
+
+async def count_users_by_shop(city: str, shop: str) -> int:
+    """Returns total number of users in a specific city and shop."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM users WHERE city = ? AND shop = ?",
+            (city, shop)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+async def count_users_by_manager(manager_id: int) -> int:
+    """Returns total number of users assigned to a specific manager."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM users WHERE manager_id = ?",
+            (manager_id,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
 async def log_training_event(
     user_id: int,
     event_type: str,

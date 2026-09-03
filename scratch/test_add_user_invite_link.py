@@ -2,12 +2,14 @@ import asyncio
 import os
 import sys
 import unittest
+import aiosqlite
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from bot.menus.developer import (
     _users_menu_keyboard,
+    _users_staff_keyboard,
     developer_users_add_start,
     developer_users_add_city,
     developer_users_add_shop,
@@ -26,7 +28,6 @@ class TestAddUserInviteLink(unittest.IsolatedAsyncioTestCase):
         self.created_tokens = []
 
     async def asyncTearDown(self):
-        import aiosqlite
         from database.tokens import TOKENS_DB_PATH
         async with aiosqlite.connect(TOKENS_DB_PATH) as db:
             for t in self.created_tokens:
@@ -34,16 +35,16 @@ class TestAddUserInviteLink(unittest.IsolatedAsyncioTestCase):
             await db.commit()
 
     def test_users_menu_keyboard_has_add_button(self):
-        """Admin and Territorial keyboards should have '➕ Додати' button."""
-        admin_kb = _users_menu_keyboard(is_admin=True, is_territorial=False, is_observer=False)
+        """Admin and Territorial staff keyboards should have '➕ Додати' button."""
+        admin_kb = _users_staff_keyboard(is_admin=True, is_territorial=False, is_observer=False)
         admin_callbacks = [b.callback_data for row in admin_kb.inline_keyboard for b in row]
         self.assertIn("dev_users_add", admin_callbacks)
 
-        terr_kb = _users_menu_keyboard(is_admin=False, is_territorial=True, is_observer=False)
+        terr_kb = _users_staff_keyboard(is_admin=False, is_territorial=True, is_observer=False)
         terr_callbacks = [b.callback_data for row in terr_kb.inline_keyboard for b in row]
         self.assertIn("dev_users_add", terr_callbacks)
 
-        obs_kb = _users_menu_keyboard(is_admin=False, is_territorial=False, is_observer=True)
+        obs_kb = _users_staff_keyboard(is_admin=False, is_territorial=False, is_observer=True)
         obs_callbacks = [b.callback_data for row in obs_kb.inline_keyboard for b in row]
         self.assertNotIn("dev_users_add", obs_callbacks)
 

@@ -256,11 +256,30 @@ async def get_position_stats(position_id: int) -> dict:
     return {"workers_count": workers_count, "interns_count": interns_count}
 
 
+async def get_position_direction(role_name: str) -> str:
+    """
+    Повертає напрямок посади: 'ВВ' (Власне виробництво) або 'ТЗ' (Торговий зал).
+    """
+    if not role_name:
+        return "ТЗ"
+    pos = await get_position_by_name(role_name)
+    if pos and pos.get("territorial_type"):
+        return pos["territorial_type"]
+    if not pos:
+        pos_vv = await get_position_by_name(f"ВВ {role_name}")
+        if pos_vv and pos_vv.get("territorial_type"):
+            return pos_vv["territorial_type"]
+    if role_name.strip().startswith("ВВ") or "ВВ " in role_name:
+        return "ВВ"
+    return "ТЗ"
+
+
 __all__ = [
     "get_all_positions",
     "get_position_by_id",
     "get_position_by_name",
     "get_days_count_for_role",
+    "get_position_direction",
     "add_position",
     "rename_position",
     "update_days_count",

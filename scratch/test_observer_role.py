@@ -126,11 +126,22 @@ async def run_tests():
     # Users keyboard
     users_kb = _users_menu_keyboard(is_admin=False, is_territorial=False, is_observer=True)
     users_callbacks = [btn.callback_data for row in users_kb.inline_keyboard for btn in row]
-    assert "dev_users_list" in users_callbacks, "Users list missing"
-    assert "dev_users_by_city" in users_callbacks, "Users by city missing"
+    assert "dev_users_staff" in users_callbacks, "Users staff menu missing"
+    assert "dev_users_filters" in users_callbacks, "Users filters missing"
+    assert "dev_users_search" in users_callbacks, "Users search missing"
     assert "dev_users_delete" not in users_callbacks, "Observer must NOT have delete user button"
     assert "dev_users_bulk_promote" not in users_callbacks, "Observer must NOT have bulk promote button"
-    print(" - Users keyboard: OK")
+
+    from bot.menus.developer import _users_staff_keyboard, _users_filters_keyboard
+    staff_kb = _users_staff_keyboard(is_admin=False, is_territorial=False, is_observer=True)
+    staff_callbacks = [btn.callback_data for row in staff_kb.inline_keyboard for btn in row]
+    assert "dev_users_list" in staff_callbacks, "Users list missing in staff menu"
+    assert "dev_users_add" not in staff_callbacks, "Observer must NOT have add user button"
+
+    filters_kb = _users_filters_keyboard(is_admin=False, is_territorial=False, is_observer=True)
+    filters_callbacks = [btn.callback_data for row in filters_kb.inline_keyboard for btn in row]
+    assert "dev_users_by_city" in filters_callbacks, "Users by city missing in filters menu"
+    print(" - Users keyboard & submenus: OK")
 
     # Manager card keyboard for observer
     # Mock manager in managers table if needed

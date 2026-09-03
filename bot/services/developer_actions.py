@@ -1,5 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
+import html
+from aiogram import Bot
 
 import pytz
 
@@ -54,7 +56,7 @@ def _format_last_activity(value: Optional[str]) -> str:
     now = datetime.now(pytz.timezone(TIMEZONE))
     delta = now - dt
     if delta.days > 0:
-        return f"{dt:%Y-%m-%d %H:%M}"
+        return f"{delta.days} дн. тому"
     hours = delta.seconds // 3600
     minutes = (delta.seconds % 3600) // 60
     if hours:
@@ -70,34 +72,47 @@ def _status_icon(status: DayStatus) -> str:
     }[status]
 
 
-async def get_user_days_report(user_id: int) -> str:
+async def get_user_days_report(user_id: int, bot: Optional[Bot] = None) -> str:
     user = await _ensure_user(user_id)
-    
-    # Отримуємо ім'я керівника
-    manager_name = "Не призначено"
-    if manager_id := user.get("manager_id"):
-        if manager := await get_manager_by_uid(manager_id):
-            manager_name = manager.get("full_name", f"ID:{manager_id}")
+    from database.positions import get_days_count_for_role, get_position_direction
+    from bot.utils.manager import get_manager_display_title
+
+    role = user.get("role") or "Не вказано"
+    direction = await get_position_direction(role)
+    total_days = await get_days_count_for_role(role) or DAYS_TOTAL
+
+    manager_id = user.get("manager_id")
+    manager_title = await get_manager_display_title(bot, manager_id)
+
+    full_name = user.get("full_name") or "Без імені"
+    username = (user.get("username") or "").strip().lstrip("@")
+    user_line = f"👤 <b>{html.escape(full_name)}</b>"
+    if username:
+        user_line += f" (@{html.escape(username)})"
+
+    city = user.get("city") or "Не вказано"
+    shop = user.get("shop") or "Не вказано"
 
     overview = await get_days_overview(user_id)
     completed_days = sum(1 for _, status in overview if status == DayStatus.COMPLETED)
-    percent = int(completed_days / DAYS_TOTAL * 100)
+    percent = int(completed_days / total_days * 100) if total_days else 0
 
     lines = [
-        f"👤 <b>{user.get('full_name', 'Без імені')}</b> (@{user.get('username', 'немає')})",
-        f"🏢 Посада: <b>{user.get('role', 'Не вказано')}</b>",
-        f"🏙 Місто: <b>{user.get('city', 'Не вказано')}</b>",
-        f"🏪 Магазин: <b>{user.get('shop', 'Не вказано')}</b>",
-        f"👨‍🏫 Керівник: <b>{manager_name}</b>",
-        f"📊 Прогрес: <b>{completed_days}/{DAYS_TOTAL} ({percent}%)</b>",
-        f"⏱️ Остання активність: <b>{_format_last_activity(user.get('last_activity'))}</b>",
+        user_line,
+        f"🏢 <b>Посада:</b> {html.escape(role)} | {direction}",
+        f"🏙 <b>Місто:</b> {html.escape(city)}",
+        f"🏪 <b>Магазин:</b> {html.escape(shop)}",
+        f"👨‍🏫 <b>Керівник:</b> {html.escape(manager_title)}",
+        f"📊 <b>Прогрес:</b> {completed_days}/{total_days} ({percent}%)",
+        f"⏱️ <b>Остання активність:</b> {_format_last_activity(user.get('last_activity'))}",
         "",
         "📅 <b>Статус днів</b>",
     ]
 
     for day, status in overview:
-        icon = _status_icon(status)
-        lines.append(f"{icon} День {day}")
+        if day <= total_days:
+            icon = _status_icon(status)
+            lines.append(f"{icon} День {day}")
     return "\n".join(lines)
 
 

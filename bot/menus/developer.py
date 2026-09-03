@@ -36,6 +36,10 @@ from database.users import (
     get_user_progress,
     update_user_role,
     get_users_by_managers,
+    get_users_by_shop,
+    get_users_by_manager,
+    count_users_by_shop,
+    count_users_by_manager,
 )
 from database.hr import (
     is_developer_user,
@@ -316,7 +320,18 @@ def _admin_other_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎟 Токени", callback_data="dev_tokens_menu"),
             InlineKeyboardButton(text="💚 Health Status", callback_data="dev_health_status")
         ],
+        [
+            InlineKeyboardButton(text="⚙️ Сервісні функції", callback_data="dev_service_functions_menu")
+        ],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _service_functions_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="✅ Перевести завершених у працівники", callback_data="dev_users_bulk_promote")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_other")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -470,6 +485,19 @@ async def dev_main_other_handler(callback: CallbackQuery):
         "img/admin/admin_tools.jpg",
         "🛠 <b>Інше</b>",
         _admin_other_keyboard()
+    )
+
+
+async def dev_service_functions_handler(callback: CallbackQuery):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or not is_admin:
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+    await _show_admin_photo_menu(
+        callback,
+        "img/admin/admin_tools.jpg",
+        "⚙️ <b>Сервісні функції</b>\n\nОберіть дію:",
+        _service_functions_keyboard()
     )
 
 
@@ -839,28 +867,46 @@ async def developer_remove_dev(callback: CallbackQuery, state: FSMContext):
 
 def _users_menu_keyboard(is_admin: bool, is_territorial: bool, is_observer: bool = False) -> InlineKeyboardMarkup:
     buttons = [
+        [InlineKeyboardButton(text="👥 Персонал", callback_data="dev_users_staff")],
+        [InlineKeyboardButton(text="🔍 Фільтри", callback_data="dev_users_filters")],
+        [InlineKeyboardButton(text="🔎 Пошук", callback_data="dev_users_search")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _users_staff_keyboard(is_admin: bool, is_territorial: bool, is_observer: bool = False) -> InlineKeyboardMarkup:
+    buttons = [
         [
             InlineKeyboardButton(text="🎓 Стажери", callback_data="dev_users_interns"),
             InlineKeyboardButton(text="👷 Працівники", callback_data="dev_users_workers"),
         ],
         [
-            InlineKeyboardButton(text="🚀 Активні стажери", callback_data="dev_users_active"),
-            InlineKeyboardButton(text="😴 Неактивні", callback_data="dev_users_inactive"),
+            InlineKeyboardButton(text="📋 Всі користувачі", callback_data="dev_users_list"),
         ],
     ]
     if is_admin or is_territorial:
         buttons.append([InlineKeyboardButton(text="➕ Додати", callback_data="dev_users_add")])
 
-    if is_admin or is_observer:
-        buttons.append([InlineKeyboardButton(text="🏙️ За містом", callback_data="dev_users_by_city")])
-        if is_admin:
-            buttons.append([InlineKeyboardButton(text="✅ Перевести завершених у працівники", callback_data="dev_users_bulk_promote")])
-        buttons.append([InlineKeyboardButton(text="📋 Список користувачів", callback_data="dev_users_list")])
-        buttons.append([InlineKeyboardButton(text="🔍 Пошук", callback_data="dev_users_search")])
-        if is_admin:
-            buttons.append([InlineKeyboardButton(text="❌ Видалити", callback_data="dev_users_delete")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")])
+
+def _users_filters_keyboard(is_admin: bool, is_territorial: bool, is_observer: bool = False) -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(text="🏙️ За містом", callback_data="dev_users_by_city"),
+            InlineKeyboardButton(text="🏪 За магазинами", callback_data="dev_users_by_shop"),
+        ],
+        [
+            InlineKeyboardButton(text="👔 За керівниками", callback_data="dev_users_by_manager"),
+        ],
+        [
+            InlineKeyboardButton(text="🚀 Активні стажери", callback_data="dev_users_active"),
+            InlineKeyboardButton(text="😴 Неактивні", callback_data="dev_users_inactive"),
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")],
+    ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 async def _get_users_menu_kb(user_id: int) -> InlineKeyboardMarkup:
@@ -870,6 +916,24 @@ async def _get_users_menu_kb(user_id: int) -> InlineKeyboardMarkup:
     is_territorial = await is_territorial_user(user_id)
     is_observer = await is_observer_user(user_id)
     return _users_menu_keyboard(is_admin, is_territorial, is_observer=is_observer)
+
+
+async def _get_users_staff_kb(user_id: int) -> InlineKeyboardMarkup:
+    from database.hr import is_developer_user
+    from database.managers import is_territorial_user, is_observer_user
+    is_admin = await is_developer_user(user_id)
+    is_territorial = await is_territorial_user(user_id)
+    is_observer = await is_observer_user(user_id)
+    return _users_staff_keyboard(is_admin, is_territorial, is_observer=is_observer)
+
+
+async def _get_users_filters_kb(user_id: int) -> InlineKeyboardMarkup:
+    from database.hr import is_developer_user
+    from database.managers import is_territorial_user, is_observer_user
+    is_admin = await is_developer_user(user_id)
+    is_territorial = await is_territorial_user(user_id)
+    is_observer = await is_observer_user(user_id)
+    return _users_filters_keyboard(is_admin, is_territorial, is_observer=is_observer)
 
 
 def _cancel_keyboard(callback_data: str) -> InlineKeyboardMarkup:
@@ -978,8 +1042,32 @@ async def developer_users_menu(callback: CallbackQuery):
         return
     await _edit_or_answer(
         callback.message,
-        "👥 <b>Користувачі</b>\nОберіть дію:",
+        "👥 <b>Користувачі</b>\nОберіть категорію:",
         reply_markup=await _get_users_menu_kb(callback.from_user.id),
+    )
+    await callback.answer()
+
+
+async def developer_users_staff_menu(callback: CallbackQuery):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    await _edit_or_answer(
+        callback.message,
+        "👥 <b>Персонал</b>\n\nОберіть категорію співробітників або дію:",
+        reply_markup=await _get_users_staff_kb(callback.from_user.id),
+    )
+    await callback.answer()
+
+
+async def developer_users_filters_menu(callback: CallbackQuery):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    await _edit_or_answer(
+        callback.message,
+        "🔍 <b>Фільтри користувачів</b>\n\nОберіть параметр фільтрації:",
+        reply_markup=await _get_users_filters_kb(callback.from_user.id),
     )
     await callback.answer()
 
@@ -1084,8 +1172,17 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
         lines.append(info_line)
         lines.append("───────────────")
 
-    # Формування кнопок
-    pagination_buttons = []
+    user_buttons = []
+    for u in paginated_users:
+        u_name = u.get("full_name") or f"ID {u['user_id']}"
+        u_role = u.get("role") or "Співробітник"
+        ret_code = "staff" if mode in ("interns", "workers", "all") else "filters"
+        user_buttons.append([InlineKeyboardButton(
+            text=f"👤 {u_name} | {u_role}",
+            callback_data=f"dev_u_card:{u['user_id']}:{ret_code}"
+        )])
+
+    pagination_buttons = list(user_buttons)
     row = []
     if curr_page > 0:
         row.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"dev_users_pag:{mode}:{curr_page - 1}"))
@@ -1099,7 +1196,8 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
     elif mode == "workers":
         pagination_buttons.append([InlineKeyboardButton(text="📥 Вивантажити список", callback_data="dev_workers_export_xlsx")])
 
-    pagination_buttons.append([InlineKeyboardButton(text="⬅️ До меню користувачів", callback_data="dev_users_menu")])
+    back_target = "dev_users_staff" if mode in ("interns", "workers", "all") else "dev_users_filters"
+    pagination_buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_target)])
     
     await _edit_or_answer(
         callback.message,
@@ -1312,14 +1410,22 @@ async def developer_workers_export_xlsx(callback: CallbackQuery):
 
 async def developer_users_by_city_menu(callback: CallbackQuery):
     has_access, is_admin, is_territorial = await _check_access(callback)
-    if not has_access or (is_territorial and not is_admin):
-        await callback.answer("Вам недоступна ця функція.", show_alert=True)
+    if not has_access:
         return
     
+    if is_territorial and not is_admin:
+        from database.managers import get_manager_by_uid
+        mgr = await get_manager_by_uid(callback.from_user.id)
+        city = (mgr.get("city") or "").strip()
+        users = await get_users_by_city(city)
+        users = await _filter_users_for_territorial(callback.from_user.id, users)
+        await _developer_show_users_list(callback, users, f"🏙️ <b>Стажери: {city}</b>", f"city:{city}", 0)
+        return
+
     buttons = []
     for city in AVAILABLE_CITIES:
         buttons.append([InlineKeyboardButton(text=city, callback_data=f"dev_users_filter_city:{city}")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_filters")])
     
     await _edit_or_answer(
         callback.message,
@@ -1329,17 +1435,302 @@ async def developer_users_by_city_menu(callback: CallbackQuery):
     try: await callback.answer()
     except: pass
 
+
 async def developer_users_filter_city(callback: CallbackQuery):
     has_access, is_admin, is_territorial = await _check_access(callback)
-    if not has_access or (is_territorial and not is_admin):
-        await callback.answer("Вам недоступна ця функція.", show_alert=True)
+    if not has_access:
         return
     try:
         city = callback.data.split(":")[1]
     except IndexError:
         return
     users = await get_users_by_city(city)
+    if is_territorial and not is_admin:
+        users = await _filter_users_for_territorial(callback.from_user.id, users)
     await _developer_show_users_list(callback, users, f"🏙️ <b>Стажери: {city}</b>", f"city:{city}", 0)
+
+
+# ---------- Advanced Filters: By Shop & By Manager ----------
+
+async def developer_users_by_shop_menu(callback: CallbackQuery):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+
+    if is_territorial and not is_admin:
+        from database.managers import get_manager_by_uid
+        mgr = await get_manager_by_uid(callback.from_user.id)
+        t_city = (mgr.get("city") or "").strip()
+        c_idx = 0
+        for idx, c in enumerate(AVAILABLE_CITIES):
+            if c.lower() == t_city.lower():
+                c_idx = idx
+                break
+        await _show_shops_for_city_index(callback, c_idx, back_cb="dev_users_filters")
+        return
+
+    buttons = []
+    for idx, city in enumerate(AVAILABLE_CITIES):
+        buttons.append([InlineKeyboardButton(text=f"🏙️ {city}", callback_data=f"dev_u_cshop:{idx}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_filters")])
+
+    await _edit_or_answer(
+        callback.message,
+        "🏪 <b>Фільтр за магазинами</b>\n\nОберіть місто:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+async def _show_shops_for_city_index(callback: CallbackQuery, c_idx: int, back_cb: str):
+    city = AVAILABLE_CITIES[c_idx] if c_idx < len(AVAILABLE_CITIES) else "Хмельницький"
+    shops = _get_shops_for_city(city)
+    buttons = []
+    for s_idx, shop in enumerate(shops):
+        cnt = await count_users_by_shop(city, shop)
+        label = f"🏪 {shop} ({cnt})"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"dev_u_shop:{c_idx}:{s_idx}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)])
+
+    await _edit_or_answer(
+        callback.message,
+        f"🏪 <b>Магазини міста {city}</b>\n\nОберіть магазин для перегляду співробітників:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+async def developer_users_shop_city_select(callback: CallbackQuery):
+    try:
+        c_idx = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        return
+    await _show_shops_for_city_index(callback, c_idx, back_cb="dev_users_by_shop")
+
+
+async def developer_users_shop_selected(callback: CallbackQuery):
+    try:
+        parts = callback.data.split(":")
+        c_idx = int(parts[1])
+        s_idx = int(parts[2])
+    except (IndexError, ValueError):
+        return
+
+    city = AVAILABLE_CITIES[c_idx] if c_idx < len(AVAILABLE_CITIES) else "Хмельницький"
+    shops = _get_shops_for_city(city)
+    shop = shops[s_idx] if s_idx < len(shops) else ""
+
+    users = await get_users_by_shop(city, shop)
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if is_territorial and not is_admin:
+        users = await _filter_users_for_territorial(callback.from_user.id, users)
+        back_to_shops = "dev_users_filters"
+    else:
+        back_to_shops = f"dev_u_cshop:{c_idx}"
+
+    if not users:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_to_shops)]
+        ])
+        await _edit_or_answer(
+            callback.message,
+            f"🏪 <b>{html.escape(shop)}</b> ({city})\n\nУ цьому магазині немає зареєстрованих співробітників.",
+            reply_markup=kb
+        )
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+        return
+
+    buttons = []
+    for u in users:
+        name = u.get("full_name") or "Без імені"
+        role = u.get("role") or "Співробітник"
+        uid = u["user_id"]
+        ret_code = f"sh_{c_idx}_{s_idx}"
+        buttons.append([InlineKeyboardButton(text=f"👤 {name} | {role}", callback_data=f"dev_u_card:{uid}:{ret_code}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_to_shops)])
+
+    await _edit_or_answer(
+        callback.message,
+        f"🏪 <b>{html.escape(shop)}</b> ({city})\n\nВсього співробітників: <b>{len(users)}</b>\nОберіть співробітника для перегляду картки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+async def developer_users_by_manager_menu(callback: CallbackQuery):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    from database.managers import get_all_managers, get_manager_by_uid
+
+    managers = await get_all_managers()
+    mgr_list = [m for m in managers if m.get("process") in ("Керівник", "Керівник Стажер")]
+
+    if is_territorial and not is_admin:
+        t_mgr = await get_manager_by_uid(callback.from_user.id)
+        t_city = (t_mgr.get("city") or "").strip().lower()
+        mgr_list = [m for m in mgr_list if (m.get("city") or "").strip().lower() == t_city]
+
+    buttons = []
+    for m in mgr_list:
+        m_uid = m["uid"]
+        m_name = m.get("full_name") or f"ID {m_uid}"
+        cnt = await count_users_by_manager(m_uid)
+        buttons.append([InlineKeyboardButton(text=f"👔 {m_name} ({cnt})", callback_data=f"dev_u_mgr:{m_uid}")])
+
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_filters")])
+    await _edit_or_answer(
+        callback.message,
+        "👔 <b>Фільтр за керівниками</b>\n\nОберіть керівника для перегляду підпорядкованих працівників та стажерів:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+async def developer_users_manager_selected(callback: CallbackQuery):
+    try:
+        mgr_uid = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        return
+
+    from database.managers import get_manager_by_uid
+    mgr = await get_manager_by_uid(mgr_uid)
+    mgr_name = mgr.get("full_name") if mgr else f"ID {mgr_uid}"
+
+    users = await get_users_by_manager(mgr_uid)
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if is_territorial and not is_admin:
+        users = await _filter_users_for_territorial(callback.from_user.id, users)
+
+    if not users:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_by_manager")]
+        ])
+        await _edit_or_answer(
+            callback.message,
+            f"👔 <b>Керівник:</b> {html.escape(mgr_name)}\n\nУ цього керівника немає закріплених працівників або стажерів.",
+            reply_markup=kb
+        )
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+        return
+
+    buttons = []
+    for u in users:
+        name = u.get("full_name") or "Без імені"
+        role = u.get("role") or "Співробітник"
+        uid = u["user_id"]
+        ret_code = f"mg_{mgr_uid}"
+        buttons.append([InlineKeyboardButton(text=f"👤 {name} | {role}", callback_data=f"dev_u_card:{uid}:{ret_code}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_by_manager")])
+
+    await _edit_or_answer(
+        callback.message,
+        f"👔 <b>Керівник:</b> {html.escape(mgr_name)}\n\nЗакріплено співробітників: <b>{len(users)}</b>\nОберіть співробітника для перегляду картки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+def _decode_back_callback(ret_code: str) -> str:
+    if not ret_code or ret_code == "menu":
+        return "dev_users_menu"
+    if ret_code == "staff":
+        return "dev_users_staff"
+    if ret_code == "filters":
+        return "dev_users_filters"
+    if ret_code == "srch":
+        return "dev_users_search"
+    if ret_code.startswith("sh_"):
+        parts = ret_code.split("_")
+        return f"dev_u_shop:{parts[1]}:{parts[2]}"
+    if ret_code.startswith("mg_"):
+        mgr_id = ret_code.split("_")[1]
+        return f"dev_u_mgr:{mgr_id}"
+    if ret_code.startswith("ct_"):
+        c_idx = ret_code.split("_")[1]
+        city = AVAILABLE_CITIES[int(c_idx)] if int(c_idx) < len(AVAILABLE_CITIES) else ""
+        return f"dev_users_filter_city:{city}"
+    return ret_code
+
+
+async def _show_user_profile_card(
+    event: Union[CallbackQuery, Message],
+    user_id: int,
+    state: Optional[FSMContext] = None,
+    back_callback: str = "dev_users_menu"
+):
+    if state:
+        await state.clear()
+
+    bot = event.bot
+    try:
+        report = await get_user_days_report(user_id, bot=bot)
+    except Exception:
+        fallback_msg = "⚠️ Користувача не знайдено або дані видалено."
+        if isinstance(event, CallbackQuery):
+            await _edit_or_answer(
+                event.message,
+                fallback_msg,
+                reply_markup=await _get_users_menu_kb(event.from_user.id)
+            )
+        else:
+            await event.answer(fallback_msg)
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{user_id}"),
+            InlineKeyboardButton(text="✍️ Змінити", callback_data=f"dev_user_modify:{user_id}")
+        ],
+        [
+            InlineKeyboardButton(text="❌ Видалити", callback_data=f"dev_user_delete_confirm:{user_id}"),
+            InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)
+        ]
+    ])
+
+    photo_input = await get_user_avatar_input(bot, user_id)
+    if isinstance(event, CallbackQuery):
+        await _send_or_edit_card_photo(event, photo_input, report, reply_markup=kb)
+    else:
+        await event.answer_photo(photo_input, caption=report, reply_markup=kb, parse_mode="HTML")
+
+
+async def developer_user_card_handler(callback: CallbackQuery, state: FSMContext):
+    try:
+        parts = callback.data.split(":", 2)
+        user_id = int(parts[1])
+        ret_code = parts[2] if len(parts) > 2 else "menu"
+    except (ValueError, IndexError):
+        await callback.answer("Помилка обробки картки.", show_alert=True)
+        return
+
+    back_cb = _decode_back_callback(ret_code)
+    await _show_user_profile_card(callback, user_id, state=state, back_callback=back_cb)
+    try:
+        await callback.answer()
+    except Exception:
+        pass
 
 async def developer_users_pagination_handler(callback: CallbackQuery):
     try:
@@ -1379,19 +1770,20 @@ async def developer_users_pagination_handler(callback: CallbackQuery):
 
 async def developer_request_user_search(callback: CallbackQuery, state: FSMContext):
     has_access, is_admin, is_territorial = await _check_access(callback)
-    if not has_access or (is_territorial and not is_admin):
-        await callback.answer("Вам недоступна ця функція.", show_alert=True)
+    if not has_access:
         return
     await state.set_state(DeveloperStates.waiting_user_search)
     await _edit_or_answer(
         callback.message,
-        "🔍 <b>Пошук користувача</b>\n\n"
+        "🔎 <b>Пошук користувача</b>\n\n"
         "Введіть один з варіантів:\n"
         "• ID користувача (наприклад, <code>123456</code>)\n"
         "• Username (наприклад, <code>@username</code>)\n"
         "• ПІБ (наприклад, <code>Іванов Іван</code>)\n\n"
         "<i>💡 Пошук не чутливий до регістру</i>",
-        reply_markup=await _get_users_menu_kb(callback.from_user.id),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")]
+        ]),
     )
     await callback.answer()
 
@@ -1412,9 +1804,13 @@ async def developer_process_user_search(message: Message, state: FSMContext):
         # Search by full name if it's not a username or ID
         users = await get_users_by_full_name(query)
 
+    has_access, is_admin, is_territorial = await _check_access(message)
+    if is_territorial and not is_admin:
+        users = await _filter_users_for_territorial(message.from_user.id, users)
+
     if not users:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 Новий пошук", callback_data="dev_user_search")],
+            [InlineKeyboardButton(text="🔍 Новий пошук", callback_data="dev_users_search")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")]
         ])
         
@@ -1431,52 +1827,30 @@ async def developer_process_user_search(message: Message, state: FSMContext):
         return
 
     if len(users) == 1:
-        # If only one user is found, show their profile directly
+        # If only one user is found, show their profile card directly
         user = users[0]
         intern_id = int(user["user_id"])
-        report = await get_user_days_report(intern_id)
-        
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{intern_id}"),
-                InlineKeyboardButton(text="✍️ Змінити", callback_data=f"dev_user_modify:{intern_id}")
-            ],
-            [
-                InlineKeyboardButton(text="❌ Видалити", callback_data=f"dev_user_delete_confirm:{intern_id}"),
-                InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")
-            ]
-        ])
-        
-        await message.answer(report, reply_markup=kb)
+        await _show_user_profile_card(message, intern_id, state=state, back_callback="dev_users_search")
     else:
-        # If multiple users are found, show a list
-        lines = [f"👥 <b>Знайдено {len(users)} користувачів:</b>\n"]
-        
-        # Показуємо максимум 20 користувачів
+        # If multiple users are found, show inline buttons
         display_users = users[:20]
-        for user in display_users:
-            full_name = user.get('full_name', 'Без імені')
-            user_id = user['user_id']
-            username = user.get('username', '')
-            
-            user_info = f"• <b>{full_name}</b> (ID: <code>{user_id}</code>)"
-            if username:
-                user_info += f" | @{username}"
-            lines.append(user_info)
-        
+        buttons = []
+        for u in display_users:
+            full_name = u.get('full_name', 'Без імені')
+            user_id = u['user_id']
+            role = u.get('role', 'Співробітник')
+            btn_text = f"👤 {full_name} | {role}"
+            buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_u_card:{user_id}:srch")])
+
+        buttons.append([InlineKeyboardButton(text="🔍 Новий пошук", callback_data="dev_users_search")])
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")])
+
+        caption = f"👥 <b>Знайдено {len(users)} користувачів:</b>\nОберіть користувача для перегляду картки:"
         if len(users) > 20:
-            lines.append(f"\n<i>... та ще {len(users) - 20} користувачів</i>")
-        
-        lines.append("\n💡 <b>Уточніть пошук:</b>")
-        lines.append("• Введіть повне ім'я")
-        lines.append("• Або використайте ID конкретного користувача")
-        
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 Новий пошук", callback_data="dev_user_search")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")]
-        ])
-        
-        await message.answer("\n".join(lines), reply_markup=kb)
+            caption += f"\n<i>(показано перші 20 з {len(users)})</i>"
+
+        await message.answer(caption, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await state.clear()
 
     await state.clear()
 
@@ -5626,31 +6000,9 @@ async def developer_health_status(callback: CallbackQuery):
 
 # ---------- New User Management Handlers (from user profile) ----------
 
-async def _rebuild_user_profile_view(callback: CallbackQuery, user_id: int, state: FSMContext):
+async def _rebuild_user_profile_view(callback: CallbackQuery, user_id: int, state: FSMContext, back_callback: str = "dev_users_menu"):
     """Helper to refresh the user profile view after an action."""
-    try:
-        report = await get_user_days_report(user_id)
-    except Exception:
-        await _edit_or_answer(
-            callback.message,
-            "⚠️ Користувача не знайдено або дані видалено.",
-            reply_markup=await _get_users_menu_kb(callback.from_user.id)
-        )
-        await state.clear()
-        return
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{user_id}"),
-            InlineKeyboardButton(text="✍️ Змінити", callback_data=f"dev_user_modify:{user_id}")
-        ],
-        [
-            InlineKeyboardButton(text="❌ Видалити", callback_data=f"dev_user_delete_confirm:{user_id}"),
-            InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")
-        ]
-    ])
-    await _edit_or_answer(callback.message, report, reply_markup=kb)
-    await state.clear()
+    await _show_user_profile_card(callback, user_id, state=state, back_callback=back_callback)
 
 # --- Learning Days Management ---
 
@@ -7881,9 +8233,12 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(dev_main_analyt_handler, lambda c: c.data == "dev_main_analyt")
     dp.callback_query.register(dev_main_team_handler, lambda c: c.data == "dev_main_team")
     dp.callback_query.register(dev_main_other_handler, lambda c: c.data == "dev_main_other")
+    dp.callback_query.register(dev_service_functions_handler, lambda c: c.data == "dev_service_functions_menu")
 
     # Users
     dp.callback_query.register(developer_users_menu, lambda c: c.data == "dev_users_menu")
+    dp.callback_query.register(developer_users_staff_menu, lambda c: c.data == "dev_users_staff")
+    dp.callback_query.register(developer_users_filters_menu, lambda c: c.data == "dev_users_filters")
     dp.callback_query.register(developer_list_users, lambda c: c.data == "dev_users_list")
     dp.callback_query.register(developer_list_interns, lambda c: c.data == "dev_users_interns")
     dp.callback_query.register(developer_list_workers, lambda c: c.data == "dev_users_workers")
@@ -7898,6 +8253,18 @@ def register_developer_menu_handlers(dp: Dispatcher):
     # City filter
     dp.callback_query.register(developer_users_by_city_menu, lambda c: c.data == "dev_users_by_city")
     dp.callback_query.register(developer_users_filter_city, lambda c: c.data and c.data.startswith("dev_users_filter_city:"))
+
+    # Shop filter
+    dp.callback_query.register(developer_users_by_shop_menu, lambda c: c.data == "dev_users_by_shop")
+    dp.callback_query.register(developer_users_shop_city_select, lambda c: c.data and c.data.startswith("dev_u_cshop:"))
+    dp.callback_query.register(developer_users_shop_selected, lambda c: c.data and c.data.startswith("dev_u_shop:"))
+
+    # Manager filter
+    dp.callback_query.register(developer_users_by_manager_menu, lambda c: c.data == "dev_users_by_manager")
+    dp.callback_query.register(developer_users_manager_selected, lambda c: c.data and c.data.startswith("dev_u_mgr:"))
+
+    # User profile card
+    dp.callback_query.register(developer_user_card_handler, lambda c: c.data and c.data.startswith("dev_u_card:"))
     
     # Updated pagination
     dp.callback_query.register(developer_users_pagination_handler, lambda c: c.data and (c.data.startswith("dev_users_pag:") or c.data.startswith("dev_users_page:")))
