@@ -20,12 +20,10 @@ def main_menu_keyboard(is_new_user=False, is_manager=False, is_hr=False, is_deve
 
     if is_manager:
         buttons = [
-            [InlineKeyboardButton(text="📋 Адміністрування стажерів", callback_data="manager_menu")],
+            [InlineKeyboardButton(text="📚 Навчання", callback_data="mgr_study_root")],
+            [InlineKeyboardButton(text="👑 Панель керівника", callback_data="manager_menu")],
             [InlineKeyboardButton(text="👤 Профіль", callback_data="profile")]
         ]
-        if is_hr:
-            buttons.insert(0, [InlineKeyboardButton(text="👑 Панель керівника", callback_data="manager_menu")])
-        
         return InlineKeyboardMarkup(inline_keyboard=buttons)
     
     button_text = "📁 Розпочати навчання" if is_new_user else "📁 Продовжити навчання"

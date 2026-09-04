@@ -716,8 +716,11 @@ async def show_manager_main_menu(
         "Час дбати про розвиток стажерів. Що робимо далі?"
     )
     keyboard = main_menu_keyboard(is_manager=True, is_hr=is_hr, is_developer=is_developer)
-    
-    photo_file = "k_menu.jpg" if (IMG_DIR / "k_menu.jpg").exists() else "kerivn.png"
+    photo_file = (
+        "manager/kerivn_option1_bakery.jpg"
+        if (IMG_DIR / "manager" / "kerivn_option1_bakery.jpg").exists()
+        else ("k_menu.jpg" if (IMG_DIR / "k_menu.jpg").exists() else "kerivn.png")
+    )
 
     if force_new_message:
         if message:
@@ -2769,7 +2772,7 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
 
         await message.answer(f"Вітаємо, {full_name}! Реєстрацію Керівника-стажера успішно завершено. 👔✅")
         initialize_user_progress(user_id)
-        await show_student_main_menu(message, user_id, allow_edit=False)
+        await show_manager_main_menu(message, allow_edit=False, force_new_message=True)
         await state.clear()
         return
 
