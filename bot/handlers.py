@@ -255,6 +255,12 @@ async def show_developer_main_menu(
     )
     keyboard = main_menu_keyboard(is_hr=is_hr, is_developer=is_developer, is_territorial=is_territorial)
     
+    photo_file = (
+        "ter_manager/ter_menu.jpg"
+        if is_territorial and (IMG_DIR / "ter_manager" / "ter_menu.jpg").exists()
+        else "admin/admin_menu.jpg"
+    )
+    
     if force_new_message:
         if message:
             try:
@@ -262,7 +268,7 @@ async def show_developer_main_menu(
             except Exception:
                 pass
         await message.answer_photo(
-            photo=FSInputFile(IMG_DIR / "admin" / "admin_menu.jpg"),
+            photo=FSInputFile(IMG_DIR / photo_file),
             caption=caption,
             reply_markup=keyboard,
         )
@@ -270,7 +276,7 @@ async def show_developer_main_menu(
         
     await _show_photo_menu(
         message,
-        "admin/admin_menu.jpg",
+        photo_file,
         caption,
         keyboard,
         allow_edit=allow_edit,
