@@ -733,3 +733,35 @@ async def delete_observer_by_uid(uid: int) -> bool:
         return True
 
 
+async def is_user_without_store_manager(user: dict) -> bool:
+    """
+    Визначає, чи у користувача немає активного керівника магазину:
+    1. manager_id відсутній (None)
+    2. АБО manager_id є ID Територіала (закріплений на територіала тимчасово через відсутність керівника)
+    3. АБО для магазину користувача в його місті немає активного керівника в managers.
+    4. АБО закріплений керівник має статус 'fired'.
+    """
+    manager_id = user.get("manager_id")
+    if not manager_id:
+        return True
+    
+    # Якщо manager_id належить територіалу - це тимчасова прив'язка через відсутність керівника
+    if await is_territorial_user(manager_id):
+        return True
+        
+    city = user.get("city")
+    shop = user.get("shop")
+    if city and shop:
+        shop_mgr = await get_manager_by_shop(city, shop)
+        if not shop_mgr or shop_mgr.get("status") == "fired":
+            return True
+            
+    # Перевіряємо чи сам закріплений керівник активний
+    mgr = await get_manager_by_uid(manager_id)
+    if not mgr or mgr.get("status") == "fired":
+        return True
+
+    return False
+
+
+

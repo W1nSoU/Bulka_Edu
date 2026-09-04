@@ -62,8 +62,17 @@ async def _ensure_manager(callback: CallbackQuery) -> bool:
     return True
 
 PAGE_SIZE = 10
-MANAGER_PHOTO_PATH = Path("img/k_menu.jpg") if Path("img/k_menu.jpg").exists() else Path("img/kerivn.png")
-_MANAGER_PHOTO_FILE_ID: Optional[str] = None
+
+MANAGER_IMG_DIR = Path("img/manager")
+PHOTO_MGR_MAIN = MANAGER_IMG_DIR / "kerivn_option1_bakery.jpg"
+PHOTO_MGR_PANEL = MANAGER_IMG_DIR / "kerivn_sweets_menu.jpg"
+PHOTO_MGR_TEAM = MANAGER_IMG_DIR / "kerivn_lists_clipboard.jpg"
+PHOTO_MGR_STUDY = MANAGER_IMG_DIR / "kerivn_learning_format.jpg"
+PHOTO_MGR_MATERIALS = MANAGER_IMG_DIR / "kerivn_books_study.jpg"
+PHOTO_MGR_TRAINING = MANAGER_IMG_DIR / "kerivn_training_v2.jpg"
+
+MANAGER_PHOTO_PATH = PHOTO_MGR_PANEL if PHOTO_MGR_PANEL.exists() else (Path("img/k_menu.jpg") if Path("img/k_menu.jpg").exists() else Path("img/kerivn.png"))
+_MANAGER_PHOTO_FILE_IDS: dict[str, str] = {}
 
 def _decode_manager_card_back(ret_code: str) -> str:
     if not ret_code or ret_code == "team":
@@ -106,25 +115,32 @@ async def _edit_menu_message(
     message: Message,
     text: str,
     reply_markup: InlineKeyboardMarkup,
-    as_photo: bool = True
+    as_photo: bool = True,
+    photo_path: Optional[Union[str, Path]] = None,
 ):
     """
     Helper to edit manager menu messages:
     - If as_photo=True and message has photo:
-        - If current photo is manager photo, edits caption in place.
-        - If current photo is different (e.g. intern card avatar), edits media to restore manager photo.
+        - If current photo matches target photo, edits caption in place.
+        - If current photo is different (e.g. intern card avatar or other section), edits media to target photo.
     - If as_photo=True and message is text (or edit fails):
         - Deletes old text message and sends answer_photo.
     - If as_photo=False (for long text lists):
         - If message had photo, deletes and sends text.
         - Otherwise edits text in place.
     """
-    global _MANAGER_PHOTO_FILE_ID
+    global _MANAGER_PHOTO_FILE_IDS
     if not message:
         return
 
+    target_path = Path(photo_path) if photo_path else MANAGER_PHOTO_PATH
+    if not target_path.exists():
+        target_path = MANAGER_PHOTO_PATH
+
     has_photo = bool(getattr(message, "photo", None))
     current_file_id = message.photo[-1].file_id if has_photo and message.photo else None
+    target_key = str(target_path)
+    cached_file_id = _MANAGER_PHOTO_FILE_IDS.get(target_key)
 
     # Text-only screen requested (e.g. large text list):
     if not as_photo:
@@ -156,9 +172,9 @@ async def _edit_menu_message(
             return
 
     # as_photo=True:
-    if has_photo and MANAGER_PHOTO_PATH.exists():
-        # If we know manager photo file_id and it matches current message, edit caption
-        if _MANAGER_PHOTO_FILE_ID and current_file_id == _MANAGER_PHOTO_FILE_ID:
+    if has_photo and target_path.exists():
+        # If we know target photo file_id and it matches current message, edit caption in place
+        if cached_file_id and current_file_id == cached_file_id:
             try:
                 await message.edit_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
                 return
@@ -175,13 +191,13 @@ async def _edit_menu_message(
             except Exception:
                 pass
 
-        # Otherwise (photo is intern avatar or initial photo), edit media to manager photo
-        photo_media = _MANAGER_PHOTO_FILE_ID if _MANAGER_PHOTO_FILE_ID else FSInputFile(str(MANAGER_PHOTO_PATH))
+        # Otherwise (photo is different or first visit), edit media to target section photo
+        photo_media = cached_file_id if cached_file_id else FSInputFile(str(target_path))
         try:
             media = InputMediaPhoto(media=photo_media, caption=text, parse_mode="HTML")
             res = await message.edit_media(media=media, reply_markup=reply_markup)
             if res and hasattr(res, "photo") and res.photo:
-                _MANAGER_PHOTO_FILE_ID = res.photo[-1].file_id
+                _MANAGER_PHOTO_FILE_IDS[target_key] = res.photo[-1].file_id
             return
         except TelegramBadRequest as e:
             if "message is not modified" in str(e):
@@ -193,12 +209,12 @@ async def _edit_menu_message(
                     pass
                 await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
                 return
-            if _MANAGER_PHOTO_FILE_ID:
+            if cached_file_id:
                 try:
-                    media = InputMediaPhoto(media=FSInputFile(str(MANAGER_PHOTO_PATH)), caption=text, parse_mode="HTML")
+                    media = InputMediaPhoto(media=FSInputFile(str(target_path)), caption=text, parse_mode="HTML")
                     res = await message.edit_media(media=media, reply_markup=reply_markup)
                     if res and hasattr(res, "photo") and res.photo:
-                        _MANAGER_PHOTO_FILE_ID = res.photo[-1].file_id
+                        _MANAGER_PHOTO_FILE_IDS[target_key] = res.photo[-1].file_id
                     return
                 except Exception:
                     pass
@@ -216,9 +232,9 @@ async def _edit_menu_message(
     except Exception:
         pass
 
-    if MANAGER_PHOTO_PATH.exists():
+    if target_path.exists():
         try:
-            photo_media = _MANAGER_PHOTO_FILE_ID if _MANAGER_PHOTO_FILE_ID else FSInputFile(str(MANAGER_PHOTO_PATH))
+            photo_media = cached_file_id if cached_file_id else FSInputFile(str(target_path))
             res = await message.answer_photo(
                 photo=photo_media,
                 caption=text,
@@ -226,19 +242,19 @@ async def _edit_menu_message(
                 parse_mode="HTML"
             )
             if res and hasattr(res, "photo") and res.photo:
-                _MANAGER_PHOTO_FILE_ID = res.photo[-1].file_id
+                _MANAGER_PHOTO_FILE_IDS[target_key] = res.photo[-1].file_id
             return
         except Exception:
-            if _MANAGER_PHOTO_FILE_ID:
+            if cached_file_id:
                 try:
                     res = await message.answer_photo(
-                        photo=FSInputFile(str(MANAGER_PHOTO_PATH)),
+                        photo=FSInputFile(str(target_path)),
                         caption=text,
                         reply_markup=reply_markup,
                         parse_mode="HTML"
                     )
                     if res and hasattr(res, "photo") and res.photo:
-                        _MANAGER_PHOTO_FILE_ID = res.photo[-1].file_id
+                        _MANAGER_PHOTO_FILE_IDS[target_key] = res.photo[-1].file_id
                     return
                 except Exception:
                     pass
@@ -253,7 +269,7 @@ async def manager_menu(callback: CallbackQuery, state: FSMContext):
     text = "👔 <b>Панель Керівника</b>\n\nОберіть потрібний розділ:"
     kb = _manager_main_keyboard()
     
-    await _edit_menu_message(callback.message, text, kb)     
+    await _edit_menu_message(callback.message, text, kb, photo_path=PHOTO_MGR_PANEL)     
     await callback.answer()
 
 # --- Section 1: Мої працівники ---
@@ -274,7 +290,7 @@ async def manager_my_team_menu(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="➕ Додати стажера", callback_data="mgr_add")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")]
     ]
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_TEAM)
     await callback.answer()
 
 async def manager_all_workers_menu(callback: CallbackQuery):
@@ -290,7 +306,7 @@ async def manager_all_workers_menu(callback: CallbackQuery):
         [InlineKeyboardButton(text="💼 Працівники (картки)", callback_data="mgr_workers_list:0")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_my_team")]
     ]
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_TEAM)
     await callback.answer()
 
 async def manager_list_all_text(callback: CallbackQuery):
@@ -301,7 +317,8 @@ async def manager_list_all_text(callback: CallbackQuery):
         await _edit_menu_message(
             callback.message,
             "📭 У вашому магазині поки що немає закріплених працівників або стажерів.",
-            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")]])
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")]]),
+            photo_path=PHOTO_MGR_TEAM
         )
         await callback.answer()
         return
@@ -345,7 +362,8 @@ async def manager_interns_list(callback: CallbackQuery):
         await _edit_menu_message(
             callback.message,
             "📭 Немає стажерів у вашому магазині.",
-            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")]])
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")]]),
+            photo_path=PHOTO_MGR_TEAM
         )
         await callback.answer()
         return
@@ -375,7 +393,7 @@ async def manager_interns_list(callback: CallbackQuery):
 
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")])
     text = f"🎓 <b>Стажери магазину</b> (Стор. {page + 1}/{total_pages})\nОберіть для перегляду картки:"
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_TEAM)
     await callback.answer()
 
 async def manager_workers_list(callback: CallbackQuery):
@@ -387,7 +405,8 @@ async def manager_workers_list(callback: CallbackQuery):
         await _edit_menu_message(
             callback.message,
             "📭 Немає постійних працівників у вашому магазині.",
-            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")]])
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")]]),
+            photo_path=PHOTO_MGR_TEAM
         )
         await callback.answer()
         return
@@ -417,7 +436,7 @@ async def manager_workers_list(callback: CallbackQuery):
 
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")])
     text = f"💼 <b>Працівники магазину</b> (Стор. {page + 1}/{total_pages})\nОберіть для перегляду картки:"
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_TEAM)
     await callback.answer()
 
 # --- Isolated Search ---
@@ -431,7 +450,7 @@ async def manager_search_worker_start(callback: CallbackQuery, state: FSMContext
         "Введіть Telegram ID або ім'я/прізвище людини для пошуку серед працівників вашого магазину:"
     )
     buttons = [[InlineKeyboardButton(text="❌ Скасувати", callback_data="mgr_my_team")]]
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_TEAM)
     await callback.answer()
 
 async def manager_search_worker_process(message: Message, state: FSMContext):
@@ -496,7 +515,7 @@ async def manager_filters_menu(callback: CallbackQuery):
         [InlineKeyboardButton(text="⏱️ Активні працівники (взаємодія)", callback_data="mgr_filter_recent_activity")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_my_team")]
     ]
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_TEAM)
     await callback.answer()
 
 async def manager_filter_recent_activity(callback: CallbackQuery):
@@ -507,7 +526,8 @@ async def manager_filter_recent_activity(callback: CallbackQuery):
         await _edit_menu_message(
             callback.message,
             "📭 Немає працівників чи стажерів у вашому магазині.",
-            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")]])
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")]]),
+            photo_path=PHOTO_MGR_TEAM
         )
         await callback.answer()
         return
@@ -543,7 +563,8 @@ async def _list_interns_generic(
         await _edit_menu_message(
             callback.message,
             f"{empty_msg}",
-            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)]])
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)]]),
+            photo_path=PHOTO_MGR_TEAM
         )
         await callback.answer()
         return
@@ -576,7 +597,8 @@ async def _list_interns_generic(
     await _edit_menu_message(
         callback.message,
         text + "Оберіть людину для перегляду деталей:", 
-        InlineKeyboardMarkup(inline_keyboard=buttons)
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+        photo_path=PHOTO_MGR_TEAM
     )
     await callback.answer()
 
@@ -660,7 +682,7 @@ async def manager_by_city_menu(callback: CallbackQuery):
         return
 
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")])
-    await _edit_menu_message(callback.message, "🏙️ Оберіть місто:", InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, "🏙️ Оберіть місто:", InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_TEAM)
     await callback.answer()
 
 async def manager_filter_city(callback: CallbackQuery):
@@ -700,13 +722,14 @@ async def manager_by_role_menu(callback: CallbackQuery):
         await _edit_menu_message(
             callback.message,
             "📭 У працівників вашого магазину ще не вказано посад.",
-            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")]])
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")]]),
+            photo_path=PHOTO_MGR_TEAM
         )
         await callback.answer()
         return
 
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")])
-    await _edit_menu_message(callback.message, "💼 <b>Фільтр за посадою</b>\n\nОберіть посаду:", InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, "💼 <b>Фільтр за посадою</b>\n\nОберіть посаду:", InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_TEAM)
     await callback.answer()
 
 async def manager_filter_role(callback: CallbackQuery):
@@ -746,7 +769,7 @@ async def manager_study_root_menu(callback: CallbackQuery):
         [InlineKeyboardButton(text="📚 Матеріали", callback_data="mgr_materials_catalog")],
         [InlineKeyboardButton(text="🏠 Головне меню", callback_data="manager_menu")]
     ]
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_STUDY)
     await callback.answer()
 
 async def manager_training_course_menu(callback: CallbackQuery):
@@ -776,7 +799,7 @@ async def manager_training_course_menu(callback: CallbackQuery):
         buttons.append(row)
 
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_study_root")])
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_TRAINING)
     await callback.answer()
 
 async def manager_training_day_view(callback: CallbackQuery):
@@ -816,7 +839,7 @@ async def manager_training_day_view(callback: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ До днів навчання", callback_data="mgr_training_course")],
         [InlineKeyboardButton(text="📚 Навчання", callback_data="mgr_study_root")]
     ]
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_TRAINING)
     await callback.answer()
 
 async def manager_materials_catalog(callback: CallbackQuery):
@@ -841,7 +864,7 @@ async def manager_materials_catalog(callback: CallbackQuery):
 
     buttons.append([InlineKeyboardButton(text="🧠 Нагадати тему", callback_data="remind_topic_global")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_study_root")])
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_MATERIALS)
     await callback.answer()
 
 async def manager_materials_role_days(callback: CallbackQuery):
@@ -877,7 +900,7 @@ async def manager_materials_role_days(callback: CallbackQuery):
         buttons.append(row)
 
     buttons.append([InlineKeyboardButton(text="⬅️ Назад до посад", callback_data="mgr_materials_catalog")])
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_MATERIALS)
     await callback.answer()
 
 async def manager_material_view_day(callback: CallbackQuery):
@@ -924,7 +947,7 @@ async def manager_material_view_day(callback: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ До днів посади", callback_data=f"mgr_mat_role:{role_idx}")],
         [InlineKeyboardButton(text="📚 До каталогу посад", callback_data="mgr_materials_catalog")]
     ]
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_MATERIALS)
     await callback.answer()
 
 # --- Legacy Reports (Kept for compatibility) ---
@@ -962,7 +985,8 @@ async def manager_report(callback: CallbackQuery):
     await _edit_menu_message(
         callback.message,
         report_text,
-        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")]])
+        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")]]),
+        photo_path=PHOTO_MGR_TEAM
     )
     await callback.answer()
 
@@ -977,7 +1001,8 @@ async def manager_remind_menu(callback: CallbackQuery):
     await _edit_menu_message(
         callback.message,
         "🧠 <b>База знань</b>\n\nОберіть посаду для пошуку матеріалів:", 
-        InlineKeyboardMarkup(inline_keyboard=buttons)
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+        photo_path=PHOTO_MGR_MATERIALS
     )
     await callback.answer()
 
@@ -997,7 +1022,8 @@ async def manager_process_remind_role(callback: CallbackQuery, state: FSMContext
         callback.message,
         f"🧠 <b>Пошук матеріалів ({role})</b>\n\n"
         "Введи ключові слова або питання, щоб знайти інформацію:",
-        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_remind_menu")]])
+        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_remind_menu")]]),
+        photo_path=PHOTO_MGR_MATERIALS
     )
     await callback.answer()
 
@@ -1015,7 +1041,8 @@ async def manager_add_intern(callback: CallbackQuery, state: FSMContext):
     await _edit_menu_message(
         callback.message,
         "🏙️ <b>Звідки стажер?</b>\n\nОберіть місто:",
-        InlineKeyboardMarkup(inline_keyboard=buttons)
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+        photo_path=PHOTO_MGR_TEAM
     )
     await state.set_state(ManagerStates.waiting_add_intern_city)
     await callback.answer()
@@ -1048,8 +1075,9 @@ async def manager_process_add_city_callback(callback: CallbackQuery, state: FSMC
     
     if not buttons:
          # Fallback to roles if no shops defined
+        filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
         buttons = []
-        for i, role in enumerate(AVAILABLE_ROLES):
+        for i, role in enumerate(filtered_roles):
             label = role[:30] + "..." if len(role) > 30 else role
             buttons.append([InlineKeyboardButton(text=label, callback_data=f"add_role:{i}")])
         buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_add")])
@@ -1057,7 +1085,8 @@ async def manager_process_add_city_callback(callback: CallbackQuery, state: FSMC
         await _edit_menu_message(
             callback.message,
             f"🏙️ Місто: <b>{city}</b>\n(Магазини не знайдено)\n\n💼 <b>Яка посада у стажера?</b>",
-            InlineKeyboardMarkup(inline_keyboard=buttons)
+            InlineKeyboardMarkup(inline_keyboard=buttons),
+            photo_path=PHOTO_MGR_TEAM
         )
         await state.set_state(ManagerStates.waiting_add_intern_role)
     else:
@@ -1065,7 +1094,8 @@ async def manager_process_add_city_callback(callback: CallbackQuery, state: FSMC
         await _edit_menu_message(
             callback.message,
             f"🏙️ Місто: <b>{city}</b>\n\n🏪 <b>Оберіть магазин:</b>",
-            InlineKeyboardMarkup(inline_keyboard=buttons)
+            InlineKeyboardMarkup(inline_keyboard=buttons),
+            photo_path=PHOTO_MGR_TEAM
         )
         await state.set_state(ManagerStates.waiting_add_intern_shop)
     
@@ -1086,8 +1116,9 @@ async def manager_process_add_shop_callback(callback: CallbackQuery, state: FSMC
 
     await state.update_data(add_shop=shop)
     
+    filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
     buttons = []
-    for i, role in enumerate(AVAILABLE_ROLES):
+    for i, role in enumerate(filtered_roles):
         label = role[:30] + "..." if len(role) > 30 else role
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"add_role:{i}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад (до міст)", callback_data="mgr_add")])
@@ -1095,7 +1126,8 @@ async def manager_process_add_shop_callback(callback: CallbackQuery, state: FSMC
     await _edit_menu_message(
         callback.message,
         f"🏙️ Місто: <b>{city}</b>\n🏪 Магазин: <b>{shop}</b>\n\n💼 <b>Яка посада у стажера?</b>",
-        InlineKeyboardMarkup(inline_keyboard=buttons)
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+        photo_path=PHOTO_MGR_TEAM
     )
     await state.set_state(ManagerStates.waiting_add_intern_role)
     await callback.answer()
@@ -1104,7 +1136,8 @@ async def manager_process_add_role_callback(callback: CallbackQuery, state: FSMC
     try:
         _, role_idx_str = callback.data.split(":", 1)
         role_idx = int(role_idx_str)
-        role = AVAILABLE_ROLES[role_idx]
+        filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
+        role = filtered_roles[role_idx]
     except (ValueError, IndexError):
         await callback.answer("Помилка даних посади.", show_alert=True)
         return
@@ -1134,7 +1167,8 @@ async def manager_process_add_role_callback(callback: CallbackQuery, state: FSMC
         f"🔗 <b>Посилання для стажера:</b>\n"
         f"<code>{link}</code>\n\n"
         f"⚠️ Посилання діє 24 години і лише для одного користувача.",
-        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👔 До панелі", callback_data="manager_menu")]])
+        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👔 До панелі", callback_data="manager_menu")]]),
+        photo_path=PHOTO_MGR_TEAM
     )
     await state.clear()
     await callback.answer()
@@ -1161,7 +1195,7 @@ async def manager_remove_menu(callback: CallbackQuery):
     
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")])
     
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), photo_path=PHOTO_MGR_TEAM)
     await callback.answer()
 
 async def manager_confirm_remove(callback: CallbackQuery, state: FSMContext):
@@ -1179,7 +1213,8 @@ async def manager_confirm_remove(callback: CallbackQuery, state: FSMContext):
         InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Так, видалити", callback_data="mgr_perform_remove")],
             [InlineKeyboardButton(text="❌ Ні, скасувати", callback_data="manager_menu")]
-        ])
+        ]),
+        photo_path=PHOTO_MGR_TEAM
     )
     await callback.answer()
 
@@ -1237,7 +1272,8 @@ async def manager_manage_days_menu(callback: CallbackQuery):
         await _edit_menu_message(
             callback.message,
             "📭 У вас немає стажерів для керування днями.",
-            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")]])
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="manager_menu")]]),
+            photo_path=PHOTO_MGR_TEAM
         )
         await callback.answer()
         return
@@ -1257,7 +1293,8 @@ async def manager_manage_days_menu(callback: CallbackQuery):
     await _edit_menu_message(
         callback.message,
         text, 
-        InlineKeyboardMarkup(inline_keyboard=buttons)
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+        photo_path=PHOTO_MGR_TEAM
     )
     await callback.answer()
 
@@ -1269,7 +1306,9 @@ async def _show_intern_details(
     bot = event.bot
     report = await get_user_days_report(intern_id, bot=bot)
     
-    buttons = []
+    buttons = [
+        [InlineKeyboardButton(text="❌ Звільнити", callback_data=f"mgr_fire_prompt:{intern_id}:{back_callback}")]
+    ]
     if back_callback and back_callback != "mgr_my_team":
         buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)])
     buttons.append([InlineKeyboardButton(text="👥 До працівників", callback_data="mgr_my_team")])
@@ -1345,7 +1384,8 @@ async def manager_remind_all_lagging(callback: CallbackQuery):
         await _edit_menu_message(
             callback.message,
             result_text,
-            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👌 Добре", callback_data="mgr_dismiss_report")]])
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👌 Добре", callback_data="mgr_dismiss_report")]]),
+            photo_path=PHOTO_MGR_TEAM
         )
         await callback.answer("✅ Нагадування відправлено")
         
@@ -1440,6 +1480,71 @@ async def intern_dismiss_handler(callback: CallbackQuery):
         pass
     await callback.answer("Видалено ❌")
 
+async def manager_fire_prompt_handler(callback: CallbackQuery):
+    """Показує вікно підтвердження звільнення працівника з картки."""
+    if not await _ensure_manager(callback):
+        return
+    try:
+        parts = callback.data.split(":", 2)
+        intern_id = int(parts[1])
+        back_cb = parts[2] if len(parts) > 2 else "mgr_my_team"
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+
+    intern = await get_user_details(intern_id)
+    name = intern.get("full_name") or intern.get("username") or f"ID {intern_id}" if intern else f"ID {intern_id}"
+    
+    text = (
+        f"⚠️ <b>Підтвердження звільнення</b>\n\n"
+        f"Ви дійсно бажаєте звільнити працівника <b>{html.escape(name)}</b>?\n\n"
+        f"<i>Цю дію неможливо буде скасувати. Співробітника буде видалено з системи навчальної платформи.</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Так, звільнити", callback_data=f"mgr_fire_confirm:{intern_id}:{back_cb}")],
+        [InlineKeyboardButton(text="⬅️ Скасувати", callback_data=f"mgr_view_intern_{intern_id}:{back_cb}")]
+    ])
+    await _edit_menu_message(callback.message, text, reply_markup=kb, photo_path=PHOTO_MGR_TEAM)
+    await callback.answer()
+
+async def manager_fire_confirm_handler(callback: CallbackQuery):
+    """Підтвердження звільнення працівника: видалення з БД та логування."""
+    if not await _ensure_manager(callback):
+        return
+    try:
+        parts = callback.data.split(":", 2)
+        intern_id = int(parts[1])
+        back_cb = parts[2] if len(parts) > 2 else "mgr_my_team"
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+
+    intern = await get_user_details(intern_id)
+    name = intern.get("full_name") or intern.get("username") or f"ID {intern_id}" if intern else f"ID {intern_id}"
+
+    if intern:
+        await log_training_event(
+            user_id=intern_id,
+            event_type="fired",
+            actor_id=callback.from_user.id,
+            full_name=intern.get("full_name"),
+            username=intern.get("username"),
+            city=intern.get("city"),
+            shop=intern.get("shop"),
+            role=intern.get("role"),
+            manager_id=intern.get("manager_id"),
+        )
+
+    await delete_user(intern_id)
+    await callback.answer("✅ Працівника успішно звільнено.", show_alert=True)
+    
+    text = f"✅ Працівника <b>{html.escape(name)}</b> успішно звільнено та видалено з бази."
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 До працівників", callback_data="mgr_my_team")],
+        [InlineKeyboardButton(text="🏠 Головне меню", callback_data="manager_menu")]
+    ])
+    await _edit_menu_message(callback.message, text, reply_markup=kb, photo_path=PHOTO_MGR_TEAM)
+
 # --- Register ---
 def register_manager_handlers(dp: Dispatcher):
     dp.callback_query.register(manager_menu, lambda c: c.data == "manager_menu")
@@ -1474,6 +1579,10 @@ def register_manager_handlers(dp: Dispatcher):
     # Training completion — promote / dismiss
     dp.callback_query.register(intern_promote_handler, lambda c: c.data and c.data.startswith("intern_promote_"))
     dp.callback_query.register(intern_dismiss_handler, lambda c: c.data and c.data.startswith("intern_dismiss_"))
+    
+    # Fire from card
+    dp.callback_query.register(manager_fire_prompt_handler, lambda c: c.data and c.data.startswith("mgr_fire_prompt:"))
+    dp.callback_query.register(manager_fire_confirm_handler, lambda c: c.data and c.data.startswith("mgr_fire_confirm:"))
     
     # Lists
     dp.callback_query.register(manager_active_interns, lambda c: c.data == "mgr_active")
