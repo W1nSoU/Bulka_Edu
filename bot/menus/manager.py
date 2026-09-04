@@ -3,8 +3,18 @@ import html
 from datetime import datetime, timedelta
 import pytz
 
+from pathlib import Path
+from typing import Optional, Union
+
 from aiogram import Dispatcher
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    Message,
+    InputMediaPhoto,
+    FSInputFile
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramBadRequest
@@ -31,6 +41,7 @@ from database.users import (
 from bot.services.developer_actions import get_user_days_report, _format_last_activity
 from bot.constants import AVAILABLE_ROLES, AVAILABLE_CITIES, AVAILABLE_SHOPS
 from database.tokens import generate_token
+from bot.utils import get_user_avatar_input, _send_or_edit_card_photo
 
 class ManagerStates(StatesGroup):
     waiting_search_intern = State()
@@ -51,6 +62,37 @@ async def _ensure_manager(callback: CallbackQuery) -> bool:
     return True
 
 PAGE_SIZE = 10
+MANAGER_PHOTO_PATH = Path("img/k_menu.jpg") if Path("img/k_menu.jpg").exists() else Path("img/kerivn.png")
+_MANAGER_PHOTO_FILE_ID: Optional[str] = None
+
+def _decode_manager_card_back(ret_code: str) -> str:
+    if not ret_code or ret_code == "team":
+        return "mgr_my_team"
+    if ret_code == "active":
+        return "mgr_active"
+    if ret_code == "completed":
+        return "mgr_completed"
+    if ret_code == "inactive":
+        return "mgr_inactive"
+    if ret_code == "filters":
+        return "mgr_filters_menu"
+    if ret_code in ("all", "all_in"):
+        return "mgr_all_workers_menu"
+    if ret_code.startswith("role_"):
+        r_idx = ret_code.split("_", 1)[1]
+        return f"mgr_filter_role:{r_idx}"
+    if ret_code.startswith("city_"):
+        c_idx = ret_code.split("_", 1)[1]
+        return f"mgr_filter_city:{c_idx}"
+    if ret_code.startswith("in_"):
+        p = ret_code.split("_", 1)[1]
+        return f"mgr_interns_list:{p}"
+    if ret_code.startswith("wk_"):
+        p = ret_code.split("_", 1)[1]
+        return f"mgr_workers_list:{p}"
+    if ret_code.startswith("mgr_"):
+        return ret_code
+    return "mgr_my_team"
 
 def _manager_main_keyboard() -> InlineKeyboardMarkup:
     buttons = [
@@ -60,27 +102,148 @@ def _manager_main_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-async def _edit_menu_message(message: Message, text: str, reply_markup: InlineKeyboardMarkup):
+async def _edit_menu_message(
+    message: Message,
+    text: str,
+    reply_markup: InlineKeyboardMarkup,
+    as_photo: bool = True
+):
     """
-    Helper to edit message text or caption depending on whether it has a photo.
+    Helper to edit manager menu messages:
+    - If as_photo=True and message has photo:
+        - If current photo is manager photo, edits caption in place.
+        - If current photo is different (e.g. intern card avatar), edits media to restore manager photo.
+    - If as_photo=True and message is text (or edit fails):
+        - Deletes old text message and sends answer_photo.
+    - If as_photo=False (for long text lists):
+        - If message had photo, deletes and sends text.
+        - Otherwise edits text in place.
     """
-    try:
-        if message.photo:
-            await message.edit_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
-        else:
-            await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
-    except TelegramBadRequest as e:
-        if "there is no text in the message to edit" in str(e) or "message to edit not found" in str(e):
-            # If editing fails drastically, try to delete and resend
+    global _MANAGER_PHOTO_FILE_ID
+    if not message:
+        return
+
+    has_photo = bool(getattr(message, "photo", None))
+    current_file_id = message.photo[-1].file_id if has_photo and message.photo else None
+
+    # Text-only screen requested (e.g. large text list):
+    if not as_photo:
+        if has_photo:
             try:
                 await message.delete()
             except Exception:
                 pass
             await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
-        elif "message is not modified" in str(e):
-            pass # Ignore
-        else:
-            raise e
+            return
+        try:
+            await message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+            return
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e):
+                return
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+            return
+        except Exception:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+            return
+
+    # as_photo=True:
+    if has_photo and MANAGER_PHOTO_PATH.exists():
+        # If we know manager photo file_id and it matches current message, edit caption
+        if _MANAGER_PHOTO_FILE_ID and current_file_id == _MANAGER_PHOTO_FILE_ID:
+            try:
+                await message.edit_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
+                return
+            except TelegramBadRequest as e:
+                if "message is not modified" in str(e):
+                    return
+                if "message caption is too long" in str(e):
+                    try:
+                        await message.delete()
+                    except Exception:
+                        pass
+                    await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+                    return
+            except Exception:
+                pass
+
+        # Otherwise (photo is intern avatar or initial photo), edit media to manager photo
+        photo_media = _MANAGER_PHOTO_FILE_ID if _MANAGER_PHOTO_FILE_ID else FSInputFile(str(MANAGER_PHOTO_PATH))
+        try:
+            media = InputMediaPhoto(media=photo_media, caption=text, parse_mode="HTML")
+            res = await message.edit_media(media=media, reply_markup=reply_markup)
+            if res and hasattr(res, "photo") and res.photo:
+                _MANAGER_PHOTO_FILE_ID = res.photo[-1].file_id
+            return
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e):
+                return
+            if "message caption is too long" in str(e):
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+                return
+            if _MANAGER_PHOTO_FILE_ID:
+                try:
+                    media = InputMediaPhoto(media=FSInputFile(str(MANAGER_PHOTO_PATH)), caption=text, parse_mode="HTML")
+                    res = await message.edit_media(media=media, reply_markup=reply_markup)
+                    if res and hasattr(res, "photo") and res.photo:
+                        _MANAGER_PHOTO_FILE_ID = res.photo[-1].file_id
+                    return
+                except Exception:
+                    pass
+            try:
+                await message.edit_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
+                return
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # Message was text-only or edit failed: delete old and send photo
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if MANAGER_PHOTO_PATH.exists():
+        try:
+            photo_media = _MANAGER_PHOTO_FILE_ID if _MANAGER_PHOTO_FILE_ID else FSInputFile(str(MANAGER_PHOTO_PATH))
+            res = await message.answer_photo(
+                photo=photo_media,
+                caption=text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+            if res and hasattr(res, "photo") and res.photo:
+                _MANAGER_PHOTO_FILE_ID = res.photo[-1].file_id
+            return
+        except Exception:
+            if _MANAGER_PHOTO_FILE_ID:
+                try:
+                    res = await message.answer_photo(
+                        photo=FSInputFile(str(MANAGER_PHOTO_PATH)),
+                        caption=text,
+                        reply_markup=reply_markup,
+                        parse_mode="HTML"
+                    )
+                    if res and hasattr(res, "photo") and res.photo:
+                        _MANAGER_PHOTO_FILE_ID = res.photo[-1].file_id
+                    return
+                except Exception:
+                    pass
+
+    await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
 
 async def manager_menu(callback: CallbackQuery, state: FSMContext):
     if not await _ensure_manager(callback):
@@ -170,7 +333,7 @@ async def manager_list_all_text(callback: CallbackQuery):
         text = text[:3950] + "\n\n<i>...частину списку скорочено...</i>"
 
     buttons = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_all_workers_menu")]]
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), as_photo=False)
     await callback.answer()
 
 async def manager_interns_list(callback: CallbackQuery):
@@ -199,7 +362,7 @@ async def manager_interns_list(callback: CallbackQuery):
         day = intern.get("current_block", 1)
         buttons.append([InlineKeyboardButton(
             text=f"🎓 {name} (День {day})",
-            callback_data=f"mgr_view_intern_{uid}"
+            callback_data=f"mgr_view_intern_{uid}:in_{page}"
         )])
 
     nav_row = []
@@ -241,7 +404,7 @@ async def manager_workers_list(callback: CallbackQuery):
         role = worker.get("role") or "Працівник"
         buttons.append([InlineKeyboardButton(
             text=f"💼 {name} ({role})",
-            callback_data=f"mgr_view_intern_{uid}"
+            callback_data=f"mgr_view_intern_{uid}:wk_{page}"
         )])
 
     nav_row = []
@@ -308,7 +471,7 @@ async def manager_search_worker_process(message: Message, state: FSMContext):
         uid = u.get("user_id")
         role = u.get("role") or ("Працівник" if u.get("is_worker") else "Стажер")
         prefix = "💼" if (u.get("is_worker") or role == "Працівник") else "🎓"
-        buttons.append([InlineKeyboardButton(text=f"{prefix} {name} ({role})", callback_data=f"mgr_view_intern_{uid}")])
+        buttons.append([InlineKeyboardButton(text=f"{prefix} {name} ({role})", callback_data=f"mgr_view_intern_{uid}:team")])
 
     buttons.append([InlineKeyboardButton(text="👥 До працівників", callback_data="mgr_my_team")])
     await message.answer(
@@ -362,7 +525,7 @@ async def manager_filter_recent_activity(callback: CallbackQuery):
         text = text[:3950] + "\n\n<i>...частину списку скорочено...</i>"
 
     buttons = [[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_filters_menu")]]
-    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _edit_menu_message(callback.message, text, InlineKeyboardMarkup(inline_keyboard=buttons), as_photo=False)
     await callback.answer()
 
 # --- Helper to list interns ---
@@ -373,7 +536,8 @@ async def _list_interns_generic(
     empty_msg: str,
     *,
     mark_completed: bool = False,
-    back_callback: str = "mgr_my_team"
+    back_callback: str = "mgr_my_team",
+    ret_code: str = "team"
 ):
     if not interns:
         await _edit_menu_message(
@@ -404,7 +568,7 @@ async def _list_interns_generic(
             prefix = "🎓"
         buttons.append([InlineKeyboardButton(
             text=f"{prefix} {name} ({suffix})",
-            callback_data=f"mgr_view_intern_{uid}"
+            callback_data=f"mgr_view_intern_{uid}:{ret_code}"
         )])
     
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)])
@@ -427,7 +591,8 @@ async def manager_active_interns(callback: CallbackQuery):
         interns, 
         "🚀 <b>Активні стажери:</b>", 
         "📭 Немає активних стажерів.",
-        back_callback="mgr_filters_menu"
+        back_callback="mgr_filters_menu",
+        ret_code="active"
     )
 
 async def manager_completed_interns(callback: CallbackQuery):
@@ -449,7 +614,8 @@ async def manager_completed_interns(callback: CallbackQuery):
         "🎉 <b>Завершили навчання:</b>",
         "📭 Немає стажерів, що завершили навчання.",
         mark_completed=True,
-        back_callback="mgr_filters_menu"
+        back_callback="mgr_filters_menu",
+        ret_code="completed"
     )
 
 async def manager_inactive_interns(callback: CallbackQuery):
@@ -461,7 +627,8 @@ async def manager_inactive_interns(callback: CallbackQuery):
         interns, 
         "😴 <b>Неактивні ≥3 дн.:</b>", 
         "🎉 Всі стажери активні!",
-        back_callback="mgr_filters_menu"
+        back_callback="mgr_filters_menu",
+        ret_code="inactive"
     )
 
 async def manager_all_interns(callback: CallbackQuery):
@@ -473,7 +640,8 @@ async def manager_all_interns(callback: CallbackQuery):
         interns, 
         "📋 <b>Усі стажери:</b>", 
         "📭 Список стажерів порожній.",
-        back_callback="mgr_all_workers_menu"
+        back_callback="mgr_all_workers_menu",
+        ret_code="all_in"
     )
 
 async def manager_by_city_menu(callback: CallbackQuery):
@@ -512,7 +680,8 @@ async def manager_filter_city(callback: CallbackQuery):
         filtered, 
         f"🏙️ <b>Стажери: {city}</b>", 
         "📭 Немає стажерів у цьому місті.",
-        back_callback="mgr_by_city"
+        back_callback="mgr_by_city",
+        ret_code=f"city_{city_idx}"
     )
 
 async def manager_by_role_menu(callback: CallbackQuery):
@@ -557,7 +726,8 @@ async def manager_filter_role(callback: CallbackQuery):
         filtered, 
         f"💼 <b>Працівники та стажери: {role}</b>", 
         "📭 Немає людей на цій посаді.",
-        back_callback="mgr_by_role"
+        back_callback="mgr_by_role",
+        ret_code=f"role_{role_idx}"
     )
 
 # --- Section 2: Навчання (Курс керівника & Матеріали) ---
@@ -1028,14 +1198,33 @@ async def manager_view_intern(callback: CallbackQuery, state: FSMContext):
     if not await _ensure_manager(callback):
         return
     
+    data = callback.data or ""
+    ret_code = "team"
+    if data.startswith("mgr_view_intern:"):
+        parts = data.split(":", 2)
+        uid_part = parts[1] if len(parts) > 1 else ""
+        ret_code = parts[2] if len(parts) > 2 else "team"
+    elif data.startswith("mgr_view_intern_"):
+        raw = data[len("mgr_view_intern_"):]
+        if ":" in raw:
+            uid_part, ret_code = raw.split(":", 1)
+        else:
+            uid_part = raw
+    else:
+        uid_part = data.split("_")[-1]
+
     try:
-        intern_id = int(callback.data.split("_")[-1])
+        intern_id = int(uid_part)
     except (ValueError, IndexError):
         await callback.answer("Некоректний ID.", show_alert=True)
         return
     
-    await _show_intern_details(callback.message, intern_id, is_callback=True)
-    await callback.answer()
+    back_cb = _decode_manager_card_back(ret_code)
+    await _show_intern_details(callback, intern_id, back_callback=back_cb)
+    try:
+        await callback.answer()
+    except Exception:
+        pass
 
 async def manager_manage_days_menu(callback: CallbackQuery):
     if not await _ensure_manager(callback):
@@ -1072,22 +1261,38 @@ async def manager_manage_days_menu(callback: CallbackQuery):
     )
     await callback.answer()
 
-async def _show_intern_details(message_or_msg: Message, intern_id: int, is_callback=False):
-    report = await get_user_days_report(intern_id)
+async def _show_intern_details(
+    event: Union[CallbackQuery, Message],
+    intern_id: int,
+    back_callback: str = "mgr_my_team"
+):
+    bot = event.bot
+    report = await get_user_days_report(intern_id, bot=bot)
     
-    buttons = [
-        [InlineKeyboardButton(text="⬅️ До працівників", callback_data="mgr_my_team")],
-        [InlineKeyboardButton(text="🏠 Головне меню", callback_data="manager_menu")]
-    ]
+    buttons = []
+    if back_callback and back_callback != "mgr_my_team":
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)])
+    buttons.append([InlineKeyboardButton(text="👥 До працівників", callback_data="mgr_my_team")])
+    buttons.append([InlineKeyboardButton(text="🏠 Головне меню", callback_data="manager_menu")])
     
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    photo_input = await get_user_avatar_input(bot, intern_id)
     
-    if is_callback:
-        # message_or_msg is actually the message object when called from callback handler (callback.message)
-        # Wait, in manager_view_intern we pass callback.message, so it is a Message object.
-        await _edit_menu_message(message_or_msg, report, kb)
+    if isinstance(event, CallbackQuery):
+        await _send_or_edit_card_photo(event, photo_input, report, reply_markup=kb)
     else:
-        await message_or_msg.answer(report, reply_markup=kb)
+        if photo_input:
+            try:
+                await event.answer_photo(
+                    photo=photo_input,
+                    caption=report,
+                    reply_markup=kb,
+                    parse_mode="HTML"
+                )
+                return
+            except Exception:
+                pass
+        await event.answer(report, reply_markup=kb, parse_mode="HTML")
 
 async def manager_remind_all_lagging(callback: CallbackQuery):
     """Нагадує всім відстаючим стажерам з щоденного звіту."""
@@ -1301,4 +1506,4 @@ def register_manager_handlers(dp: Dispatcher):
     dp.callback_query.register(manager_manage_days_menu, lambda c: c.data == "mgr_manage_days")
     
     # View Detail
-    dp.callback_query.register(manager_view_intern, lambda c: c.data and c.data.startswith("mgr_view_intern_"))
+    dp.callback_query.register(manager_view_intern, lambda c: c.data and (c.data.startswith("mgr_view_intern_") or c.data.startswith("mgr_view_intern:")))

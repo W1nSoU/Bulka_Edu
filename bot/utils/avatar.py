@@ -40,7 +40,7 @@ async def _send_or_edit_card_photo(
     
     if has_photo and photo_input:
         try:
-            media = InputMediaPhoto(media=photo_input, caption=caption)
+            media = InputMediaPhoto(media=photo_input, caption=caption, parse_mode="HTML")
             await message.edit_media(media=media, reply_markup=reply_markup)
             try:
                 await callback.answer()
@@ -50,7 +50,7 @@ async def _send_or_edit_card_photo(
         except Exception:
             pass
         try:
-            await message.edit_caption(caption=caption, reply_markup=reply_markup)
+            await message.edit_caption(caption=caption, reply_markup=reply_markup, parse_mode="HTML")
             try:
                 await callback.answer()
             except Exception:
@@ -71,7 +71,8 @@ async def _send_or_edit_card_photo(
             await message.answer_photo(
                 photo=photo_input,
                 caption=caption,
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
+                parse_mode="HTML"
             )
             try:
                 await callback.answer()
@@ -82,7 +83,7 @@ async def _send_or_edit_card_photo(
             pass
 
     # Фолбек на звичайний текст
-    await message.answer(caption, reply_markup=reply_markup)
+    await message.answer(caption, reply_markup=reply_markup, parse_mode="HTML")
     try:
         await callback.answer()
     except Exception:
