@@ -5978,6 +5978,7 @@ async def developer_ack_analytics_menu(callback: CallbackQuery):
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👔 Керівники", callback_data="dev_ack_cat:керівник")],
+        [InlineKeyboardButton(text="🗺 Територіали", callback_data="dev_ack_cat:територіал")],
         [InlineKeyboardButton(text="👷 Працівники", callback_data="dev_ack_cat:працівник")],
         [InlineKeyboardButton(text="🎓 Стажери", callback_data="dev_ack_cat:стажер")],
         [InlineKeyboardButton(text="⬅️ Назад до аналітики", callback_data="dev_main_analyt")]
@@ -6002,6 +6003,7 @@ async def developer_ack_category_events_view(callback: CallbackQuery):
 
     cat_titles = {
         "керівник": "👔 Керівники",
+        "територіал": "🗺 Територіали",
         "працівник": "👷 Працівники",
         "стажер": "🎓 Стажери"
     }
@@ -6083,6 +6085,7 @@ async def developer_ack_event_card_view(callback: CallbackQuery):
 
     cat_titles = {
         "керівник": "👔 Керівники",
+        "територіал": "🗺 Територіали",
         "працівник": "👷 Працівники",
         "стажер": "🎓 Стажери"
     }

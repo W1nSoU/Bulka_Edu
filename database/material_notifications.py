@@ -74,12 +74,30 @@ async def create_material_change_event(
 
 async def create_recipients_for_event(event_id: int, role: str) -> int:
     """
-    Збирає активних користувачів цільової посади та всіх керівників компанії,
-    розбиває на хвилі по 40 осіб та зберігає в material_change_recipients.
+    Збирає активних користувачів цільової посади, керівників компанії та територіалів відповідного напрямку.
+    Наглядачі гарантовано виключаються зі списку отримувачів.
+    Розбиває на хвилі по 40 осіб та зберігає в material_change_recipients.
     Повертає загальну кількість створених записів отримувачів.
     """
     recipients_data: List[Dict[str, Any]] = []
     seen_user_ids = set()
+
+    # 0. Знаходимо активних наглядачів для гарантованого виключення зі списку отримувачів
+    excluded_user_ids = set()
+    try:
+        async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                '''
+                SELECT uid FROM managers
+                WHERE process = 'Наглядач' AND (status IS NULL OR status != 'fired')
+                '''
+            ) as cursor:
+                async for row in cursor:
+                    if row['uid']:
+                        excluded_user_ids.add(row['uid'])
+    except Exception as e:
+        print(f"Помилка завантаження наглядачів для виключення: {e}")
 
     # 1. Отримуємо носіїв посади (працівники та стажери) з users.db
     async with aiosqlite.connect(DB_PATH) as db:
@@ -94,7 +112,7 @@ async def create_recipients_for_event(event_id: int, role: str) -> int:
         ) as cursor:
             async for row in cursor:
                 uid = row['user_id']
-                if not uid or uid in seen_user_ids:
+                if not uid or uid in seen_user_ids or uid in excluded_user_ids:
                     continue
                 seen_user_ids.add(uid)
                 is_worker = (row['status'] == 'Працівник')
@@ -119,7 +137,7 @@ async def create_recipients_for_event(event_id: int, role: str) -> int:
             ) as cursor:
                 async for row in cursor:
                     uid = row['uid']
-                    if not uid or uid in seen_user_ids:
+                    if not uid or uid in seen_user_ids or uid in excluded_user_ids:
                         continue
                     seen_user_ids.add(uid)
                     recipients_data.append({
@@ -131,7 +149,43 @@ async def create_recipients_for_event(event_id: int, role: str) -> int:
     except Exception as e:
         print(f"Помилка завантаження керівників: {e}")
 
-    # 3. Розбиваємо на батчі по 40 осіб
+    # 3. Отримуємо територіалів відповідного напрямку (ТЗ / ВВ) з managers.db
+    try:
+        from database.positions import get_position_direction
+        pos_direction = await get_position_direction(role)
+    except Exception as e:
+        print(f"Помилка визначення напрямку посади {role}: {e}")
+        pos_direction = "ТЗ"
+
+    try:
+        async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                '''
+                SELECT uid, full_name, city, territorial_type, status
+                FROM managers
+                WHERE process = 'Територіал' AND (status IS NULL OR status != 'fired')
+                '''
+            ) as cursor:
+                async for row in cursor:
+                    uid = row['uid']
+                    if not uid or uid in seen_user_ids or uid in excluded_user_ids:
+                        continue
+                    t_type = (row['territorial_type'] or '').strip().upper()
+                    # Якщо у територіала зазначений напрямок, порівнюємо з напрямком посади
+                    if t_type and t_type != pos_direction:
+                        continue
+                    seen_user_ids.add(uid)
+                    recipients_data.append({
+                        'user_id': uid,
+                        'role_type': 'територіал',
+                        'shop': f'Всі магазини ({pos_direction})',
+                        'city': row['city'] or 'Не вказано'
+                    })
+    except Exception as e:
+        print(f"Помилка завантаження територіалів: {e}")
+
+    # 4. Розбиваємо на батчі по 40 осіб
     BATCH_SIZE = 40
     async with aiosqlite.connect(NOTIFICATIONS_DB_PATH) as db:
         for idx, rec in enumerate(recipients_data):
