@@ -123,7 +123,19 @@ async def update_position_name(position_id: int, new_name: str):
             
             # 5. Оновлення файлів матеріалів
             await update_materials_role_name(old_name, new_name)
-            
+
+            # 6. Каскадне оновлення токенів
+            try:
+                from database.tokens import TOKENS_DB_PATH
+                async with aiosqlite.connect(TOKENS_DB_PATH) as tdb:
+                    await tdb.execute(
+                        "UPDATE tokens SET role = ? WHERE role = ?",
+                        (new_name, old_name),
+                    )
+                    await tdb.commit()
+            except Exception as te:
+                logger.warning(f"Could not update role in tokens.db: {te}")
+
             return True
     except aiosqlite.IntegrityError:
         # Посада з такою назвою вже існує
@@ -131,6 +143,50 @@ async def update_position_name(position_id: int, new_name: str):
     except Exception as e:
         logger.error(f"Error updating position name: {e}")
         return False
+
+
+async def delete_position(position_id: int) -> tuple[bool, str]:
+    """
+    Видаляє посаду, якщо за нею не закріплено жодного користувача.
+    Каскадно видаляє навчальні матеріали та невикористані токени цієї посади.
+    """
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT name FROM positions WHERE id = ?", (position_id,))
+            row = await cursor.fetchone()
+            if not row:
+                return False, "Посаду не знайдено."
+            role_name = row["name"]
+
+            cursor = await db.execute("SELECT COUNT(*) FROM users WHERE role = ?", (role_name,))
+            count_row = await cursor.fetchone()
+            user_count = count_row[0] if count_row else 0
+            if user_count > 0:
+                return False, f"Неможливо видалити посаду '{role_name}': за нею закріплено {user_count} користувачів."
+
+            # Видаляємо матеріали цієї посади
+            await db.execute("DELETE FROM materials WHERE role = ?", (role_name,))
+            # Видаляємо саму посаду
+            await db.execute("DELETE FROM positions WHERE id = ?", (position_id,))
+            await db.commit()
+
+        # Видаляємо невикористані токени цієї посади
+        try:
+            from database.tokens import TOKENS_DB_PATH
+            async with aiosqlite.connect(TOKENS_DB_PATH) as tdb:
+                await tdb.execute(
+                    "DELETE FROM tokens WHERE role = ? AND used_by IS NULL",
+                    (role_name,),
+                )
+                await tdb.commit()
+        except Exception as te:
+            logger.warning(f"Could not delete tokens for role {role_name}: {te}")
+
+        return True, "Посаду успішно видалено."
+    except Exception as e:
+        logger.error(f"Error deleting position {position_id}: {e}")
+        return False, f"Помилка видалення: {e}"
 
 async def get_position_stats(position_name: str):
     """Повертає статистику по посаді (кількість працівників/стажерів)"""

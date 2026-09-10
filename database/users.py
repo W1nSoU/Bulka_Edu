@@ -137,12 +137,135 @@ async def set_intern_extra(user_id, manager_id, role, city, shop=None):
         manager_id=manager_id,
     )
 
+MANAGEMENT_ROLES = {
+    "Керівник",
+    "Керівник Стажер",
+    "Територіал",
+    "Наглядач",
+    "Developer",
+    "Адміністратор",
+    "HR",
+}
+
 async def delete_user(user_id):
-    """Видаляє користувача та його прогрес з бази"""
+    """Повністю видаляє користувача, його прогрес та зв'язки з бази даних."""
+    from database.managers import delete_manager_by_uid
+    try:
+        await delete_manager_by_uid(user_id, cascade_user=False)
+    except Exception as e:
+        print(f"Error deleting from managers: {e}")
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
         await db.execute("DELETE FROM progress WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM hr_users WHERE user_id = ?", (user_id,))
+        await db.execute("UPDATE conversations SET status = 'closed' WHERE user_id = ? OR manager_id = ?", (user_id, user_id))
+        await db.execute("UPDATE users SET manager_id = NULL WHERE manager_id = ?", (user_id,))
+        await db.execute("DELETE FROM reminder_history WHERE intern_id = ? OR sender_id = ?", (user_id, user_id))
+        await db.execute("DELETE FROM support_logs WHERE user_id = ?", (user_id,))
         await db.commit()
+
+    try:
+        from database.material_notifications import NOTIF_DB_PATH
+        async with aiosqlite.connect(NOTIF_DB_PATH) as ndb:
+            await ndb.execute("DELETE FROM material_change_recipients WHERE user_id = ?", (user_id,))
+            await ndb.commit()
+    except Exception:
+        pass
+
+    try:
+        from database.tokens import TOKENS_DB_PATH
+        async with aiosqlite.connect(TOKENS_DB_PATH) as tdb:
+            await tdb.execute("DELETE FROM tokens WHERE used_by = ?", (user_id,))
+            await tdb.commit()
+    except Exception:
+        pass
+
+    # Очищаємо кеш прогресу в оперативній пам'яті
+    try:
+        from bot.state import user_progress
+        user_progress.pop(user_id, None)
+    except Exception:
+        pass
+
+    return True
+
+
+async def change_user_role(user_id: int, new_role: str) -> dict:
+    """
+    Змінює посаду користувача та адаптує його навчальну програму:
+    - Якщо статус 'Працівник':
+        - статус залишається 'Працівник'
+        - очищується попередній прогрес
+        - всі дні нової посади (1..N) стають повністю відкритими (manual_open = 1, completed = 1, manual_opened_by = 'dev')
+    - Якщо статус != 'Працівник' (Стажер):
+        - очищується попередній прогрес
+        - навчання розпочинається наново з 1-го дня (день 1: manual_open = 1, completed = 0, manual_opened_by = 'dev'; дні 2+ заблоковані)
+    - Скидається in-memory кеш user_progress[user_id]
+    Повертає dict: {"success": bool, "status": str, "old_role": str, "new_role": str, "days_opened": int, "total_days": int}
+    """
+    from database.positions import get_days_count_for_role
+    from database.materials import get_days_for_role
+    from bot.state import user_progress
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT role, status, full_name, username, city, manager_id FROM users WHERE user_id = ?",
+            (user_id,),
+        )
+        user = await cursor.fetchone()
+        if not user:
+            return {"success": False, "error": "Користувача не знайдено"}
+
+        user_status = user["status"]
+        old_role = user["role"]
+
+        # 1. Оновлюємо роль у таблиці users
+        await db.execute("UPDATE users SET role = ? WHERE user_id = ?", (new_role, user_id))
+
+        # 2. Очищуємо старий прогрес
+        await db.execute("DELETE FROM progress WHERE user_id = ?", (user_id,))
+
+        # Отримуємо кількість днів нової посади
+        pos_days = await get_days_count_for_role(new_role)
+        mat_days = await get_days_for_role(new_role)
+        max_mat_day = max(mat_days) if mat_days else 0
+        total_days = max(pos_days, max_mat_day, 1)
+
+        if user_status == "Працівник":
+            # Працівник: відкриваємо ВСІ дні нової посади
+            for d in range(1, total_days + 1):
+                await db.execute(
+                    "INSERT INTO progress (user_id, day, completed, manual_open, manual_opened_by) VALUES (?, ?, 1, 1, 'dev')",
+                    (user_id, d),
+                )
+            days_opened = total_days
+        else:
+            # Стажер: відкриваємо лише День 1
+            await db.execute(
+                "INSERT INTO progress (user_id, day, completed, manual_open, manual_opened_by) VALUES (?, 1, 0, 1, 'dev')",
+                (user_id,),
+            )
+            days_opened = 1
+
+        await db.commit()
+
+    # 3. Скидаємо in-memory кеш
+    try:
+        user_progress.pop(user_id, None)
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "status": user_status,
+        "old_role": old_role,
+        "new_role": new_role,
+        "days_opened": days_opened,
+        "total_days": total_days,
+    }
+
 
 async def update_user_role(user_id: int, new_role: str, actor_id: Optional[int] = None) -> None:
     """Оновлює статус користувача (status), не змінюючи посаду (role)."""
@@ -192,23 +315,19 @@ async def get_user_details(user_id):
         return dict(user) if user else None
 
 async def get_manager_interns(manager_id):
-
     """Отримує список всіх стажерів конкретного керівника"""
-
+    privileged_ids = await _get_privileged_user_ids()
     async with aiosqlite.connect(DB_PATH) as db:
-
         db.row_factory = aiosqlite.Row
-
         cursor = await db.execute(
-
             "SELECT * FROM users WHERE manager_id = ? AND (status IS NULL OR status != 'Працівник') ORDER BY last_activity DESC",
-
             (manager_id,)
-
         )
-
         interns = await cursor.fetchall()
-        return [dict(intern) for intern in interns]
+        return [
+            dict(intern) for intern in interns 
+            if intern["role"] not in MANAGEMENT_ROLES and intern["user_id"] not in privileged_ids
+        ]
 
 async def get_manager_team_users(manager_id: int) -> list[dict]:
     """
@@ -256,7 +375,7 @@ async def get_manager_team_users(manager_id: int) -> list[dict]:
         team = []
         for r in rows:
             uid = r["user_id"]
-            if uid not in seen and uid not in privileged_ids and uid != manager_id:
+            if uid not in seen and uid not in privileged_ids and uid != manager_id and r["role"] not in MANAGEMENT_ROLES:
                 seen.add(uid)
                 team.append(dict(r))
                 
@@ -286,7 +405,10 @@ async def get_all_active_users(days=3):
         """
         cursor = await db.execute(query, (cutoff_date,))
         users = await cursor.fetchall()
-        return [dict(user) for user in users if user["user_id"] not in privileged_ids]
+        return [
+            dict(user) for user in users 
+            if user["user_id"] not in privileged_ids and user["role"] not in MANAGEMENT_ROLES
+        ]
 
 async def get_all_inactive_users(days=3):
     """Отримує список неактивних стажерів"""
@@ -310,7 +432,10 @@ async def get_all_inactive_users(days=3):
         """
         cursor = await db.execute(query, (cutoff_date, DAYS_TOTAL))
         users = await cursor.fetchall()
-        return [dict(user) for user in users if user["user_id"] not in privileged_ids]
+        return [
+            dict(user) for user in users 
+            if user["user_id"] not in privileged_ids and user["role"] not in MANAGEMENT_ROLES
+        ]
 
 async def _get_privileged_user_ids() -> set[int]:
     async with aiosqlite.connect(MANAGERS_DB_PATH) as mdb:
@@ -331,7 +456,10 @@ async def get_all_interns() -> list:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT * FROM users WHERE (status IS NULL OR status != 'Працівник') ORDER BY full_name ASC")
         rows = await cursor.fetchall()
-        return [dict(r) for r in rows if r["user_id"] not in privileged_ids]
+        return [
+            dict(r) for r in rows 
+            if r["user_id"] not in privileged_ids and r["role"] not in MANAGEMENT_ROLES
+        ]
 
 async def get_all_workers() -> list:
     """Повертає всіх працівників (status = 'Працівник'), сортуючи за ПІБ."""
@@ -367,6 +495,8 @@ async def get_interns_in_progress_for_manager(manager_id, active_only=True):
         
         in_progress = []
         for intern in interns:
+            if intern["role"] in MANAGEMENT_ROLES:
+                continue
             # Перевіряємо чи завершено навчання
             cursor = await db.execute(
                 "SELECT COUNT(*) FROM progress WHERE user_id = ? AND completed = 1",
@@ -395,6 +525,8 @@ async def get_inactive_interns_for_manager(manager_id, days=3):
         
         inactive = []
         for intern in interns:
+            if intern["role"] in MANAGEMENT_ROLES:
+                continue
             cursor = await db.execute(
                 "SELECT COUNT(*) FROM progress WHERE user_id = ? AND completed = 1",
                 (intern['user_id'],)
@@ -435,7 +567,10 @@ async def get_inactive_interns_for_auto_delete(days: int = 3) -> list[dict]:
             (cutoff_date, DAYS_TOTAL),
         )
         rows = await cursor.fetchall()
-        return [dict(r) for r in rows if r["user_id"] not in privileged_ids]
+        return [
+            dict(r) for r in rows 
+            if r["user_id"] not in privileged_ids and r["role"] not in MANAGEMENT_ROLES
+        ]
 
 async def update_last_activity(user_id):
     """Оновлює час останньої активності користувача"""

@@ -148,6 +148,18 @@ async def rename_position(position_id: int, new_name: str) -> None:
 
         await db.commit()
 
+    # Каскадне оновлення токенів у tokens.db
+    try:
+        from .tokens import TOKENS_DB_PATH
+        async with aiosqlite.connect(TOKENS_DB_PATH) as tokens_db:
+            await tokens_db.execute(
+                "UPDATE tokens SET role = ? WHERE role = ?",
+                (new_name, old_name),
+            )
+            await tokens_db.commit()
+    except Exception:
+        pass
+
 
 async def update_days_count(position_id: int, new_days_count: int) -> None:
     """
@@ -211,8 +223,22 @@ async def delete_position(position_id: int) -> None:
                 f"до неї прив'язано {user_count} користувачів."
             )
 
+        # Видаляємо матеріали цієї посади
+        await db.execute("DELETE FROM materials WHERE role = ?", (role_name,))
         await db.execute("DELETE FROM positions WHERE id = ?", (position_id,))
         await db.commit()
+
+    # Видаляємо невикористані токени цієї посади
+    try:
+        from .tokens import TOKENS_DB_PATH
+        async with aiosqlite.connect(TOKENS_DB_PATH) as tokens_db:
+            await tokens_db.execute(
+                "DELETE FROM tokens WHERE role = ? AND used_by IS NULL",
+                (role_name,),
+            )
+            await tokens_db.commit()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

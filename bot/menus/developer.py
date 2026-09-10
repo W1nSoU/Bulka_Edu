@@ -16,7 +16,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramBadRequest
 from bot.config import MAIN_DEVELOPER_ID, DAYS_TOTAL, TIMEZONE
-from bot.services.positions import get_all_positions, get_position_by_id, add_position, update_position_name, update_position_days, update_position_type, get_position_stats
+from bot.services.positions import get_all_positions, get_position_by_id, add_position, update_position_name, update_position_days, update_position_type, get_position_stats, delete_position
 from bot.services.cities import get_all_cities, get_city_by_id, add_city, update_city_name, delete_city
 from bot.services.logger import get_logger
 from bot.services.semantic_search import build_and_reset_embeddings
@@ -25,6 +25,7 @@ from database.users import (
     get_user_details,
     get_user_by_username,
     get_users_by_full_name, # NEW
+    change_user_role,
     get_all_active_users,
     get_all_inactive_users,
     get_all_interns,
@@ -6606,16 +6607,43 @@ async def developer_process_change_role(callback: CallbackQuery, state: FSMConte
         await callback.answer("Користувача не знайдено.", show_alert=True)
         return
 
-    # Update role directly without erasing shop
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE users SET role = ? WHERE user_id = ?",
-            (new_role, user_id)
-        )
-        await db.commit()
+    # Update role and adapt training progress (Worker: all days open; Intern: restart from day 1)
+    result = await change_user_role(user_id, new_role)
+    if not result.get("success"):
+        await callback.answer(f"❌ {result.get('error', 'Помилка зміни посади')}", show_alert=True)
+        return
 
-    await callback.answer(f"Посаду змінено на {new_role}!", show_alert=True)
+    is_worker = (result.get("status") == "Працівник")
+    if is_worker:
+        alert_text = (
+            f"✅ Посаду для {user_details.get('full_name', '')} змінено на «{new_role}»!\n"
+            f"Оскільки це Працівник, усі {result.get('total_days')} днів навчання відкрито для вільного доступу."
+        )
+    else:
+        alert_text = (
+            f"✅ Посаду для {user_details.get('full_name', '')} змінено на «{new_role}»!\n"
+            f"Старий прогрес очищено. Навчання розпочато заново з 1-го дня нової програми."
+        )
+
+    await callback.answer(alert_text, show_alert=True)
     await _rebuild_user_profile_view(callback, user_id, state)
+
+    # Сповіщення користувача
+    try:
+        bot = callback.bot
+        if is_worker:
+            user_notify = (
+                f"ℹ️ <b>Вашу посаду було змінено на «{new_role}»!</b>\n\n"
+                f"Усі матеріали нової посади ({result.get('total_days')} дн.) відкрито у вашому навчальному меню."
+            )
+        else:
+            user_notify = (
+                f"ℹ️ <b>Вашу посаду було змінено на «{new_role}»!</b>\n\n"
+                f"Навчальну програму оновлено відповідно до нової посади. Навчання розпочато з 1-го дня. Успіхів!"
+            )
+        await bot.send_message(user_id, user_notify, parse_mode="HTML")
+    except Exception:
+        pass
 
 async def developer_change_city_start(callback: CallbackQuery, state: FSMContext):
     try:
@@ -7620,6 +7648,7 @@ async def dev_pos_view(callback: CallbackQuery):
             buttons.append([InlineKeyboardButton(text="✏️ Змінити кількість днів", callback_data=f"dev_pos_edit_days:{pos_id}")])
         buttons.extend([
             [InlineKeyboardButton(text=other_label, callback_data=f"dev_pos_toggle_type:{pos_id}:{other_type}")],
+            [InlineKeyboardButton(text="🗑 Видалити посаду", callback_data=f"dev_pos_delete:{pos_id}")],
             [InlineKeyboardButton(text="🔙 До списку посад", callback_data="dev_positions_menu")]
         ])
     
@@ -7663,11 +7692,67 @@ async def dev_pos_toggle_type(callback: CallbackQuery):
         [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_pos_edit_name:{pos_id}")],
         [InlineKeyboardButton(text="✏️ Змінити кількість днів", callback_data=f"dev_pos_edit_days:{pos_id}")],
         [InlineKeyboardButton(text=other_label, callback_data=f"dev_pos_toggle_type:{pos_id}:{other_type}")],
+        [InlineKeyboardButton(text="🗑 Видалити посаду", callback_data=f"dev_pos_delete:{pos_id}")],
         [InlineKeyboardButton(text="🔙 До списку посад", callback_data="dev_positions_menu")]
     ]
     
     await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer(f"✅ Тип змінено на {t_type}")
+
+
+async def dev_pos_delete(callback: CallbackQuery):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
+    pos_id = int(callback.data.split(":")[1])
+    pos = await get_position_by_id(pos_id)
+    if not pos:
+        await callback.answer("Посаду не знайдено!", show_alert=True)
+        return
+
+    # Перевіряємо прив'язаних користувачів
+    stats = await get_position_stats(pos['name'])
+    total_users = stats.get('total', 0)
+    if total_users > 0:
+        await callback.answer(
+            f"⚠️ Неможливо видалити посаду «{pos['name']}»!\n"
+            f"За нею закріплено {total_users} користувачів.\n"
+            f"Спочатку переведіть або видаліть користувачів.",
+            show_alert=True
+        )
+        return
+
+    await _edit_or_answer(
+        callback.message,
+        f"❗️ Ви впевнені, що хочете видалити посаду <b>{pos['name']}</b>?\n\n"
+        f"⚠️ <i>Усі навчальні матеріали для цієї посади також буде безповоротно видалено!</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="❌ Ні, скасувати", callback_data=f"dev_pos_view:{pos_id}"),
+                InlineKeyboardButton(text="🗑 Так, видалити", callback_data=f"dev_pos_delete_confirm:{pos_id}")
+            ]
+        ])
+    )
+    await callback.answer()
+
+
+async def dev_pos_delete_confirm(callback: CallbackQuery):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
+    pos_id = int(callback.data.split(":")[1])
+    success, msg = await delete_position(pos_id)
+    if success:
+        await callback.answer(f"✅ {msg}", show_alert=True)
+    else:
+        await callback.answer(f"❌ {msg}", show_alert=True)
+
+    positions = await get_all_positions()
+    await _edit_or_answer(
+        callback.message,
+        "👔 <b>Управління посадами</b>",
+        reply_markup=_positions_keyboard(positions, 1)
+    )
 
 
 async def dev_pos_edit_name_start(callback: CallbackQuery, state: FSMContext):
@@ -8703,6 +8788,8 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(dev_pos_edit_days_start, lambda c: c.data and c.data.startswith("dev_pos_edit_days:"))
     dp.message.register(dev_pos_edit_days_process, DeveloperStates.waiting_edit_position_days)
     dp.callback_query.register(dev_pos_toggle_type, lambda c: c.data and c.data.startswith("dev_pos_toggle_type:"))
+    dp.callback_query.register(dev_pos_delete, lambda c: c.data and c.data.startswith("dev_pos_delete:"))
+    dp.callback_query.register(dev_pos_delete_confirm, lambda c: c.data and c.data.startswith("dev_pos_delete_confirm:"))
 
     # Cities
     dp.callback_query.register(dev_cities_menu, lambda c: c.data == "dev_cities_menu")
