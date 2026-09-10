@@ -153,8 +153,8 @@ async def get_all_managers():
             managers.append(manager)
         return managers
 
-async def delete_manager_by_uid(uid):
-    """Видаляє керівника за його Telegram ID (hard delete)."""
+async def delete_manager_by_uid(uid, cascade_user: bool = True):
+    """Видаляє керівника за його Telegram ID (hard delete) та очищає всі пов'язані дані."""
     async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
         cursor = await db.execute("SELECT process FROM managers WHERE uid = ?", (uid,))
         row = await cursor.fetchone()
@@ -164,11 +164,26 @@ async def delete_manager_by_uid(uid):
         await db.execute("DELETE FROM managers WHERE uid = ?", (uid,))
         await db.commit()
 
-    # Також видаляємо з hr_users якщо користувач був там
+    # Також видаляємо з hr_users та з users.db при cascade_user=True
     try:
         async with aiosqlite.connect(DB_PATH) as u_db:
             await u_db.execute("DELETE FROM hr_users WHERE user_id = ?", (uid,))
+            if cascade_user:
+                await u_db.execute("DELETE FROM users WHERE user_id = ?", (uid,))
+                await u_db.execute("DELETE FROM progress WHERE user_id = ?", (uid,))
+                await u_db.execute("UPDATE conversations SET status = 'closed' WHERE manager_id = ? OR user_id = ?", (uid, uid))
+                await u_db.execute("UPDATE users SET manager_id = NULL WHERE manager_id = ?", (uid,))
+                await u_db.execute("DELETE FROM reminder_history WHERE intern_id = ? OR sender_id = ?", (uid, uid))
+                await u_db.execute("DELETE FROM support_logs WHERE user_id = ?", (uid,))
             await u_db.commit()
+    except Exception as e:
+        print(f"Error cascading manager deletion to users.db: {e}")
+
+    try:
+        from database.material_notifications import NOTIF_DB_PATH
+        async with aiosqlite.connect(NOTIF_DB_PATH) as ndb:
+            await ndb.execute("DELETE FROM material_change_recipients WHERE user_id = ?", (uid,))
+            await ndb.commit()
     except Exception:
         pass
 
@@ -317,7 +332,7 @@ async def get_managers_by_responsible(territorial_uid: int) -> list[dict]:
     async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT * FROM managers WHERE responsible_uid = ? AND (status = 'active' OR status IS NULL) ORDER BY full_name",
+            "SELECT * FROM managers WHERE responsible_uid = ? AND process IN ('Керівник', 'Керівник Стажер') AND (status = 'active' OR status IS NULL) ORDER BY full_name",
             (territorial_uid,)
         )
         rows = await cursor.fetchall()
@@ -396,14 +411,6 @@ async def fire_manager(uid: int) -> dict:
                 target_uid = city_territorials[0]["uid"]
                 target_name = f"Територіал {city_territorials[0].get('full_name', '')}"
 
-    # Оновлюємо статус в managers.db
-    async with aiosqlite.connect(MANAGERS_DB_PATH) as m_db:
-        await m_db.execute(
-            "UPDATE managers SET status = 'fired', fired_at = CURRENT_TIMESTAMP WHERE uid = ?",
-            (uid,)
-        )
-        await m_db.commit()
-
     # Переводимо стажерів та закриваємо бесіди в users.db
     transferred_count = 0
     async with aiosqlite.connect(DB_PATH) as u_db:
@@ -424,6 +431,9 @@ async def fire_manager(uid: int) -> dict:
             (uid,)
         )
         await u_db.commit()
+
+    # Повністю видаляємо керівника з managers.db та користувача з users.db
+    await delete_manager_by_uid(uid, cascade_user=True)
 
     return {
         "success": True,
@@ -723,14 +733,9 @@ async def add_observer(uid: int, full_name: str, username: str | None, responsib
     return True
 
 async def delete_observer_by_uid(uid: int) -> bool:
-    """Видаляє/деактивує наглядача (встановлює статус 'fired')."""
-    async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
-        await db.execute(
-            "UPDATE managers SET status = 'fired', fired_at = CURRENT_TIMESTAMP WHERE uid = ? AND process = 'Наглядач'",
-            (uid,)
-        )
-        await db.commit()
-        return True
+    """Видаляє наглядача з бази managers та очищає пов'язані дані."""
+    await delete_manager_by_uid(uid, cascade_user=True)
+    return True
 
 
 async def is_user_without_store_manager(user: dict) -> bool:
@@ -764,4 +769,54 @@ async def is_user_without_store_manager(user: dict) -> bool:
     return False
 
 
+async def get_city_supervisors(city: str, target_shop: str = None) -> dict:
+    """
+    Повертає структурований список діючих керівників та територіалів для вказаного міста:
+    {
+        "shop_managers": [...],   # керівники, за якими закріплений target_shop
+        "other_managers": [...],  # інші діючі керівники цього міста
+        "territorials": [...]     # діючі територіали цього міста
+    }
+    """
+    if not city:
+        return {"shop_managers": [], "other_managers": [], "territorials": []}
 
+    norm_city = city.strip().lower()
+    shop_managers = []
+    other_managers = []
+    territorials = []
+
+    async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM managers WHERE (status = 'active' OR status IS NULL) ORDER BY full_name ASC"
+        )
+        rows = await cursor.fetchall()
+        for r in rows:
+            m = dict(r)
+            m_city = (m.get("city") or "").strip().lower()
+            if m_city != norm_city:
+                continue
+
+            proc = m.get("process")
+            if proc == "Територіал":
+                territorials.append(m)
+            elif proc in ("Керівник", "Керівник Стажер"):
+                m_shops = []
+                try:
+                    if m.get("shops"):
+                        m_shops = json.loads(m["shops"])
+                except Exception:
+                    pass
+                m["shops_list"] = m_shops
+
+                if target_shop and any(target_shop.strip().lower() in s.strip().lower() or s.strip().lower() in target_shop.strip().lower() for s in m_shops):
+                    shop_managers.append(m)
+                else:
+                    other_managers.append(m)
+
+    return {
+        "shop_managers": shop_managers,
+        "other_managers": other_managers,
+        "territorials": territorials
+    }

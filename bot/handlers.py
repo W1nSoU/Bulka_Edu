@@ -53,6 +53,7 @@ from bot.services.reminders import send_intern_reminder
 from bot.services.access import is_privileged_user, validate_user_id, parse_callback_id
 from bot.services.semantic_search import semantic_search
 from bot.services.groq_ai import search_with_ai, is_groq_configured
+from bot.services.openai_ai import ask_gpt_tutor, is_openai_configured
 from bot.services.logger import get_logger
 from bot.services.test_error_monitoring_service import get_test_error_statistics
 from database.materials import get_materials_for_day, search_materials as search_materials_db, get_all_materials, get_material_by_id, get_material_by_role_day_type, get_test_by_role_and_day
@@ -109,8 +110,19 @@ async def start_menu(message: types.Message, state: FSMContext):
         )
         return
     
+    # Перевірка: якщо керівник звільнений в managers.db — доступ заборонено
+    from database.managers import get_manager_by_uid
+    mgr_record = await get_manager_by_uid(user_id)
+    if mgr_record and mgr_record.get("status") == "fired":
+        await message.answer(
+            "⚠️ <b>Доступ обмежено</b> ⚠️\n\n"
+            "Вибачте, але ваш обліковий запис деактивовано."
+        )
+        return
+
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT user_id, role FROM users WHERE user_id = ?", (user_id,))
         existing_user = await cursor.fetchone()
     
     valid_referral = False
@@ -157,7 +169,7 @@ async def start_menu(message: types.Message, state: FSMContext):
                 )
                 await state.set_state(RegistrationStates.waiting_for_full_name)
                 await message.answer(
-                    "Вітаю в команді Булка! 🥐\n\n"
+                    "Вітаю в команді BULKA! 🥐\n\n"
                     "Будь ласка, напишіть ваше <b>Прізвище Ім'я По батькові (ПІБ)</b> для завершення реєстрації."
                 )
                 return
@@ -205,7 +217,7 @@ async def start_menu(message: types.Message, state: FSMContext):
                 )
                 await state.set_state(RegistrationStates.waiting_for_full_name)
                 await message.answer(
-                    "Вітаю в команді Булка! 🥐\n\n"
+                    "Вітаю в команді BULKA! 🥐\n\n"
                     "Будь ласка, напишіть ваше <b>Прізвище Ім'я По батькові (ПІБ)</b> для завершення реєстрації."
                 )
                 return
@@ -225,9 +237,21 @@ async def start_menu(message: types.Message, state: FSMContext):
         else:
             await message.answer(
                 "⚠️ <b>Доступ обмежено</b> ⚠️\n\n"
-                "Вибачте, але у вас немає доступу до корпоративної навчальної платформи Булка.\n\n"
+                "Вибачте, але у вас немає доступу до корпоративної навчальної платформи BULKA.\n\n"
                 "Доступ надається виключно працівникам компанії за запрошенням від керівника.\n\n"
                 "Якщо ви співробітник компанії, будь ласка, зверніться до свого керівника для отримання посилання-запрошення."
+            )
+            return
+
+    # Додатковий захист: якщо користувач має керівну роль, але не має активних привілеїв, блокуємо доступ
+    if existing_user and not valid_referral:
+        u_role = existing_user["role"]
+        from database.users import MANAGEMENT_ROLES
+        if u_role in MANAGEMENT_ROLES and not (is_manager or is_territorial or is_developer or is_hr or is_observer):
+            await message.answer(
+                "⚠️ <b>Доступ обмежено</b> ⚠️\n\n"
+                "Вибачте, але у вас немає доступу до корпоративної навчальної платформи BULKA.\n\n"
+                "Доступ надається виключно діючим працівникам компанії."
             )
             return
 
@@ -250,7 +274,7 @@ async def show_developer_main_menu(
     force_new_message: bool = False,
 ) -> None:
     caption = (
-        "🛠 <b>Панель управління Булка</b>\n\n"
+        "🛠 <b>Панель управління BULKA</b>\n\n"
         "Вітаємо в системі! Оберіть дію:"
     )
     keyboard = main_menu_keyboard(is_hr=is_hr, is_developer=is_developer, is_territorial=is_territorial)
@@ -289,7 +313,7 @@ async def show_observer_main_menu(
     force_new_message: bool = False,
 ) -> None:
     caption = (
-        "👁 <b>Панель управління Булка (Наглядач)</b>\n\n"
+        "👁 <b>Панель управління BULKA (Наглядач)</b>\n\n"
         "Вітаємо в системі! Оберіть дію:"
     )
     keyboard = main_menu_keyboard(is_observer=True)
@@ -345,7 +369,7 @@ async def menu_days(callback: CallbackQuery):
             ])
             access_denied_msg = (
                 "⚠️ <b>Доступ обмежено</b> ⚠️\n\n"
-                "Вибачте, але у вас немає доступу до корпоративної навчальної платформи Булка.\n\n"
+                "Вибачте, але у вас немає доступу до корпоративної навчальної платформи BULKA.\n\n"
                 "Доступ надається виключно працівникам компанії за запрошенням від керівника.\n\n"
                 "Якщо ви співробітник компанії, будь ласка, зверніться до свого керівника для отримання посилання-запрошення."
             )
@@ -371,13 +395,19 @@ async def menu_days(callback: CallbackQuery):
     syllabus = await get_material_by_role_day_type(user_role, 0, "syllabus")
     is_syl_enabled = bool(syllabus.get('is_enabled', 1)) if syllabus else True
 
+    photo_file = (
+        "kerivn_books_study.jpg"
+        if (IMG_DIR / "kerivn_books_study.jpg").exists() or (IMG_DIR / "manager" / "kerivn_books_study.jpg").exists()
+        else "b_start.jpg"
+    )
+
     if callback.message:
-        await _show_text_menu(
+        await _show_photo_menu(
             callback.message,
+            photo_file,
             "Оберіть день для навчання:",
             learning_menu_keyboard(day_overview, syllabus_enabled=is_syl_enabled, total_days=len(day_overview), page=0),
             allow_edit=True,
-            allow_caption_edit=False,
         )
 
 async def menu_days_page_callback(callback: CallbackQuery):
@@ -524,7 +554,7 @@ async def _ensure_learning_access(callback: CallbackQuery):
     
     access_denied_msg = (
         "⚠️ <b>Доступ обмежено</b> ⚠️\n\n"
-        "Вибачте, але у вас немає доступу до корпоративної навчальної платформи Булка.\n\n"
+        "Вибачте, але у вас немає доступу до корпоративної навчальної платформи BULKA.\n\n"
         "Доступ надається виключно працівникам компанії за запрошенням від керівника.\n\n"
         "Якщо ви співробітник компанії, будь ласка, зверніться до свого керівника для отримання посилання-запрошення."
     )
@@ -621,8 +651,12 @@ async def _show_photo_menu(
 ) -> None:
     photo_path = IMG_DIR / photo_filename
     if not photo_path.exists():
-        if (IMG_DIR / "admin" / photo_filename).exists():
+        if (IMG_DIR / "manager" / photo_filename).exists():
+            photo_path = IMG_DIR / "manager" / photo_filename
+        elif (IMG_DIR / "admin" / photo_filename).exists():
             photo_path = IMG_DIR / "admin" / photo_filename
+        elif (IMG_DIR / "ter_manager" / photo_filename).exists():
+            photo_path = IMG_DIR / "ter_manager" / photo_filename
         else:
             await _show_text_menu(message, caption, reply_markup, allow_edit=allow_edit)
             return
@@ -630,13 +664,13 @@ async def _show_photo_menu(
     has_photo = bool(getattr(message, "photo", None))
     if allow_edit and has_photo:
         try:
-            media = InputMediaPhoto(media=FSInputFile(str(photo_path)), caption=caption)
+            media = InputMediaPhoto(media=FSInputFile(str(photo_path)), caption=caption, parse_mode="HTML")
             await message.edit_media(media=media, reply_markup=reply_markup)
             return
         except Exception:
             pass
         try:
-            await message.edit_caption(caption=caption, reply_markup=reply_markup)
+            await message.edit_caption(caption=caption, reply_markup=reply_markup, parse_mode="HTML")
             return
         except Exception:
             pass
@@ -652,6 +686,7 @@ async def _show_photo_menu(
         photo=FSInputFile(str(photo_path)),
         caption=caption,
         reply_markup=reply_markup,
+        parse_mode="HTML",
     )
 
 async def show_student_main_menu(
@@ -663,6 +698,22 @@ async def show_student_main_menu(
     allow_edit: bool = True,
     force_new_message: bool = False,
 ) -> None:
+    # Захист: якщо користувач має керівну посаду, але не є активним керівником/територіалом/адміном - не показуємо меню стажера
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT role FROM users WHERE user_id = ?", (user_id,))
+        u_row = await cursor.fetchone()
+        if u_row:
+            from database.users import MANAGEMENT_ROLES
+            if u_row["role"] in MANAGEMENT_ROLES and not (is_hr or is_developer):
+                from database.managers import is_manager_user, is_observer_user, is_territorial_user
+                if not (await is_manager_user(user_id) or await is_observer_user(user_id) or await is_territorial_user(user_id)):
+                    await message.answer(
+                        "⚠️ <b>Доступ обмежено</b> ⚠️\n\n"
+                        "Вибачте, але у вас немає доступу до корпоративної навчальної платформи BULKA."
+                    )
+                    return
+
     initialize_user_progress(user_id)
     progress_count = get_progress(user_id)
     available_day = get_available_day(user_id)
@@ -718,7 +769,7 @@ async def show_manager_main_menu(
     force_new_message: bool = False,
 ) -> None:
     caption = (
-        "🥖 Ви увійшли як керівник команди Булка!\n"
+        "🥖 Ви увійшли як керівник команди BULKA!\n"
         "Час дбати про розвиток стажерів. Що робимо далі?"
     )
     keyboard = main_menu_keyboard(is_manager=True, is_hr=is_hr, is_developer=is_developer)
@@ -1529,11 +1580,13 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
     query = (message.text or "").strip()
     new_search_callback = "remind_topic_self"
     role_filter = None
+    user_details = None
 
     if not query:
-        await message.answer("Будь ласка, введи хоча б одне слово для пошуку.")
+        await message.answer("Будь ласка, введи своє питання.")
         return
 
+    # --- Перевірка доступу і визначення ролі ---
     if mode == "global":
         if not (await is_hr_user(user_id) or await is_developer_user(user_id)):
             await message.answer("Цей режим доступний лише HR та Адміністраторам.")
@@ -1576,317 +1629,82 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
         role_filter = target_role or (user_details or {}).get("role")
         new_search_callback = "remind_topic_self"
 
-    # DEBUG: Log search parameters
     logger = get_logger()
-    logger.debug(f"=== SEARCH DEBUG START ===")
-    logger.debug(f"Search parameters: query='{query}', mode='{mode}', target_role='{target_role}', role_filter='{role_filter}'")
-    if user_details:
-        logger.debug(f"User details: role='{user_details.get('role')}', manager_id='{user_details.get('manager_id')}'")
+    logger.info(f"GPT tutor request: user={user_id}, mode='{mode}', role='{role_filter}', query='{query[:80]}'")
 
-    keyword_results = await search_materials_db(query, role=role_filter, limit=15)
-    
-    # DEBUG: Log search results for diagnostics
-    logger.debug(f"Keyword search for '{query}' with role '{role_filter}': found {len(keyword_results)} materials")
-    if keyword_results:
-        for result in keyword_results[:3]:
-            logger.debug(f"  - Material {result['id']}: day={result['day']}, role='{result['role']}', title='{result.get('title', 'No title')}'")
+    # Показуємо індикатор "думає"
+    thinking_msg = await message.answer("🥐 <b>BULKA радник</b> аналізує навчальні матеріали...", parse_mode="HTML")
+
+    # --- Завантажуємо всі матеріали для ролі ---
+    all_mats = await get_all_materials()
+    if role_filter:
+        role_mats = [m for m in all_mats if m.get("role") == role_filter]
     else:
-        logger.debug("  - No materials found by keyword search")
-    
+        # global mode (для HR/Адміністратора) — всі матеріали
+        role_mats = all_mats
+
+    # --- GPT-наставник (2-Step Router) ---
     ai_response = None
-    semantic_results = [] # Keep this for the non-AI fallback
-    
-    if is_groq_configured():
-        # --- NEW RELIABLE CONTEXT ASSEMBLY ---
-        
-        # 1. Collect unique material IDs from both search methods
-        unique_material_ids = {} # Using a dict to preserve order: id -> None
-        for item in keyword_results:
-            unique_material_ids[item['id']] = None
-        
-        semantic_candidates = await semantic_search(query, limit=15)
-        logger.debug(f"Semantic search found {len(semantic_candidates)} candidates")
-        for item in semantic_candidates:
-            if item['material_id']:
-                unique_material_ids[item['material_id']] = None
-                logger.debug(f"Added semantic result: material {item['material_id']}, score={item.get('score', 0):.3f}")
-        
-        logger.debug(f"Combined search found {len(unique_material_ids)} unique materials")
-        
-        # FALLBACK: If no results from targeted search, search ALL materials for role
-        if len(unique_material_ids) == 0:
-            logger.debug(f"No targeted results found, searching ALL materials for role '{role_filter}'")
-            all_materials = await get_all_materials()
-            
-            # Filter by role if specified
-            if role_filter:
-                relevant_materials = [m for m in all_materials if m.get('role') == role_filter or m.get('role') == 'ALL']
-            else:
-                relevant_materials = all_materials
-            
-            logger.debug(f"Fallback search: checking {len(relevant_materials)} materials for query '{query}'")
-            
-            # Search in all relevant materials
-            query_lower = query.lower()
-            query_words = [w.lower() for w in query.split() if len(w) > 2]
-            
-            # Add specific search terms for better matching
-            search_terms = query_words + [query_lower]
-            if "багет" in query_lower:
-                search_terms.extend(["багет", "хліб", "круассан", "випав", "пакет", "продукція"])
-            if "випав" in query_lower:
-                search_terms.extend(["випав", "випало", "компенсац", "заміню"])
-            
-            for material in relevant_materials:
-                content = (material.get('content') or '').lower()
-                title = (material.get('title') or '').lower()
-                
-                # Check if any search terms appear in content or title
-                found = False
-                matched_term = None
-                
-                for term in search_terms:
-                    if term in content or term in title:
-                        found = True
-                        matched_term = term
-                        break
-                
-                if found:
-                    unique_material_ids[material['id']] = None
-                    logger.debug(f"Found material {material['id']} (day {material.get('day')}) via fallback search, matched term: '{matched_term}'")
-                    logger.debug(f"Material title: {material.get('title', 'No title')}")
-                    # Log a snippet of content for debugging
-                    content_full = material.get('content', '')
-                    if matched_term and matched_term in content_full.lower():
-                        idx = content_full.lower().find(matched_term)
-                        start = max(0, idx - 50)
-                        end = min(len(content_full), idx + 150)
-                        snippet = content_full[start:end]
-                        logger.debug(f"Content snippet: ...{snippet}...")
-            
-            logger.debug(f"Fallback search found {len(unique_material_ids)} total materials")
-        
-        # 2. Fetch full content for all unique materials
-        full_materials = {} # id -> full_text
-        for mid in unique_material_ids.keys():
-            mat = await get_material_by_id(mid)
-            if mat:
-                full_materials[mid] = mat.get('content') or ""
-
-        # 3. Generate Smart Snippets for AI Context from every found document
-        context_parts = []
-        query_words = [w.lower() for w in query.split() if len(w) > 2]
-        if not query_words:
-            query_words.append(query.lower())
-        
-        # Add common variations for Ukrainian words
-        expanded_words = []
-        for word in query_words:
-            expanded_words.append(word)
-            if "алкоголь" in word or word == "алкоголь":
-                expanded_words.extend(["спирт", "алкогол", "горілк", "пив", "вин"])
-            elif "списув" in word or word == "списувати":
-                expanded_words.extend(["спис", "списання", "списати"])
-            elif "конфлікт" in word or "конфлікт" in query.lower():
-                expanded_words.extend(["конфлікт", "суперечк", "скарг", "незадовол", "проблем"])
-            elif word in ["багет", "хліб", "випав", "пакет"]:
-                expanded_words.extend(["багет", "хліб", "круассан", "випав", "пакет", "продукція", "компенсац", "заміню", "їжа"])
-        
-        # Add the full original query for exact matching
-        expanded_words.append(query.lower())
-
-        # Collect relevant materials with scores (FULL TEXT, not snippets)
-        scored_materials = []
-        
-        for mid, text in full_materials.items():
-            if not text:
-                continue
-                
-            text_lower = text.lower()
-            
-            # Calculate relevance score based on matches
-            matches = []
-            
-            # Priority A: Find exact phrase (highest priority)
-            phrase_idx = text_lower.find(query.lower())
-            if phrase_idx != -1:
-                matches.append((phrase_idx, 3, "exact_phrase"))
-            
-            # Priority B: Find expanded keywords
-            for word in expanded_words:
-                word_idx = text_lower.find(word)
-                if word_idx != -1:
-                    matches.append((word_idx, 2, f"keyword_{word}"))
-            
-            # Priority C: Find original query words
-            for word in query_words:
-                word_idx = text_lower.find(word)
-                if word_idx != -1 and word_idx not in [m[0] for m in matches]:
-                    matches.append((word_idx, 1, f"query_word_{word}"))
-            
-            # Score this material if it has matches
-            if matches:
-                # Calculate score based on match quality and quantity
-                best_match = max(matches, key=lambda x: x[1])
-                score = best_match[1] * 10 + len([m for m in matches if m[1] >= 2]) * 5
-                
-                scored_materials.append((score, text, mid, best_match[2], len(matches)))
-                logger.debug(f"Material {mid}: score={score}, matches={len(matches)}, best_match_type={best_match[2]}")
-        
-        # Sort materials by score (highest first)
-        scored_materials.sort(key=lambda x: x[0], reverse=True)
-        
-        # Build context from top-scored FULL materials
-        context_parts = []
-        total_length = 0
-        max_context_length = 15000  # Increased limit for full materials
-        max_materials = 5  # Maximum number of materials to include
-        
-        for score, full_text, mid, match_type, num_matches in scored_materials:
-            # Check if we can fit this material
-            if len(context_parts) >= max_materials:
-                logger.debug(f"Reached max materials limit ({max_materials})")
-                break
-            
-            if total_length + len(full_text) > max_context_length:
-                # Try to fit a truncated version if it's the first material
-                if len(context_parts) == 0:
-                    truncated = full_text[:max_context_length - total_length]
-                    context_parts.append(f"[Матеріал {mid}]: {truncated}...")
-                    total_length += len(truncated)
-                    logger.debug(f"Added TRUNCATED material {mid}: score={score}, type={match_type}, length={len(truncated)}")
-                break
-            
-            # Add FULL material text
-            context_parts.append(f"[Матеріал {mid}]: {full_text}")
-            total_length += len(full_text)
-            
-            logger.debug(f"Added FULL material {mid}: score={score}, type={match_type}, matches={num_matches}, length={len(full_text)}")
-        
-        # Fallback: if no scored materials, take first few materials completely
-        if not context_parts:
-            logger.debug("No scored materials, using fallback: taking first few materials")
-            for mid, text in list(full_materials.items())[:3]:
-                if text and len(context_parts) < 3:
-                    # Take as much as we can fit
-                    available_space = max_context_length - total_length
-                    if available_space <= 0:
-                        break
-                    
-                    if len(text) <= available_space:
-                        context_parts.append(f"[Матеріал {mid}]: {text}")
-                        total_length += len(text)
-                        logger.debug(f"Fallback: added full material {mid}, length={len(text)}")
-                    else:
-                        truncated = text[:available_space]
-                        context_parts.append(f"[Матеріал {mid}]: {truncated}...")
-                        total_length += len(truncated)
-                        logger.debug(f"Fallback: added truncated material {mid}, length={len(truncated)}")
-                        break
-
-        context = "\n\n---\n\n".join(context_parts)
-        
-        # DEBUG: Log context info
-        logger.debug(f"Context assembled: {len(context_parts)} FULL materials, total length {len(context)}")
-        material_ids = [int(part.split(']:')[0].replace('[Матеріал ', '')) for part in context_parts if '[Матеріал ' in part]
-        logger.debug(f"Final materials in context: {material_ids}")
-        logger.debug(f"Top-scored materials: {[(s[0], s[2], s[3], s[4]) for s in scored_materials[:5]]}")
-        
-        # Log what's actually in the context for each material
-        for i, part in enumerate(context_parts[:2], 1):  # Show first 2 materials
-            lines = part.split('\n')
-            preview = '\n'.join(lines[:5])  # First 5 lines
-            logger.debug(f"Context material {i} preview (first 5 lines):\n{preview}")
-        
-        logger.debug(f"=== SEARCH DEBUG END ===")
-        
-        if context.strip():
-             ai_response = await search_with_ai(query, context, role_filter, user_id=message.from_user.id)
-        else:
-             ai_response = "На жаль, я не знайшов інформації за вашим запитом у матеріалах."
-        # --- END OF NEW LOGIC ---
-
-    elif len(keyword_results) < SEMANTIC_MIN_KEYWORD_RESULTS:
-        # Fallback for no AI configured - simplified existing logic
-        semantic_candidates = await semantic_search(query, limit=SEMANTIC_RESULT_LIMIT)
-        keyword_ids = {item.get("id") for item in keyword_results if item.get("id")}
-        for candidate in semantic_candidates:
-            material_id = candidate.get("material_id")
-            if material_id and material_id in keyword_ids:
-                continue
-            semantic_results.append(candidate)
-            if len(semantic_results) >= SEMANTIC_RESULT_LIMIT:
-                break
-
-    # semantic_results is only for fallback when AI is not configured or fails,
-    # so we don't need to worry about it here directly for AI output.
-
-    if not context.strip(): # Check if no context was formed
-        text = (
-            f"😿 Не вдалося знайти матеріали за запитом <b>“{query}”</b>.\n"
-            "Спробуй інше формулювання або синоніми."
+    if is_openai_configured() and role_mats:
+        ai_response = await ask_gpt_tutor(
+            question=query,
+            all_materials=role_mats,
+            role=role_filter or "загальна",
+            user_id=user_id,
         )
-    else:
-        lines = [f"🔎 <b>Результати AI-пошуку за запитом “{query}”</b>", ""]
-        
-        if ai_response:
-            # Перевіряємо чи ШІ дає стандартну відповідь "немає інформації"
-            if ("немає інформації" in ai_response.lower() or "не знайшов" in ai_response.lower()) and len(keyword_results) > 0:
-                # Якщо ШІ каже що немає інформації, але ключові слова знайшли результати,
-                # додаємо базовий перелік знайдених матеріалів
-                lines.append(ai_response)
-                lines.append("")
-                lines.append("📄 <b>Знайдені матеріали за ключовими словами:</b>")
-                for idx, item in enumerate(keyword_results[:5], 1):
-                    day = item.get("day", "?")
-                    title = item.get("title", "Без назви")
-                    content_snippet = _build_snippet(item.get("content", ""), 150)
-                    lines.append(f"{idx}. <b>День {day}</b> - {title}")
-                    if content_snippet:
-                        lines.append(f"   {content_snippet}")
-                    lines.append("")
-            else:
-                lines.append(ai_response) # This now includes the debug context for developers
-        elif semantic_results: # Fallback only if AI not configured, but semantic_results are found
-            lines.append("🤖 <b>За змістом (локальний AI)</b>:")
-            for idx, item in enumerate(semantic_results, 1):
-                meta = CONTENT_TYPE_METADATA.get(item.get("block_type") or "text", {"icon": "📄", "label": "Матеріал"})
-                day = item.get("day")
-                day_label = f"День {day}" if day else "День не зазначено"
-                preview = _build_snippet(item.get("preview", ""))
-                score = item.get("score", 0.0)
-                lines.append(
-                    f"{idx}. {meta['icon']} <b>{day_label}</b> · {meta['label']}\n"
-                    f"{preview}\n"
-                    f"Оцінка схожості: {score:.2f}"
-                )
-                lines.append("")
-        else:
-            # This case should ideally not be reached if context.strip() is checked before
-            lines.append("💡 <i>AI-пошук недоступний. Для активації встановіть GROQ_API_KEY.</i>")
 
-        text = "\n".join(line for line in lines if line is not None).strip()
+    # --- Fallback: якщо GPT недоступний, показати keyword результати ---
+    if not ai_response:
+        logger.warning(f"GPT unavailable or no materials, falling back to keyword search for user={user_id}")
+        keyword_results = await search_materials_db(query, role=role_filter, limit=5)
+        if keyword_results:
+            lines = [
+                f"🔎 <b>Результати пошуку за запитом «{query}»</b>",
+                "<i>BULKA радник тимчасово недоступний. Показую знайдене за ключовими словами:</i>",
+                "",
+            ]
+            for idx, item in enumerate(keyword_results, 1):
+                day = item.get("day", "?")
+                title = item.get("title", "Без назви")
+                content_snippet = _build_snippet(item.get("content", ""), 200)
+                lines.append(f"{idx}. <b>День {day}</b> — {title}")
+                if content_snippet:
+                    lines.append(f"   {content_snippet}")
+                lines.append("")
+            text = "\n".join(lines).strip()
+        else:
+            text = (
+                f"😿 На жаль, я не знайшов інформації за запитом <b>«{query}»</b>.\n"
+                "Спробуй інше формулювання або постав питання більш конкретно."
+            )
+    else:
+        # Чиста відповідь від BULKA радник
+        text = f"🥐 <b>BULKA радник</b>\n\n{ai_response}"
+
+    # Видаляємо індикатор "думає"
+    try:
+        await thinking_msg.delete()
+    except Exception:
+        pass
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔁 Новий пошук", callback_data=new_search_callback)],
+            [InlineKeyboardButton(text="🔁 Нове питання", callback_data=new_search_callback)],
             [InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")],
         ]
     )
-    
-    # Telegram має ліміт 4096 символів на повідомлення
+
+    # Telegram ліміт 4096 символів
     MAX_MESSAGE_LENGTH = 4000
-    
     if len(text) <= MAX_MESSAGE_LENGTH:
-        await message.answer(text, reply_markup=kb)
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
     else:
-        # Якщо повідомлення занадто довге, обрізаємо
-        truncated = text[:MAX_MESSAGE_LENGTH - 100]
-        truncated += "\n\n<i>... (повідомлення обрізано)</i>"
-        await message.answer(truncated, reply_markup=kb)
-        logger.warning(f"Message truncated: original length {len(text)}, sent {len(truncated)}")
-    
+        truncated = text[:MAX_MESSAGE_LENGTH - 100] + "\n\n<i>... (відповідь обрізано через довжину)</i>"
+        await message.answer(truncated, reply_markup=kb, parse_mode="HTML")
+        logger.warning(f"GPT response truncated: {len(text)} -> {len(truncated)} chars")
+
     await state.clear()
+
 
 async def main_menu_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -2178,12 +1996,13 @@ async def developer_profile_handler(callback: CallbackQuery):
     user_details = await get_user_details(user_id)
     
     from database.users import get_all_users
-    from database.managers import get_all_managers
+    from database.managers import get_all_kerivnyky, is_territorial_user
+    from database.hr import is_developer_user
     from database.materials import get_all_materials
     from bot.utils import get_user_avatar_input, _send_or_edit_card_photo
     
     all_users = await get_all_users()
-    all_managers = await get_all_managers()
+    all_managers = await get_all_kerivnyky()
     all_materials = await get_all_materials()
     
     # Safely get names with fallback if user_details is None
@@ -2191,8 +2010,16 @@ async def developer_profile_handler(callback: CallbackQuery):
     username = user_details.get('username', 'немає') if user_details else callback.from_user.username or "немає"
     username_str = f"@{username}" if username and username != "немає" else "немає"
 
+    is_dev = await is_developer_user(user_id)
+    is_terr = await is_territorial_user(user_id)
+
+    if is_terr and not is_dev:
+        profile_title = "🗺️ <b>Профіль територіального керуючого</b> 🗺️"
+    else:
+        profile_title = "🛠️ <b>Профіль адміністратора</b> 🛠️"
+
     text = (
-        f"🛠️ <b>Профіль адміністратора</b> 🛠️\n\n"
+        f"{profile_title}\n\n"
         f"👤 <b>{full_name}</b> ({username_str})\n\n"
         f"📊 <b>Статистика системи:</b>\n"
         f"— Всього користувачів: <b>{len(all_users)}</b>\n"
@@ -2213,11 +2040,11 @@ async def observer_profile_handler(callback: CallbackQuery):
     user_details = await get_user_details(user_id)
     
     from database.users import get_all_users
-    from database.managers import get_all_managers, get_manager_by_uid
+    from database.managers import get_all_kerivnyky, get_manager_by_uid
     from bot.utils import get_user_avatar_input, _send_or_edit_card_photo
     
     all_users = await get_all_users()
-    all_managers = await get_all_managers()
+    all_managers = await get_all_kerivnyky()
     
     interns_count = sum(1 for u in all_users if not u.get("is_worker"))
     workers_count = sum(1 for u in all_users if u.get("is_worker"))
@@ -2235,7 +2062,7 @@ async def observer_profile_handler(callback: CallbackQuery):
     username_str = f"@{username}" if username and username != "немає" else "немає"
     
     text = (
-        f"🍞 <b>Профіль наглядача-Булочки</b> 🍞\n\n"
+        f"🍞 <b>Профіль наглядача BULKA</b> 🍞\n\n"
         f"👤 <b>{html.escape(full_name)}</b> ({username_str})\n"
         f"💼 Посада: <b>Наглядач</b>\n\n"
         f"📊 <b>Загальна статистика мережі:</b>\n"
@@ -2291,10 +2118,10 @@ async def profile_handler_new_message(callback: CallbackQuery):
     else:
         motivation = "✨ Ви дуже близько до початку нових звершень!"
 
-    user_name = user_details.get('full_name') or callback.from_user.full_name or "Булочка"
+    user_name = user_details.get('full_name') or callback.from_user.full_name or "Стажер"
 
     text = (
-        f"🍞 <b>Персональний профіль Булочки: {user_name}</b> 🍞\n\n"
+        f"🍞 <b>Персональний профіль BULKA: {user_name}</b> 🍞\n\n"
         f"🔹 Поточний день навчання: <b>День {available_day}</b>\n"
         f"🔹 Ваша посада: <b>{user_details.get('role', 'Не вказано')}</b>\n"
         f"🔹 Місто: <b>{user_details.get('city', 'Не вказано')}</b>\n"
@@ -2372,11 +2199,11 @@ async def manager_profile_handler(callback: CallbackQuery):
     if not all_interns:
         cute_msg = "Ваша команда ще попереду, але кожна велика історія починається з першого стажера! 🐾"
     elif len(all_interns) < 3:
-        cute_msg = "Ваша команда зростає, як тісто для булочок — з любов'ю та турботою! 🥐"
+        cute_msg = "Ваша команда зростає разом з BULKA — з професіоналізмом та турботою! 🥐"
     elif len(interns_in_progress) == 0:
-        cute_msg = "Всі ваші стажери вже стали справжніми булочками! 🎉"
+        cute_msg = "Всі ваші стажери вже стали повноцінними працівниками BULKA! 🎉"
     else:
-        cute_msg = "Ваша підтримка — як тепла булочка для кожного стажера. Разом до нових звершень! 🍞✨"
+        cute_msg = "Ваша підтримка важлива для кожного стажера. Разом до нових успіхів у BULKA! 🍞✨"
 
     manager_display_name = manager_info.get("full_name", "Невідоме ім'я") if manager_info else "Невідоме ім'я"
     manager_shops = manager_info.get("shops", []) if manager_info else []
@@ -2389,7 +2216,7 @@ async def manager_profile_handler(callback: CallbackQuery):
             shop_line = "🔹 Магазини: <b>" + ", ".join(manager_shops) + "</b>\n"
 
     text = (
-        f"🍞 <b>Профіль керівника-Булочки</b> 🍞\n\n"
+        f"🍞 <b>Профіль керівника BULKA</b> 🍞\n\n"
         f"👤 <b>{manager_display_name}</b>\n"
         f"🔹 Посада: <b>{manager_info.get('process', 'Не вказано') if manager_info else 'Не вказано'}</b>\n"
         f"{shop_line}"
@@ -2786,11 +2613,16 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
     await register_user(user_id, username=username, full_name=full_name)
     
     # Динамічно визначаємо дійсного керівника:
-    # 1. Якщо у магазині є активний керівник -> закріплюємо за ним
-    # 2. Якщо в магазині немає керівника -> закріплюємо за Територіалом міста за напрямком (ВВ або ТЗ)
-    from database.managers import get_manager_by_shop, get_appropriate_territorial_for_user, is_manager_user
+    # 1. Пріоритет: цільовий керівник/територіал, обраний адміністратором вручну
+    # 2. Якщо обрано авто: керівник активного магазину
+    # 3. Якщо в магазині немає керівника -> закріплюємо за Територіалом міста за напрямком (ВВ або ТЗ)
+    from database.managers import get_manager_by_shop, get_appropriate_territorial_for_user, is_manager_user, get_manager_by_uid
     assigned_manager_id = None
-    if shop:
+
+    target_manager_id = extra_data.get("target_manager_id") if isinstance(extra_data, dict) else None
+    if target_manager_id and await is_manager_user(target_manager_id):
+        assigned_manager_id = target_manager_id
+    elif shop:
         shop_mgr = await get_manager_by_shop(city, shop)
         if shop_mgr:
             assigned_manager_id = shop_mgr["uid"]
@@ -2818,10 +2650,43 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
             )
         except Exception:
             pass
+
+    # Сповіщення адміністратору (якщо посилання створив адміністратор, відмінний від закріпленого керівника)
+    creator_id = extra_data.get("creator_id") if isinstance(extra_data, dict) else None
+    if creator_id and creator_id != assigned_manager_id:
+        try:
+            sup_mgr = await get_manager_by_uid(assigned_manager_id) if assigned_manager_id else None
+            sup_name = sup_mgr.get("full_name") if sup_mgr else "не визначено"
+            sup_proc = sup_mgr.get("process") if sup_mgr else ""
+            sup_role_str = f" ({sup_proc})" if sup_proc else ""
+            await message.bot.send_message(
+                creator_id,
+                f"✅ <b>Стажер зареєструвався за вашим посиланням!</b>\n\n"
+                f"👤 <b>ПІБ:</b> {html.escape(full_name)}\n"
+                f"💼 <b>Посада:</b> {role}\n"
+                f"🏙 <b>Місто:</b> {city}\n"
+                f"🏪 <b>Магазин:</b> {shop or 'не вказано'}\n"
+                f"👔 <b>Закріплено за:</b> {html.escape(sup_name)}{sup_role_str}",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
     
     if token:
         await use_token(token, user_id)
     
+    # Скидаємо прогрес у БД та оперативній пам'яті для нового старту стажера
+    from bot.state import user_progress
+    user_progress[user_id] = {}
+    try:
+        from database import DB_PATH
+        import aiosqlite
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM progress WHERE user_id = ?", (user_id,))
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to reset progress table for user {user_id}: {e}")
+
     await message.answer(f"Дякую, {full_name}! Реєстрацію завершено. ✅")
     
     initialize_user_progress(user_id)

@@ -810,7 +810,10 @@ async def developer_admin_view(callback: CallbackQuery, state: FSMContext):
         c_all = await db.execute("SELECT COUNT(*) FROM users")
         total_users = (await c_all.fetchone())[0]
         
-        c_interns = await db.execute("SELECT COUNT(*) FROM users WHERE status IS NULL OR status != 'Працівник'")
+        c_interns = await db.execute(
+            "SELECT COUNT(*) FROM users WHERE (status IS NULL OR status != 'Працівник') "
+            "AND (role IS NULL OR role NOT IN ('Керівник', 'Керівник Стажер', 'Територіал', 'Наглядач', 'Developer', 'Адміністратор', 'HR'))"
+        )
         total_interns = (await c_interns.fetchone())[0]
         
         c_workers = await db.execute("SELECT COUNT(*) FROM users WHERE status = 'Працівник'")
@@ -1117,7 +1120,12 @@ async def _filter_users_for_territorial(user_id: int, users: list) -> list:
     Фільтрує список користувачів для територіала за:
       1) Містом (user.city == territorial.city)
       2) Типом посади (positions.territorial_type == territorial.territorial_type: 'ТЗ' або 'ВВ')
+    Для адміністраторів повертає повний список без фільтрації.
     """
+    from database.hr import is_developer_user
+    if await is_developer_user(user_id):
+        return users
+
     from database.managers import get_manager_by_uid
     from database.positions import get_all_positions
     
@@ -1196,23 +1204,31 @@ async def _developer_show_users_list(callback: CallbackQuery, users: list, title
         user_username = user.get('username', 'немає')
         current_block = user.get('current_block', 1)
         
-        # Витягуємо короткий номер магазину (наприклад, B-19)
+        # Витягуємо локацію (Місто + короткий номер магазину)
+        user_city = user.get('city') or ''
         shop_full = user.get('shop', '') or ''
-        shop_short = shop_full.split(' ')[0] if shop_full else 'Не вказано'
+        shop_short = shop_full.split(' ')[0] if shop_full else ''
         
+        loc_parts = []
+        if user_city:
+            loc_parts.append(user_city)
+        if shop_short:
+            loc_parts.append(shop_short)
+        loc_str = " · ".join(loc_parts) if loc_parts else (shop_short or "Не вказано")
+
         # Екранування
         e_full_name = html.escape(user_full_name)
         e_username = html.escape(user_username)
         e_job = html.escape(job_title)
-        e_shop = html.escape(shop_short)
+        e_loc = html.escape(loc_str)
         
         # Формуємо рядок: день показуємо тільки якщо show_day=True і це не привілейована роль / Працівник
         privileged = display_role in ["Адміністратор", "Dev", "Керівник", "Територіал", "Наглядач"]
         if not show_day or privileged or is_worker:
             status_label = " | Статус: <b>Завершено</b>" if is_worker else ""
-            info_line = f"   @{e_username} | Посада: <b>{e_job}</b> | {e_shop}{status_label}"
+            info_line = f"   @{e_username} | Посада: <b>{e_job}</b> | {e_loc}{status_label}"
         else:
-            info_line = f"   @{e_username} | Посада: <b>{e_job}</b> | {e_shop} | {current_block} день"
+            info_line = f"   @{e_username} | Посада: <b>{e_job}</b> | {e_loc} | {current_block} день"
             
         lines.append(f"<b>{idx}. {e_full_name}</b> (ID: <code>{user['user_id']}</code>)")
         lines.append(info_line)
@@ -1635,10 +1651,9 @@ async def developer_users_by_manager_menu(callback: CallbackQuery):
     has_access, is_admin, is_territorial = await _check_access(callback)
     if not has_access:
         return
-    from database.managers import get_all_managers, get_manager_by_uid
+    from database.managers import get_all_kerivnyky, get_manager_by_uid
 
-    managers = await get_all_managers()
-    mgr_list = [m for m in managers if m.get("process") in ("Керівник", "Керівник Стажер")]
+    mgr_list = await get_all_kerivnyky()
 
     if is_territorial and not is_admin:
         t_mgr = await get_manager_by_uid(callback.from_user.id)
@@ -2094,11 +2109,11 @@ async def developer_users_add_city(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
     else:
         await state.update_data(dev_add_shop=None)
-        await _show_dev_users_add_roles(callback, state, city, shop=None)
+        await _show_dev_users_add_supervisor(callback, state, city, shop=None)
 
 
 async def developer_users_add_shop(callback: CallbackQuery, state: FSMContext):
-    """Обробляє вибір магазину та переходить до вибору посади."""
+    """Обробляє вибір магазину та переходить до вибору відповідального."""
     data = await state.get_data()
     city = data.get("dev_add_city")
     if not city:
@@ -2113,7 +2128,114 @@ async def developer_users_add_shop(callback: CallbackQuery, state: FSMContext):
         shop = None
 
     await state.update_data(dev_add_shop=shop)
+    await _show_dev_users_add_supervisor(callback, state, city, shop=shop)
+
+
+def _format_short_name(full_name: str) -> str:
+    parts = (full_name or "").strip().split()
+    if len(parts) >= 3:
+        return f"{parts[0]} {parts[1][0]}. {parts[2][0]}."
+    elif len(parts) == 2:
+        return f"{parts[0]} {parts[1][0]}."
+    return full_name or "Без імені"
+
+
+def _format_short_shops(shops_list: list) -> str:
+    if not shops_list:
+        return ""
+    short_names = [s.split()[0] for s in shops_list if s]
+    return ", ".join(short_names[:3])
+
+
+async def _show_dev_users_add_supervisor(callback: CallbackQuery, state: FSMContext, city: str, shop: Optional[str], show_all_managers: bool = False):
+    """Відображає вибір відповідального (керівник магазину, територіал, інші керівники міста або авто)."""
+    from database.managers import get_city_supervisors
+    sups = await get_city_supervisors(city, shop)
+    shop_managers = sups.get("shop_managers", [])
+    other_managers = sups.get("other_managers", [])
+    territorials = sups.get("territorials", [])
+
+    buttons = []
+
+    # 1. Керівники обраного магазину
+    for m in shop_managers:
+        name_str = _format_short_name(m.get("full_name", "Керівник"))
+        shops_str = f" ({_format_short_shops(m.get('shops_list', []))})" if m.get("shops_list") else ""
+        btn_text = f"👔 {name_str}{shops_str}"
+        buttons.append([InlineKeyboardButton(text=btn_text[:40], callback_data=f"dev_users_add_sup:{m['uid']}")])
+
+    # 2. Територіали міста
+    for t in territorials:
+        name_str = _format_short_name(t.get("full_name", "Територіал"))
+        t_type = (t.get("territorial_type") or "ТЗ").strip()
+        btn_text = f"🗺 {name_str} (Територіал {t_type})"
+        buttons.append([InlineKeyboardButton(text=btn_text[:40], callback_data=f"dev_users_add_sup:{t['uid']}")])
+
+    # 3. Інші керівники міста
+    if show_all_managers and other_managers:
+        for m in other_managers:
+            name_str = _format_short_name(m.get("full_name", "Керівник"))
+            shops_str = f" ({_format_short_shops(m.get('shops_list', []))})" if m.get("shops_list") else ""
+            btn_text = f"👔 {name_str}{shops_str}"
+            buttons.append([InlineKeyboardButton(text=btn_text[:40], callback_data=f"dev_users_add_sup:{m['uid']}")])
+    elif other_managers:
+        buttons.append([InlineKeyboardButton(text=f"👔 Інші керівники міста ({len(other_managers)})", callback_data="dev_users_add_sup_more")])
+
+    # 4. Автоматично за магазином
+    buttons.append([InlineKeyboardButton(text="⚡️ Автоматично за магазином", callback_data="dev_users_add_sup:auto")])
+
+    # 5. Назад
+    back_cb = f"dev_users_add_city:{city}" if shop else "dev_users_add"
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)])
+
+    shop_text = f"\n🏪 Магазин: <b>{shop}</b>" if shop else ""
+    text = (
+        f"🏙️ Місто: <b>{city}</b>{shop_text}\n\n"
+        f"👤 <b>До кого закріпити стажера?</b>\n"
+        f"Оберіть керівника магазину або територіала міста:"
+    )
+
+    await _edit_or_answer(
+        callback.message,
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+async def developer_users_add_sup_more(callback: CallbackQuery, state: FSMContext):
+    """Розгортає повний список керівників обраного міста."""
+    data = await state.get_data()
+    city = data.get("dev_add_city")
+    shop = data.get("dev_add_shop")
+    await _show_dev_users_add_supervisor(callback, state, city, shop=shop, show_all_managers=True)
+
+
+async def developer_users_add_sup_choose(callback: CallbackQuery, state: FSMContext):
+    """Обробляє вибір відповідального та переходить до вибору посади."""
+    try:
+        val = callback.data.split(":", 1)[1]
+    except IndexError:
+        return await callback.answer("Помилка вибору відповідального.", show_alert=True)
+
+    target_uid = None if val == "auto" else int(val)
+    await state.update_data(dev_add_target_supervisor=target_uid)
+
+    data = await state.get_data()
+    city = data.get("dev_add_city")
+    shop = data.get("dev_add_shop")
     await _show_dev_users_add_roles(callback, state, city, shop=shop)
+
+
+async def developer_users_add_back_sup(callback: CallbackQuery, state: FSMContext):
+    """Повертає назад до вибору відповідального."""
+    data = await state.get_data()
+    city = data.get("dev_add_city")
+    shop = data.get("dev_add_shop")
+    await _show_dev_users_add_supervisor(callback, state, city, shop=shop)
 
 
 async def _show_dev_users_add_roles(callback: CallbackQuery, state: FSMContext, city: str, shop: Optional[str]):
@@ -2138,8 +2260,7 @@ async def _show_dev_users_add_roles(callback: CallbackQuery, state: FSMContext, 
         label = role[:30] + "..." if len(role) > 30 else role
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"dev_users_add_role:{i}")])
 
-    back_cb = f"dev_users_add_city:{city}" if shop else "dev_users_add"
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_add_back_sup")])
 
     shop_text = f"\n🏪 Магазин: <b>{shop}</b>" if shop else ""
     await _edit_or_answer(
@@ -2156,6 +2277,7 @@ async def developer_users_add_role(callback: CallbackQuery, state: FSMContext):
     city = data.get("dev_add_city")
     shop = data.get("dev_add_shop")
     roles = data.get("dev_add_roles", AVAILABLE_ROLES)
+    target_supervisor_uid = data.get("dev_add_target_supervisor")
 
     try:
         role_idx = int(callback.data.split(":", 1)[1])
@@ -2165,7 +2287,19 @@ async def developer_users_add_role(callback: CallbackQuery, state: FSMContext):
         return
 
     creator_id = callback.from_user.id
-    token = await generate_token(creator_id, role, city=city, shop=shop, expires_in_hours=24)
+    token_manager_id = target_supervisor_uid if target_supervisor_uid else creator_id
+    extra_data = {
+        "creator_id": creator_id,
+        "target_manager_id": target_supervisor_uid
+    }
+    token = await generate_token(
+        token_manager_id,
+        role,
+        city=city,
+        shop=shop,
+        expires_in_hours=24,
+        extra_data=extra_data
+    )
 
     try:
         bot_user = await callback.bot.get_me()
@@ -2173,13 +2307,24 @@ async def developer_users_add_role(callback: CallbackQuery, state: FSMContext):
     except Exception:
         bot_username = "BulkaBot"
 
-    link = f"https://t.me/{bot_username}?start={creator_id}-{token}"
+    link = f"https://t.me/{bot_username}?start={token_manager_id}-{token}"
     shop_text = f"\n🏪 Магазин: <b>{shop}</b>" if shop else ""
+
+    sup_text = ""
+    if target_supervisor_uid:
+        from database.managers import get_manager_by_uid
+        sup_mgr = await get_manager_by_uid(target_supervisor_uid)
+        if sup_mgr:
+            p_label = "Територіал" if sup_mgr.get("process") == "Територіал" else "Керівник"
+            sup_text = f"\n👤 Закріплено за: <b>{html.escape(sup_mgr.get('full_name', ''))} ({p_label})</b>"
+    else:
+        sup_text = "\n👤 Закріплення: <b>⚡️ Автоматично за магазином</b>"
 
     text = (
         f"✅ <b>Посилання створено!</b>\n\n"
         f"🏙️ Місто: <b>{city}</b>{shop_text}\n"
-        f"💼 Посада: <b>{role}</b>\n\n"
+        f"💼 Посада: <b>{role}</b>"
+        f"{sup_text}\n\n"
         f"🔗 <b>Посилання для стажера:</b>\n"
         f"<code>{link}</code>\n\n"
         f"⚠️ Посилання діє 24 години і лише для одного користувача."
@@ -2221,11 +2366,11 @@ async def developer_list_managers(callback: CallbackQuery):
     has_access, is_admin, is_territorial = await _check_access(callback)
     if not has_access:
         return
-    managers = await get_all_managers()
+    managers = await get_all_kerivnyky()
     
     if is_territorial and not is_admin:
         my_managers = await get_managers_by_responsible(callback.from_user.id)
-        my_mgr_ids = [m['uid'] for m in my_managers]
+        my_mgr_ids = {m['uid'] for m in my_managers}
         managers = [m for m in managers if m['uid'] in my_mgr_ids]
 
     if not managers:
@@ -3226,13 +3371,13 @@ async def dev_mgr_fire_ask(callback: CallbackQuery, state: FSMContext):
             target_name = f"Територіала {city_t[0].get('full_name', '')}"
 
     text = (
-        f"⚠️ <b>Ви дійсно хочете звільнити керівника {html.escape(name)}?</b>\n\n"
-        f"• Доступ до функцій керівника буде заблоковано\n"
-        f"• {interns_count} стажерів та {workers_count} працівників тихо перейдуть до {target_name}\n"
-        f"• Всі дані та історія збережуться в базі для звітів та аналітики"
+        f"⚠️ <b>Ви дійсно хочете звільнити та видалити керівника {html.escape(name)}?</b>\n\n"
+        f"• Керівника буде повністю видалено з системи\n"
+        f"• Доступ до бота буде повністю заблоковано\n"
+        f"• {interns_count} стажерів та {workers_count} працівників тихо перейдуть до {target_name}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚫 Так, звільнити", callback_data=f"dev_mgr_fire_confirm:{manager_uid}")],
+        [InlineKeyboardButton(text="🚫 Так, звільнити та видалити", callback_data=f"dev_mgr_fire_confirm:{manager_uid}")],
         [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_mgr_view:{manager_uid}")]
     ])
     await _edit_or_answer(callback.message, text, reply_markup=kb)
@@ -3240,13 +3385,13 @@ async def dev_mgr_fire_ask(callback: CallbackQuery, state: FSMContext):
 
 
 async def dev_mgr_fire_confirm(callback: CallbackQuery, state: FSMContext):
-    """Виконання звільнення керівника."""
+    """Виконання звільнення та видалення керівника."""
     has_access, is_admin, is_territorial = await _check_access(callback)
     if not has_access:
         return
     manager_uid = int(callback.data.split(":")[1])
     res = await fire_manager(manager_uid)
-    await callback.answer(f"✅ Керівника звільнено. Підлеглих переведено до {res.get('target_name')}.", show_alert=True)
+    await callback.answer(f"✅ Керівника звільнено та видалено. Підлеглих переведено до {res.get('target_name')}.", show_alert=True)
     await developer_manage_managers_menu(callback, state)
 
 
@@ -8628,6 +8773,9 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_users_add_start, lambda c: c.data == "dev_users_add")
     dp.callback_query.register(developer_users_add_city, lambda c: c.data and c.data.startswith("dev_users_add_city:"))
     dp.callback_query.register(developer_users_add_shop, lambda c: c.data and c.data.startswith("dev_users_add_shop:"))
+    dp.callback_query.register(developer_users_add_sup_more, lambda c: c.data == "dev_users_add_sup_more")
+    dp.callback_query.register(developer_users_add_sup_choose, lambda c: c.data and c.data.startswith("dev_users_add_sup:"))
+    dp.callback_query.register(developer_users_add_back_sup, lambda c: c.data == "dev_users_add_back_sup")
     dp.callback_query.register(developer_users_add_role, lambda c: c.data and c.data.startswith("dev_users_add_role:"))
 
     # Managers Team Management
