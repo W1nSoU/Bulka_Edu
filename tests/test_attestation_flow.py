@@ -187,6 +187,42 @@ class TestAttestationFlow(unittest.IsolatedAsyncioTestCase):
         active_after_close = await get_active_wave(db_path=TEST_DB)
         self.assertIsNone(active_after_close)
 
+    async def test_manager_participant_collection(self):
+        from bot.menus.attestation import _collect_eligible_participants
+        # Test with shops that have managers in database
+        shops = ['B-19 вул. Героїв Маріуполя, 62', 'B-31 вул. Юрія Руфа, 5', 'B-04 вул. Проскурівська, 15']
+        participants = await _collect_eligible_participants(shops)
+        
+        # Managers must be collected
+        manager_uids = [p["user_id"] for p in participants if p["is_manager"] == 1]
+        self.assertIn(1195097288, manager_uids) # Зубенко Михал Петрович
+        self.assertIn(6867721037, manager_uids) # цв цв цв
+        self.assertIn(990006, manager_uids)     # Максим Шевченко Андрійович
+
+        # Check manager role
+        for p in participants:
+            if p["is_manager"] == 1:
+                self.assertEqual(p["role_name"], "Керівник")
+                self.assertIsNotNone(p["shop_name"])
+
+    async def test_one_day_attestation_deadline(self):
+        tz = pytz.timezone(TIMEZONE)
+        now = datetime.now(tz)
+        deadline_dt = now + timedelta(days=1)
+        deadline_str = deadline_dt.strftime("%Y-%m-%d 23:59:59")
+        
+        wave_id = await create_wave(
+            title="Одноденна атестація",
+            created_by=111,
+            duration_minutes=20,
+            passing_score_pct=80,
+            deadline_date=deadline_str,
+            shops=["B-19 вул. Героїв Маріуполя, 62"],
+            db_path=TEST_DB
+        )
+        wave = await get_wave_by_id(wave_id, db_path=TEST_DB)
+        self.assertEqual(wave["deadline_date"], deadline_str)
+
 
 class TestTelegramSecurity(unittest.TestCase):
 

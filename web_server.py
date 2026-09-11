@@ -149,38 +149,51 @@ async def api_init_attestation(req: InitRequest):
     shop_name = None
     full_name = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip()
     is_manager = 0
+    wave_shops = wave.get("shops", [])
 
     # Перевірка в базі керівників
     manager = await get_manager_by_uid(user_id)
-    if manager:
+    if manager and manager.get("status") != "fired":
         role_name = "Керівник"
         is_manager = 1
-        full_name = manager.get("name") or full_name
+        full_name = manager.get("full_name") or manager.get("name") or full_name
         # Беремо закріплені магазини
         shops_list = manager.get("shops", [])
-        if isinstance(shops_list, list) and len(shops_list) > 0:
-            shop_name = shops_list[0]
-        elif isinstance(shops_list, str):
+        if isinstance(shops_list, str):
             try:
-                parsed_shops = json.loads(shops_list)
-                shop_name = parsed_shops[0] if parsed_shops else None
+                shops_list = json.loads(shops_list)
             except Exception:
-                shop_name = shops_list.split(",")[0].strip() if shops_list else None
+                shops_list = [shops_list]
+        elif not isinstance(shops_list, list):
+            shops_list = []
 
-    # Якщо не керівник — шукаємо в базі користувачів (users.db)
+        # Знаходимо магазин керівника, який бере участь у хвилі
+        for s in shops_list:
+            if s in wave_shops:
+                shop_name = s
+                break
+        if not shop_name and len(shops_list) > 0:
+            shop_name = shops_list[0]
+
+    # Якщо не знайдено в managers — шукаємо в базі користувачів (users.db)
     if not role_name:
         user_db = await get_user_details(user_id)
         if user_db:
-            # Перевіряємо чи це діючий працівник
-            if user_db.get("status") != "Працівник":
+            if user_db.get("role") == "Керівник":
+                role_name = "Керівник"
+                is_manager = 1
+                shop_name = user_db.get("shop")
+                full_name = user_db.get("full_name") or full_name
+            elif user_db.get("status") != "Працівник":
                 return {
                     "status": "locked",
                     "reason": "intern",
                     "message": "Піврічна атестація проводиться лише для діючих працівників та керівників магазинів 🎓"
                 }
-            role_name = user_db.get("role")
-            shop_name = user_db.get("shop")
-            full_name = user_db.get("full_name") or full_name
+            else:
+                role_name = user_db.get("role")
+                shop_name = user_db.get("shop")
+                full_name = user_db.get("full_name") or full_name
 
     if not role_name or not shop_name:
         return {

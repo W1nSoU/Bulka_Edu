@@ -302,7 +302,7 @@ async def dev_att_create_wave_confirmed_handler(callback: CallbackQuery, state: 
 async def _start_create_wave_flow(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AttestationStates.create_wave_title)
     text = (
-        "➕ <b>Створення нової хвилі атестації</b> [Крок 1/5]\n\n"
+        "➕ <b>Створення нової хвилі атестації</b> [Крок 1/4]\n\n"
         "Введіть назву хвилі атестації:\n"
         "<i>(наприклад: <b>Осіння атестація 2026</b> або <b>Атестація: Вересень</b>)</i>"
     )
@@ -340,7 +340,7 @@ async def _render_shops_picker(message_or_cb, state: FSMContext, page: int = 1):
     page_shops = all_shops[start_idx:start_idx + per_page]
 
     text = (
-        f"🏪 <b>Вибір магазинів для атестації</b> [Крок 2/5]\n"
+        f"🏪 <b>Вибір магазинів для атестації</b> [Крок 2/4]\n"
         f"Хвиля: <b>{data.get('wave_title')}</b>\n\n"
         f"Обрано магазинів: <b>{len(selected_shops)}</b> з {len(all_shops)}\n\n"
         f"<i>Натискайте на кнопки магазинів, щоб додати або зняти позначку:</i>"
@@ -430,7 +430,7 @@ async def dev_att_shops_done_handler(callback: CallbackQuery, state: FSMContext)
 
     await state.set_state(AttestationStates.create_wave_duration)
     text = (
-        "⏱ <b>Тривалість тестування</b> [Крок 3/5]\n\n"
+        "⏱ <b>Тривалість тестування</b> [Крок 3/4]\n\n"
         "Скільки хвилин надається працівнику на проходження атестації з моменту натискання кнопки старту?\n"
         "<i>(Таймер рахується на сервері)</i>"
     )
@@ -455,7 +455,7 @@ async def dev_att_duration_handler(callback: CallbackQuery, state: FSMContext):
 
     await state.set_state(AttestationStates.create_wave_passing)
     text = (
-        "🎯 <b>Прохідний бал атестації</b> [Крок 4/5]\n\n"
+        "🎯 <b>Прохідний бал атестації</b> [Крок 4/4]\n\n"
         "Який відсоток правильних відповідей необхідний для успішного зарахування?"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -476,23 +476,35 @@ async def dev_att_duration_handler(callback: CallbackQuery, state: FSMContext):
 
 async def dev_att_passing_handler(callback: CallbackQuery, state: FSMContext):
     passing = int(callback.data.split(":")[1])
-    await state.update_data(wave_passing=passing)
+    
+    # Атестація завжди триває 1 день (без зайвого кроку вибору)
+    days = 1
+    tz = pytz.timezone(TIMEZONE)
+    deadline_dt = datetime.now(tz) + timedelta(days=days)
+    deadline_str = deadline_dt.strftime("%Y-%m-%d 23:59:59")
+    await state.update_data(wave_passing=passing, wave_deadline=deadline_str, wave_deadline_days=days)
 
-    await state.set_state(AttestationStates.create_wave_deadline)
+    data = await state.get_data()
+    title = data["wave_title"]
+    shops = data["selected_shops"]
+    dur = data["wave_duration"]
+    pass_pct = passing
+
+    # Розраховуємо кількість людей
+    participants_to_register = await _collect_eligible_participants(shops)
+
     text = (
-        "📅 <b>Дедлайн проходження атестації</b> [Крок 5/5]\n\n"
-        "Скільки днів триватиме хвиля атестації для обраних магазинів?"
+        "📋 <b>Підтвердження запуску атестації</b>\n\n"
+        f"🏷 <b>Назва:</b> {title}\n"
+        f"🏪 <b>Обрано магазинів:</b> {len(shops)}\n"
+        f"👥 <b>Потенційних учасників:</b> {len(participants_to_register)} ос. (Працівники та Керівники)\n"
+        f"⏱ <b>Час на тест:</b> {dur} хв\n"
+        f"🎯 <b>Прохідний поріг:</b> {pass_pct}%\n"
+        f"📅 <b>Дедлайн здачі:</b> 1 день (до {deadline_dt.strftime('%d.%m.%Y о 23:59')})\n\n"
+        "<i>Після натискання «Запустити» хвиля активується, а всім учасникам буде надіслано персональне запрошення у Mini App.</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="3 дні", callback_data="dev_att_dead:3"),
-            InlineKeyboardButton(text="5 днів", callback_data="dev_att_dead:5")
-        ],
-        [
-            InlineKeyboardButton(text="7 днів (тиждень)", callback_data="dev_att_dead:7"),
-            InlineKeyboardButton(text="10 днів (реком.)", callback_data="dev_att_dead:10")
-        ],
-        [InlineKeyboardButton(text="14 днів (2 тижні)", callback_data="dev_att_dead:14")],
+        [InlineKeyboardButton(text="🚀 Запустити атестацію", callback_data="dev_att_confirm_launch")],
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
     ])
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
@@ -500,6 +512,7 @@ async def dev_att_passing_handler(callback: CallbackQuery, state: FSMContext):
 
 
 async def dev_att_deadline_handler(callback: CallbackQuery, state: FSMContext):
+    # Зворотна сумісність, якщо хтось натисне стару кнопку
     days = int(callback.data.split(":")[1])
     tz = pytz.timezone(TIMEZONE)
     deadline_dt = datetime.now(tz) + timedelta(days=days)
@@ -512,7 +525,6 @@ async def dev_att_deadline_handler(callback: CallbackQuery, state: FSMContext):
     dur = data["wave_duration"]
     pass_pct = data["wave_passing"]
 
-    # Розраховуємо кількість людей
     participants_to_register = await _collect_eligible_participants(shops)
 
     text = (
@@ -522,7 +534,7 @@ async def dev_att_deadline_handler(callback: CallbackQuery, state: FSMContext):
         f"👥 <b>Потенційних учасників:</b> {len(participants_to_register)} ос. (Працівники та Керівники)\n"
         f"⏱ <b>Час на тест:</b> {dur} хв\n"
         f"🎯 <b>Прохідний поріг:</b> {pass_pct}%\n"
-        f"📅 <b>Дедлайн здачі:</b> до {deadline_dt.strftime('%d.%m.%Y о 23:59')} ({days} днів)\n\n"
+        f"📅 <b>Дедлайн здачі:</b> до {deadline_dt.strftime('%d.%m.%Y о 23:59')} ({days} дн.)\n\n"
         "<i>Після натискання «Запустити» хвиля активується, а всім учасникам буде надіслано персональне запрошення у Mini App.</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -538,12 +550,12 @@ async def _collect_eligible_participants(shops: List[str]) -> List[Dict[str, Any
     participants = []
     seen_uids = set()
 
-    # 1. Працівники (тільки статус 'Працівник', стажери виключаються)
+    # 1. Працівники та керівники з бази users (status = 'Працівник' або role = 'Керівник')
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         for shop in shops:
             async with db.execute(
-                "SELECT user_id, full_name, role, shop FROM users WHERE shop = ? AND status = 'Працівник'",
+                "SELECT user_id, full_name, role, shop, status FROM users WHERE shop = ? AND (status = 'Працівник' OR role = 'Керівник')",
                 (shop,)
             ) as cur:
                 rows = await cur.fetchall()
@@ -551,20 +563,24 @@ async def _collect_eligible_participants(shops: List[str]) -> List[Dict[str, Any
                     uid = r["user_id"]
                     if uid not in seen_uids:
                         seen_uids.add(uid)
+                        is_mgr = 1 if r["role"] == "Керівник" else 0
                         participants.append({
                             "user_id": uid,
                             "full_name": r["full_name"],
-                            "role_name": r["role"],
+                            "role_name": r["role"] or ("Керівник" if is_mgr else "Працівник"),
                             "shop_name": r["shop"],
-                            "is_manager": 0
+                            "is_manager": is_mgr
                         })
 
-    # 2. Керівники
+    # 2. Керівники з бази managers.db
     managers = await get_all_managers()
     for m in managers:
-        m_uid = m.get("user_id")
+        if m.get("status") == "fired":
+            continue
+        m_uid = m.get("uid") or m.get("user_id")
         if not m_uid or m_uid in seen_uids:
             continue
+
         # Перевіряємо прив'язку магазинів
         m_shops = m.get("shops", [])
         if isinstance(m_shops, str):
@@ -572,13 +588,15 @@ async def _collect_eligible_participants(shops: List[str]) -> List[Dict[str, Any
                 m_shops = json.loads(m_shops)
             except Exception:
                 m_shops = [m_shops]
+        elif not isinstance(m_shops, list):
+            m_shops = []
 
         for s in m_shops:
             if s in shops:
                 seen_uids.add(m_uid)
                 participants.append({
                     "user_id": m_uid,
-                    "full_name": m.get("name") or "Керівник",
+                    "full_name": m.get("full_name") or m.get("name") or "Керівник",
                     "role_name": "Керівник",
                     "shop_name": s,
                     "is_manager": 1
