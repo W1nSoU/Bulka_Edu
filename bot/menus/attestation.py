@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import io
 import json
 import logging
@@ -621,7 +622,8 @@ async def dev_att_confirm_launch_handler(callback: CallbackQuery, state: FSMCont
     await add_participants_batch(wave_id, participants)
 
     # Запускаємо похвильову розсилку у фоні
-    asyncio.create_task(launch_attestation_broadcast(bot, wave_id))
+    bot_instance = bot or callback.bot
+    asyncio.create_task(launch_attestation_broadcast(bot_instance, wave_id))
 
     await state.clear()
     await callback.message.answer(
