@@ -37,9 +37,17 @@
   // Global error safety
   window.addEventListener('error', function (e) {
     console.error('Attestation runtime error:', e.error || e.message);
+    const lt = document.querySelector('#screen-loading .loader-text');
+    if (lt && screens.loading?.classList.contains('active')) {
+      lt.innerText = "Помилка завантаження. Спробуйте оновити сторінку.";
+    }
   });
   window.addEventListener('unhandledrejection', function (e) {
     console.error('Attestation unhandled rejection:', e.reason);
+    const lt = document.querySelector('#screen-loading .loader-text');
+    if (lt && screens.loading?.classList.contains('active')) {
+      lt.innerText = "Помилка зв'язку. Спробуйте оновити сторінку.";
+    }
   });
 
   // Стан додатка
@@ -87,12 +95,19 @@
   // 1. ІНІЦІАЛІЗАЦІЯ ТА ВАЛІДАЦІЯ ДОСТУПУ
   // ==========================================
   async function initApp() {
-    let initData = getTelegramInitData();
+    // Показуємо екран завантаження
+    showScreen('loading');
+    const loaderText = document.querySelector('#screen-loading .loader-text');
+    if (loaderText) loaderText.innerText = 'Перевірка доступу до атестації...';
 
-    // Даємо iOS Telegram bridge трохи часу на передачу даних, якщо потрібно
-    if (!initData && tg) {
-      await new Promise(r => setTimeout(r, 250));
-      initData = getTelegramInitData();
+    // Даємо iOS Telegram bridge час передати initData
+    let initData = getTelegramInitData();
+    if (!initData) {
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 150));
+        initData = getTelegramInitData();
+        if (initData) break;
+      }
     }
 
     if (!initData) {
@@ -452,7 +467,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          init_data: initData,
+          init_data: getTelegramInitData(),
           attempt_id: appState.attemptId,
           answers: appState.answers
         })
@@ -479,7 +494,11 @@
     }
   }
 
-  // Запуск при завантаженні сторінки
-  window.addEventListener('DOMContentLoaded', initApp);
+  // Запуск при завантаженні сторінки (безпечно для iOS WebView)
+  if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', initApp);
+  } else {
+    initApp();
+  }
 
 })();
