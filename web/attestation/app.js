@@ -8,20 +8,39 @@
   // Telegram WebApp SDK
   const tg = window.Telegram?.WebApp;
   if (tg) {
-    tg.ready();
-    tg.expand();
-  }
-
-  // Отримуємо initData
-  let initData = tg?.initData || '';
-  // Підтримка тестування у браузері через URL: ?debug_user_id=123
-  if (!initData) {
-    const urlParams = new URLSearchParams(window.location.search);
-    const debugUid = urlParams.get('debug_user_id');
-    if (debugUid) {
-      initData = `debug_user_id=${debugUid}`;
+    try {
+      tg.ready();
+      tg.expand();
+    } catch (e) {
+      console.warn('tg init warning:', e);
     }
   }
+
+  function getTelegramInitData() {
+    let data = tg?.initData || '';
+    if (!data && window.location.hash) {
+      try {
+        const hashParams = new URLSearchParams(window.location.hash.substring(1));
+        data = hashParams.get('tgWebAppData') || '';
+      } catch (e) {}
+    }
+    if (!data) {
+      const urlParams = new URLSearchParams(window.location.search);
+      const debugUid = urlParams.get('debug_user_id');
+      if (debugUid) {
+        data = `debug_user_id=${debugUid}`;
+      }
+    }
+    return data;
+  }
+
+  // Global error safety
+  window.addEventListener('error', function (e) {
+    console.error('Attestation runtime error:', e.error || e.message);
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    console.error('Attestation unhandled rejection:', e.reason);
+  });
 
   // Стан додатка
   let appState = {
@@ -56,9 +75,11 @@
 
   function triggerHaptic(type = 'light') {
     if (tg?.HapticFeedback) {
-      if (type === 'success') tg.HapticFeedback.notificationOccurred('success');
-      else if (type === 'error') tg.HapticFeedback.notificationOccurred('error');
-      else tg.HapticFeedback.impactOccurred(type);
+      try {
+        if (type === 'success') tg.HapticFeedback.notificationOccurred('success');
+        else if (type === 'error') tg.HapticFeedback.notificationOccurred('error');
+        else tg.HapticFeedback.impactOccurred(type);
+      } catch (e) {}
     }
   }
 
@@ -66,17 +87,30 @@
   // 1. ІНІЦІАЛІЗАЦІЯ ТА ВАЛІДАЦІЯ ДОСТУПУ
   // ==========================================
   async function initApp() {
+    let initData = getTelegramInitData();
+
+    // Даємо iOS Telegram bridge трохи часу на передачу даних, якщо потрібно
+    if (!initData && tg) {
+      await new Promise(r => setTimeout(r, 250));
+      initData = getTelegramInitData();
+    }
+
     if (!initData) {
-      showLockedScreen('Неавторизований доступ', 'Будь ласка, відкрийте додаток через посилання у Telegram-боті BULKA.');
+      showLockedScreen('Неавторизований доступ', 'Будь ласка, відкрийте додаток через персональну кнопку в Telegram-боті BULKA.');
       return;
     }
 
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
+
       const response = await fetch('/attestation/api/init', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ init_data: initData })
+        body: JSON.stringify({ init_data: initData }),
+        signal: controller.signal
       });
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
@@ -100,10 +134,18 @@
       if (data.status === 'ready') {
         // Успішно підготовлено до складання
         setupReadyState(data);
+        return;
       }
+
+      // Неочікуваний статус
+      showLockedScreen('Стан не визначено', data.message || 'Спробуйте перезапустити додаток.');
     } catch (e) {
       console.error('API init error:', e);
-      showLockedScreen('Помилка підключення', "Перевірте інтернет-з'єднання та спробуйте ще раз.");
+      const isTimeout = e.name === 'AbortError';
+      const msg = isTimeout 
+        ? "Час очікування відповіді вичерпано. Перевірте з'єднання з інтернетом."
+        : "Перевірте інтернет-з'єднання та спробуйте ще раз.";
+      showLockedScreen('Помилка підключення', msg);
     }
   }
 

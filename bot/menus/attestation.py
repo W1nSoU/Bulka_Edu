@@ -108,10 +108,11 @@ async def _check_admin(callback_or_message) -> bool:
 # 1. ГОЛОВНЕ МЕНЮ АТЕСТАЦІЇ
 # =============================================================
 
-async def dev_attestation_menu_handler(callback: CallbackQuery, state: FSMContext):
+async def dev_attestation_menu_handler(callback: CallbackQuery, state: Optional[FSMContext] = None):
     if not await _check_admin(callback):
         return
-    await state.clear()
+    if state:
+        await state.clear()
 
     active_wave = await get_active_wave()
 
