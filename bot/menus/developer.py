@@ -6234,14 +6234,14 @@ async def developer_ack_shop_users_view(callback: CallbackQuery):
 
 
 async def developer_ack_changes_view(callback: CallbackQuery):
-    """Відображення опису та змісту змінених матеріалів."""
+    """Відображення змісту змінених матеріалів з посторінковою пагінацією."""
     if not await _ensure_developer(callback, allow_observer=True):
         return
 
-    # Format: dev_ack_changes:{event_id}:{page}
+    # Format: dev_ack_changes:{event_id}:{page_idx}
     parts = callback.data.split(":")
     event_id = int(parts[1])
-    page = int(parts[2]) if len(parts) > 2 else 0
+    page_idx = int(parts[2]) if len(parts) > 2 else 0
 
     from database.material_notifications import get_event_by_id
     event = await get_event_by_id(event_id)
@@ -6258,32 +6258,72 @@ async def developer_ack_changes_view(callback: CallbackQuery):
 
     pages = []
     try:
-        pages = json.loads(event.get('pages_json', '[]'))
+        raw_pages = json.loads(event.get('pages_json', '[]'))
+        if isinstance(raw_pages, list):
+            pages = raw_pages
+        elif raw_pages:
+            pages = [str(raw_pages)]
     except Exception:
-        pass
+        pages = []
 
-    lines = [
+    header_lines = [
         "📝 <b>Зміст оновлення матеріалу</b>",
         "───────────────────",
         f"📚 Посада: <b>{event['role']}</b> | 📅 День: <b>{event['day']}</b>",
         f"🕒 Дата оновлення: <b>{dt_formatted}</b>",
-        "───────────────────",
-        f"<b>Короткий опис:</b>\n{event.get('description', '') or 'Не вказано'}\n"
+        "───────────────────"
     ]
 
-    if pages:
-        lines.append("<b>Матеріали:</b>")
-        for p_idx, p_text in enumerate(pages, 1):
-            lines.append(f"\n📄 <i>Сторінка {p_idx}:</i>\n{p_text}")
+    total_pages = len(pages)
+    buttons = []
 
-    full_text = "\n".join(lines)
+    if not pages:
+        body_text = "<i>Матеріали відсутні або зміст не збережено.</i>"
+    else:
+        page_idx = max(0, min(page_idx, total_pages - 1))
+        curr_page = pages[page_idx]
+
+        is_deleted = False
+        if isinstance(curr_page, dict):
+            p_text = curr_page.get('text') or curr_page.get('content') or str(curr_page)
+            if curr_page.get('status') == 'deleted' or curr_page.get('deleted') is True or curr_page.get('type') == 'deleted':
+                is_deleted = True
+        elif isinstance(curr_page, str):
+            p_text = curr_page
+            lowered = p_text.lower()
+            if "❌" in p_text[:15] or "видалено" in lowered[:25] or "[видалено]" in lowered[:25]:
+                is_deleted = True
+            elif event.get('content_type') == 'delete' or 'видален' in (event.get('description') or '').lower():
+                is_deleted = True
+        else:
+            p_text = str(curr_page)
+
+        if is_deleted:
+            # Очищуємо зайві префікси [ВИДАЛЕНО] якщо вони вже є в тексті
+            clean_text = p_text
+            for prefix in ["[ВИДАЛЕНО]", "ВИДАЛЕНО:", "❌ ВИДАЛЕНО", "❌ВИДАЛЕНО"]:
+                if clean_text.startswith(prefix):
+                    clean_text = clean_text[len(prefix):].strip()
+            body_text = f"❌ <b>ВИДАЛЕНО (Сторінка {page_idx + 1} з {total_pages})</b>\n\n{clean_text}"
+        else:
+            body_text = f"📄 <b>Сторінка {page_idx + 1} з {total_pages}</b>\n\n{p_text}"
+
+        # Пагінація між сторінками
+        if total_pages > 1:
+            nav_row = []
+            if page_idx > 0:
+                nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_ack_changes:{event_id}:{page_idx - 1}"))
+            nav_row.append(InlineKeyboardButton(text=f"📄 {page_idx + 1}/{total_pages}", callback_data="ignore"))
+            if page_idx < total_pages - 1:
+                nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_ack_changes:{event_id}:{page_idx + 1}"))
+            buttons.append(nav_row)
+
+    full_text = "\n".join(header_lines) + "\n" + body_text
     if len(full_text) > 4000:
         full_text = full_text[:3950] + "\n\n<i>[Текст скорочено через обмеження Telegram]</i>"
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_ack_ev:{event_id}:{page}")]
-    ])
-    await _edit_or_answer(callback.message, full_text, reply_markup=kb)
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_ack_ev:{event_id}:0")])
+    await _edit_or_answer(callback.message, full_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 

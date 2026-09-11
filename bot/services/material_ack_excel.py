@@ -64,8 +64,9 @@ async def generate_material_ack_xlsx(event_id: int) -> io.BytesIO:
     existing_sheet_titles: set[str] = set()
 
     # Стилі
-    font_title = Font(name="Calibri", size=14, bold=True, color="1F4E79")
-    font_subtitle = Font(name="Calibri", size=11, italic=True, color="595959")
+    font_title = Font(name="Calibri", size=15, bold=True, color="1F4E79")
+    font_meta = Font(name="Calibri", size=12, bold=True, color="000000")
+    font_meta_regular = Font(name="Calibri", size=12, color="000000")
     font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
     font_regular = Font(name="Calibri", size=11)
     font_bold = Font(name="Calibri", size=11, bold=True)
@@ -101,25 +102,29 @@ async def generate_material_ack_xlsx(event_id: int) -> io.BytesIO:
     ws_all["A1"] = "ЗВІТ ПРО ОЗНАЙОМЛЕННЯ З НАВЧАЛЬНИМИ МАТЕРІАЛАМИ"
     ws_all["A1"].font = font_title
     ws_all["A1"].alignment = align_left
+    ws_all.row_dimensions[1].height = 24
 
     ws_all.merge_cells("A2:G2")
-    ws_all["A2"] = f"Посада: {role} | Навчальний день: {day} | Дата оновлення: {dt_formatted}"
-    ws_all["A2"].font = font_subtitle
+    ws_all["A2"] = f"Посада: {role}  |  Навчальний день: {day}  |  Дата оновлення: {dt_formatted}"
+    ws_all["A2"].font = font_meta
     ws_all["A2"].alignment = align_left
+    ws_all.row_dimensions[2].height = 20
 
     ws_all.merge_cells("A3:G3")
     ws_all["A3"] = f"Опис змін: {desc}" if desc else "Опис змін: не вказано"
-    ws_all["A3"].font = font_subtitle
+    ws_all["A3"].font = font_meta_regular
     ws_all["A3"].alignment = align_left
+    ws_all.row_dimensions[3].height = 20
 
     ws_all.merge_cells("A4:G4")
     ws_all["A4"] = (
-        f"Всього отримувачів: {overall_stats['total']} | "
-        f"Ознайомились: {overall_stats['acknowledged_count']} ({overall_stats['ack_percent']}%) | "
+        f"Всього отримувачів: {overall_stats['total']}  |  "
+        f"Ознайомились: {overall_stats['acknowledged_count']} ({overall_stats['ack_percent']}%)  |  "
         f"Не ознайомились: {overall_stats['unacknowledged_count']} ({overall_stats['unack_percent']}%)"
     )
-    ws_all["A4"].font = font_bold
+    ws_all["A4"].font = font_meta
     ws_all["A4"].alignment = align_left
+    ws_all.row_dimensions[4].height = 20
 
     # Заголовки колонок
     headers_all = [
@@ -129,6 +134,7 @@ async def generate_material_ack_xlsx(event_id: int) -> io.BytesIO:
     ws_all.append([])  # Рядок 5 порожній
     ws_all.append(headers_all)  # Рядок 6
     header_row_idx = 6
+    ws_all.row_dimensions[6].height = 22
 
     for col_idx in range(1, len(headers_all) + 1):
         cell = ws_all.cell(row=header_row_idx, column=col_idx)
@@ -197,6 +203,10 @@ async def generate_material_ack_xlsx(event_id: int) -> io.BytesIO:
 
     for s in shops_summary:
         shop_name = s['shop']
+        # Якщо це зведена група територіалів або порожньо - не створюємо дублюючий аркуш
+        if not shop_name or shop_name.strip().startswith("Всі магазини"):
+            continue
+
         users = shops_data_cache.get(shop_name, [])
 
         sheet_title = _sanitize_sheet_title(shop_name, existing_sheet_titles)
@@ -207,15 +217,17 @@ async def generate_material_ack_xlsx(event_id: int) -> io.BytesIO:
         ws_shop["A1"] = f"МАГАЗИН: {shop_name}"
         ws_shop["A1"].font = font_title
         ws_shop["A1"].alignment = align_left
+        ws_shop.row_dimensions[1].height = 24
 
         total_sh = s.get('total_count', len(users))
         ack_sh = s.get('ack_count', sum(1 for u in users if u.get('acknowledged_at')))
         pct_sh = round(ack_sh / total_sh * 100, 1) if total_sh > 0 else 0.0
 
         ws_shop.merge_cells("A2:F2")
-        ws_shop["A2"] = f"Всього співробітників: {total_sh} | Ознайомились: {ack_sh} ({pct_sh}%) | Не ознайомились: {total_sh - ack_sh}"
-        ws_shop["A2"].font = font_bold
+        ws_shop["A2"] = f"Посада: {role}  |  День: {day}  |  Ознайомились: {ack_sh}/{total_sh} ({pct_sh}%)  |  Не ознайомились: {total_sh - ack_sh}"
+        ws_shop["A2"].font = font_meta
         ws_shop["A2"].alignment = align_left
+        ws_shop.row_dimensions[2].height = 20
 
         ws_shop.append([])  # Рядок 3
         ws_shop.append(headers_shop)  # Рядок 4
