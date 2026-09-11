@@ -49,7 +49,10 @@ from bot.services.attestation_excel import (
     parse_attestation_excel,
     generate_attestation_results_xlsx
 )
-from bot.services.attestation_worker import launch_attestation_broadcast
+from bot.services.attestation_worker import (
+    launch_attestation_broadcast,
+    get_attestation_webapp_button
+)
 
 logger = logging.getLogger(__name__)
 
@@ -788,7 +791,7 @@ async def dev_att_grant_retake_handler(callback: CallbackQuery, bot: Bot):
         # Надсилаємо повідомлення співробітнику в бот
         try:
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🚀 Пройти атестацію повторно", web_app=WebAppInfo(url=WEB_APP_URL))]
+                [get_attestation_webapp_button("🚀 Пройти атестацію повторно", user_id=user_id)]
             ])
             await bot.send_message(
                 chat_id=user_id,
