@@ -17,9 +17,13 @@ from bot.services.logger import setup_bot_logger, get_logger
 from bot.services.health import token_cleanup_loop, health_monitor_loop
 from bot.services.reports import auto_monthly_report_sender # New import
 from bot.services.groq_ai import is_groq_configured, get_groq_status
+from bot.services.openai_ai import is_openai_configured, backfill_materials_summaries_background
 from bot.services.test_error_monitoring_service import perform_monthly_reset_if_due, get_intern_incomplete_open_test_days, group_test_failures_by_manager
-from bot.services.reminders import send_daily_test_failure_report_to_manager # New import
 from apscheduler.schedulers.asyncio import AsyncIOScheduler # New import
+from bot.services.survey_broadcaster import survey_reminder_worker
+from database.attestation import init_attestation_db
+from bot.services.attestation_worker import attestation_reminder_worker
+from web_server import run_web_server_async
 
 
 
@@ -94,6 +98,8 @@ async def start_bot():
     print_status("✅", "База матеріалів")
     await init_material_notifications_db()
     print_status("✅", "База сповіщень матеріалів")
+    await init_attestation_db()
+    print_status("✅", "База атестації")
     await perform_monthly_reset_if_due()
     print_status("✅", "Перевірено та оновлено статистику помилок тестів (якщо потрібно)")
     await load_all_progress()
@@ -138,6 +144,20 @@ async def start_bot():
     scheduler.start()
     print_status("✅", "Планувальник запущено", indent=5)
     
+    # Запускаємо фонову перевірку та генерацію AI-резюме матеріалів
+    asyncio.create_task(backfill_materials_summaries_background())
+    print_status("🧠", "Фонова синхронізація AI-паспортів матеріалів запущена", indent=5)
+
+    # Запускаємо фоновий воркер опитувань та нагадувань
+    asyncio.create_task(survey_reminder_worker(bot))
+    print_status("📝", "Фоновий воркер опитувань та нагадувань запущено", indent=5)
+
+    # Запускаємо фоновий воркер атестації та веб-сервер Mini App
+    asyncio.create_task(attestation_reminder_worker(bot))
+    print_status("🎓", "Фоновий воркер атестації запущено", indent=5)
+    asyncio.create_task(run_web_server_async(bot))
+    print_status("🌐", "FastAPI веб-сервер Mini App запущено", indent=5)
+    
     # Логуємо запущені задачі
     logger.info(f"Scheduler started with {len(scheduler.get_jobs())} jobs")
     for job in scheduler.get_jobs():
@@ -146,11 +166,10 @@ async def start_bot():
     print()
     
     # Статус AI
-    groq_status = get_groq_status()
-    if groq_status["configured"]:
-        print_status("🤖", f"Groq AI: {groq_status['total_keys']} ключ(ів)")
+    if is_openai_configured():
+        print_status("🧠", "OpenAI GPT-4o-mini: налаштовано ✅")
     else:
-        print_status("⚠️", "Groq AI: не налаштовано")
+        print_status("⚠️", "OpenAI GPT: не налаштовано (додай OPENAI_API_KEY в .env)")
     
     print_status("📚", f"Днів навчання: {DAYS_TOTAL}")
     print()
@@ -165,9 +184,9 @@ async def start_bot():
     
     # Запускаємо бота
     try:
+        await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(
             bot,
-            skip_updates=True,
             allowed_updates=["message", "callback_query"]
         )
     except KeyboardInterrupt:

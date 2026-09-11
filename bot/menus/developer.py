@@ -7,6 +7,7 @@ import aiosqlite
 import html
 import pytz
 import calendar
+import math
 from typing import Optional, Union
 from pathlib import Path
 from datetime import datetime # NEW IMPORT
@@ -35,6 +36,7 @@ from database.users import (
     delete_user,
     register_user,
     get_reminder_history,
+    get_reminder_history_count,
     get_user_progress,
     update_user_role,
     get_users_by_managers,
@@ -176,6 +178,25 @@ class DeveloperStates(StatesGroup):
     waiting_edit_manager_name = State()
     waiting_edit_manager_shops = State()
 
+
+class SurveyCreationStates(StatesGroup):
+    waiting_title = State()
+    waiting_template = State()
+    waiting_roles = State()
+    waiting_city = State()
+    confirm_launch = State()
+
+
+class NewsCategoryStates(StatesGroup):
+    waiting_name = State()
+
+
+class NewsCreationStates(StatesGroup):
+    waiting_content = State()
+    selecting_categories = State()
+    selecting_roles = State()
+    confirm_dispatch = State()
+
 async def _ensure_developer(callback: CallbackQuery, require_main: bool = False, allow_observer: bool = False) -> bool:
     user_id = callback.from_user.id
     is_dev = await is_developer_user(user_id)
@@ -250,10 +271,24 @@ def _admin_cho_keyboard(is_main_dev: bool, is_admin: bool, is_territorial: bool,
     if is_admin or is_observer or is_territorial:
         buttons.append([InlineKeyboardButton(text="📚 Навчальні матеріали", callback_data="dev_main_study")])
     buttons.append([InlineKeyboardButton(text="📊 Аналітика", callback_data="dev_main_analyt")])
+    if is_admin or is_observer:
+        buttons.append([InlineKeyboardButton(text="📨 Розсилки", callback_data="dev_broadcasts_menu")])
     buttons.append([InlineKeyboardButton(text="👥 Команда Bulka", callback_data="dev_main_team")])
     if is_admin or is_observer:
         buttons.append([InlineKeyboardButton(text="🛠 Інше", callback_data="dev_main_other")])
     buttons.append([InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _admin_broadcasts_keyboard(is_admin: bool = True, is_observer: bool = False) -> InlineKeyboardMarkup:
+    buttons = []
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text="📋 Ознайомлення", callback_data="dev_an_ack_menu")])
+        buttons.append([InlineKeyboardButton(text="📝 Опитування", callback_data="dev_surveys_menu")])
+        buttons.append([InlineKeyboardButton(text="🎓 Атестація", callback_data="dev_attestation_menu")])
+    if is_admin or is_observer:
+        buttons.append([InlineKeyboardButton(text="📰 Новини", callback_data="dev_news_menu")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -288,9 +323,6 @@ def _admin_analyt_keyboard(is_observer: bool = False) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="📊 Аналітика", callback_data="dev_analytics_menu"),
             InlineKeyboardButton(text="📊 Помилки тестів", callback_data="show_test_errors")
-        ],
-        [
-            InlineKeyboardButton(text="📋 Ознайомлення", callback_data="dev_an_ack_menu")
         ],
         row2,
         [InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")]
@@ -468,6 +500,20 @@ async def dev_main_analyt_handler(callback: CallbackQuery):
         "img/admin/admin_analyt.jpg",
         "📊 <b>Аналітика</b>",
         _admin_analyt_keyboard(is_observer=is_observer)
+    )
+
+
+async def dev_main_broadcasts_handler(callback: CallbackQuery):
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    is_observer = await is_observer_user(callback.from_user.id)
+    if not has_access or (not is_admin and not is_observer):
+        await callback.answer("⛔️ Доступ дозволено лише адміністраторам та наглядачам.", show_alert=True)
+        return
+    await _show_admin_photo_menu(
+        callback,
+        "img/admin/admin_broadcasts.jpg",
+        "📨 <b>Розсилки</b>\n\nОберіть розділ розсилок:",
+        _admin_broadcasts_keyboard(is_admin=is_admin, is_observer=is_observer)
     )
 
 
@@ -1333,10 +1379,13 @@ async def developer_bulk_promote_completed_interns(callback: CallbackQuery):
     interns = await get_all_interns()
     promoted_count = 0
 
+    from database.positions import get_days_count_for_role
     for intern in interns:
         progress = await get_user_progress(intern["user_id"])
         completed_days = sum(1 for p in progress if p.get("completed"))
-        if completed_days >= DAYS_TOTAL:
+        role = intern.get("role")
+        role_days = await get_days_count_for_role(role) if role else DAYS_TOTAL
+        if completed_days >= role_days:
             await update_user_role(intern["user_id"], "Працівник", actor_id=callback.from_user.id)
             promoted_count += 1
 
@@ -5995,7 +6044,7 @@ async def developer_ack_events_list_view(callback: CallbackQuery, page: int = 0)
             "<i>За останні 90 днів оновлень матеріалів не знайдено.</i>"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_analyt")]
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_broadcasts_menu")]
         ])
         await _edit_or_answer(callback.message, text, reply_markup=kb)
         await callback.answer()
@@ -6033,7 +6082,7 @@ async def developer_ack_events_list_view(callback: CallbackQuery, page: int = 0)
             nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_ack_events_list:{page + 1}"))
         buttons.append(nav_row)
 
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_analyt")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_broadcasts_menu")])
 
     text = (
         "📋 <b>Аналітика ознайомлення з матеріалами</b>\n"
@@ -6367,7 +6416,1179 @@ async def developer_ack_export_xlsx_callback(callback: CallbackQuery):
         await callback.message.answer(f"❌ Не вдалося згенерувати XLSX: {e}")
 
 
+# ==================== Surveys Management (Point 3) ====================
+
+async def dev_surveys_menu_handler(callback: CallbackQuery, state: FSMContext = None):
+    """Головне меню управління опитуваннями."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or not is_admin:
+        await callback.answer("⛔️ Доступ дозволено лише адміністраторам.", show_alert=True)
+        return
+
+    if state:
+        await state.clear()
+
+    text = (
+        "📝 <b>Управління опитуваннями</b>\n"
+        "───────────────────\n\n"
+        "Створюйте структуровані опитування за шаблоном, відправляйте їх співробітникам "
+        "хвилями по 50 осіб з нагадуваннями та завантажуйте вичерпні звіти в Excel.\n\n"
+        "Оберіть дію:"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="➕ Створити опитування", callback_data="dev_survey_create_start")],
+        [InlineKeyboardButton(text="📋 Список опитувань", callback_data="dev_surveys_list:0")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_broadcasts_menu")]
+    ]
+    await _show_admin_photo_menu(
+        callback,
+        "img/admin/admin_broadcasts.jpg",
+        text,
+        InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+
+async def dev_survey_create_start(callback: CallbackQuery, state: FSMContext):
+    """Початок майстра створення опитування — запит назви."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or not is_admin:
+        await callback.answer("⛔️ Доступ дозволено лише адміністраторам.", show_alert=True)
+        return
+
+    await state.clear()
+    await state.set_state(SurveyCreationStates.waiting_title)
+
+    text = (
+        "📝 <b>Створення опитування — Крок 1/4</b>\n"
+        "───────────────────\n\n"
+        "Введіть <b>назву (тему)</b> опитування.\n"
+        "<i>Наприклад:</i> «Опитування щодо якості стажування та умов праці»\n\n"
+        "✍️ Надішліть назву повідомленням:"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_surveys_menu")]
+    ]
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_survey_process_title(message: Message, state: FSMContext):
+    """Обробка введеної назви опитування."""
+    title = (message.text or "").strip()
+    if len(title) < 3 or len(title) > 150:
+        await message.answer(
+            "⚠️ Назва опитування має бути від 3 до 150 символів. Спробуйте ще раз або натисніть «Скасувати»:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_surveys_menu")]
+            ])
+        )
+        return
+
+    await state.update_data(title=title)
+    await state.set_state(SurveyCreationStates.waiting_template)
+
+    text = _render_survey_step2_template_text(title)
+    buttons = [
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_surveys_menu")]
+    ]
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+
+def _render_survey_step2_template_text(title: str) -> str:
+    """Генерує точний стандартизований текст для кроку 2/4 введення шаблону опитування."""
+    example_template = (
+        "1. Як ви оцінюєте перший тиждень роботи?\n"
+        "а. Чудово, все зрозуміло\n"
+        "б. Задовільно, є питання\n"
+        "в. Складно, потрібна допомога\n\n"
+        "2. Чи вистачає вам підтримки від наставника?\n"
+        "а. Так, повністю\n"
+        "б. Частково\n"
+        "в. Ні, підтримки мало\n\n"
+        "3. Що б ви хотіли покращити або змінити? (вільна відповідь)"
+    )
+
+    return (
+        f"📝 <b>Створення опитування — Крок 2/4</b>\n"
+        f"📌 Тема: <b>{html.escape(title)}</b>\n"
+        "───────────────────\n\n"
+        "Тепер надішліть <b>текст запитань за шаблоном</b>.\n\n"
+        "📋 <b>Правила форматування:</b>\n"
+        "• Номер питання: <code>1. </code>, <code>2. </code>\n"
+        "• Варіанти відповіді: <code>а. </code>, <code>б. </code>, <code>в. </code> (або a., b., c.)\n"
+        "• Відкрите питання: позначка <code>(вільна відповідь)</code>\n\n"
+        f"💡 <b>Зразок для копіювання:</b>\n<pre>{example_template}</pre>\n\n"
+        "✍️ Надішліть повідомлення з вашим опитуванням:"
+    )
+
+
+async def dev_survey_process_template(message: Message, state: FSMContext):
+    """Обробка та парсинг тексту шаблону опитування."""
+    from bot.services.survey_parser import SurveyParser
+    template_text = (message.text or "").strip()
+
+    questions, error = SurveyParser.parse_template(template_text)
+    if error:
+        text = (
+            f"❌ <b>Помилка розпізнавання шаблону!</b>\n\n"
+            f"{html.escape(error)}\n\n"
+            f"💡 Перевірте нумерацію запитань (наприклад, <code>1. Запитання</code>) "
+            f"та варіанти (наприклад, <code>а. Варіант 1</code>) або вкажіть <code>(вільна відповідь)</code>.\n\n"
+            f"✍️ Надішліть виправлений текст або скасуйте:"
+        )
+        buttons = [
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_surveys_menu")]
+        ]
+        await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+        return
+
+    data = await state.get_data()
+    title = data.get("title", "Опитування")
+
+    await state.update_data(
+        raw_template=template_text,
+        questions=questions,
+        selected_roles=["Працівник"]
+    )
+    await state.set_state(SurveyCreationStates.waiting_roles)
+
+    await _show_survey_summary_view(message, title, questions, ["Працівник"])
+
+
+async def _show_survey_summary_view(target_obj: Union[Message, CallbackQuery], title: str, questions: list, roles: list):
+    """Відображає результат розпізнавання шаблону та кнопки переходу."""
+    q_preview_lines = []
+    for q in questions[:5]:
+        q_type_str = "варіанти" if q["question_type"] == "choice" else "вільна відповідь"
+        q_preview_lines.append(f"• <b>{q['question_idx']}.</b> {html.escape(q['text'][:60])} <i>({q_type_str})</i>")
+    if len(questions) > 5:
+        q_preview_lines.append(f"<i>... ще {len(questions) - 5} питань</i>")
+
+    text = (
+        f"✅ <b>Шаблон успішно розпізнано!</b>\n"
+        f"───────────────────\n"
+        f"📌 <b>Назва:</b> {html.escape(title)}\n"
+        f"❓ <b>Кількість питань:</b> {len(questions)}\n\n"
+        f"📋 <b>Питання:</b>\n" + "\n".join(q_preview_lines) + "\n\n"
+        "Чи правильно сформовано опитування?"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="👁 Переглянути вигляд", callback_data="dev_survey_preview_look")],
+        [InlineKeyboardButton(text="🚀 Надіслати", callback_data="dev_survey_to_roles")],
+        [InlineKeyboardButton(text="🔙 Назад до шаблону", callback_data="dev_survey_reenter_template")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_surveys_menu")]
+    ]
+    if isinstance(target_obj, CallbackQuery):
+        await _edit_or_answer(target_obj.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await target_obj.answer()
+    else:
+        await target_obj.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+
+async def dev_survey_back_to_summary(callback: CallbackQuery, state: FSMContext):
+    """Повернення до огляду розпізнаних питань."""
+    data = await state.get_data()
+    title = data.get("title", "Опитування")
+    questions = data.get("questions", [])
+    roles = data.get("selected_roles", ["Працівник"])
+    await _show_survey_summary_view(callback, title, questions, roles)
+
+
+async def dev_survey_reenter_template(callback: CallbackQuery, state: FSMContext):
+    """Повернення до кроку введення тексту шаблону."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access or not is_admin:
+        await callback.answer("⛔️ Доступ дозволено лише адміністраторам.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    title = data.get("title", "Опитування")
+    await state.set_state(SurveyCreationStates.waiting_template)
+
+    text = _render_survey_step2_template_text(title)
+    buttons = [
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_surveys_menu")]
+    ]
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_survey_preview_look(callback: CallbackQuery, state: FSMContext):
+    """Повний попередній перегляд усього опитування для адміна."""
+    data = await state.get_data()
+    title = data.get("title", "Опитування")
+    questions = data.get("questions", [])
+    if not questions:
+        await callback.answer("Питань не знайдено.", show_alert=True)
+        return
+
+    lines = [
+        f"👁 <b>Попередній перегляд опитування:</b>",
+        f"───────────────────",
+        f"📋 <b>{html.escape(title)}</b>\n",
+        f"<i>🔒 Це опитування є анонімним. Ваші щирі відповіді допоможуть родині BULKA ставати ще кращою! 💛</i>",
+        f"───────────────────\n"
+    ]
+
+    letter_symbols = ["а", "б", "в", "г", "ґ", "д", "е", "є", "ж", "з"]
+    for q in questions:
+        q_idx = q["question_idx"]
+        q_text = html.escape(q["text"])
+        q_type = q["question_type"]
+        lines.append(f"<b>{q_idx}. {q_text}</b>")
+        if q_type == "choice":
+            options = q.get("options", []) if hasattr(q, "get") else getattr(q, "options", [])
+            for i, opt in enumerate(options or []):
+                if re.match(r"^[а-яА-Яa-zA-ZіїєґІЇЄҐ]\.\s*", opt):
+                    lines.append(f"   ▫️ {html.escape(opt)}")
+                else:
+                    prefix = letter_symbols[i] if i < len(letter_symbols) else str(i + 1)
+                    lines.append(f"   ▫️ <i>{prefix}.</i> {html.escape(opt)}")
+        else:
+            lines.append("   ✍️ <i>(Вільна відповідь текстом)</i>")
+        lines.append("")
+
+    lines.append("───────────────────")
+    lines.append(f"Всього питань: <b>{len(questions)}</b>\n")
+    lines.append("Щоб перейти до вибору отримувачів, натисніть <b>«Надіслати»</b>, або <b>«Назад»</b> для повернення до шаблону.")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3900] + "\n\n<i>... [частина питань скорочена через ліміт повідомлення Telegram]</i>"
+
+    buttons = [
+        [InlineKeyboardButton(text="🚀 Надіслати", callback_data="dev_survey_to_roles")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_survey_reenter_template")]
+    ]
+
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+ALL_SURVEY_ROLES = ["Працівник", "Стажер", "Керівник", "Наглядач"]
+
+def _build_survey_roles_keyboard(selected_roles: list[str]) -> InlineKeyboardMarkup:
+    buttons = []
+    for r in ALL_SURVEY_ROLES:
+        mark = "✅" if r in selected_roles else "⬜️"
+        buttons.append([InlineKeyboardButton(text=f"{mark} {r}", callback_data=f"dev_survey_toggle_role:{r}")])
+
+    buttons.append([InlineKeyboardButton(text="➡️ Далі: Вибір міст", callback_data="dev_survey_to_city")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_survey_back_to_summary")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def dev_survey_to_roles(callback: CallbackQuery, state: FSMContext):
+    """Вибір цільових ролей отримувачів."""
+    data = await state.get_data()
+    selected_roles = data.get("selected_roles", ["Працівник"])
+
+    text = (
+        "👥 <b>Створення опитування — Крок 3/4</b>\n"
+        "───────────────────\n"
+        "Оберіть категорії користувачів, які мають отримати це опитування:\n"
+        "<i>(натискайте на кнопку для включення/виключення)</i>"
+    )
+    await _edit_or_answer(callback.message, text, reply_markup=_build_survey_roles_keyboard(selected_roles))
+    await callback.answer()
+
+
+async def dev_survey_toggle_role(callback: CallbackQuery, state: FSMContext):
+    """Перемикання ролі в аудиторії."""
+    role = callback.data.split(":")[1]
+    data = await state.get_data()
+    selected_roles = list(data.get("selected_roles", []))
+
+    if role in selected_roles:
+        selected_roles.remove(role)
+    else:
+        selected_roles.append(role)
+
+    await state.update_data(selected_roles=selected_roles)
+    await callback.message.edit_reply_markup(reply_markup=_build_survey_roles_keyboard(selected_roles))
+    await callback.answer()
+
+
+async def dev_survey_to_city(callback: CallbackQuery, state: FSMContext):
+    """Вибір міста або розсилка по всіх містах."""
+    data = await state.get_data()
+    selected_roles = data.get("selected_roles", [])
+    if not selected_roles:
+        await callback.answer("⚠️ Оберіть хоча б одну категорію користувачів!", show_alert=True)
+        return
+
+    cities = await get_all_cities()
+
+    buttons = [
+        [InlineKeyboardButton(text="🌐 Всі міста", callback_data="dev_survey_select_city:all")]
+    ]
+
+    city_row = []
+    for c in cities:
+        city_name = c["name"]
+        city_row.append(InlineKeyboardButton(text=f"🏙 {city_name}", callback_data=f"dev_survey_select_city:{city_name}"))
+        if len(city_row) == 2:
+            buttons.append(city_row)
+            city_row = []
+    if city_row:
+        buttons.append(city_row)
+
+    buttons.append([InlineKeyboardButton(text="🔙 Назад до вибору ролей", callback_data="dev_survey_to_roles")])
+
+    text = (
+        "🏙 <b>Створення опитування — Крок 4/4</b>\n"
+        "───────────────────\n"
+        "Оберіть конкретне місто або надішліть опитування у всі міста мережі:"
+    )
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_survey_select_city(callback: CallbackQuery, state: FSMContext):
+    """Обробка вибору міста, підрахунок аудиторії та перехід до підтвердження запуску."""
+    from database.surveys import get_matching_survey_recipients
+
+    raw_city = callback.data.split(":")[1]
+    target_city = None if raw_city == "all" else raw_city
+
+    data = await state.get_data()
+    title = data.get("title", "Опитування")
+    questions = data.get("questions", [])
+    roles = data.get("selected_roles", ["Працівник"])
+
+    matching_recipients = await get_matching_survey_recipients(roles, target_city)
+    recipient_uids = [r if isinstance(r, int) else r["user_id"] for r in matching_recipients]
+
+    await state.update_data(
+        target_city=target_city,
+        recipient_uids=recipient_uids
+    )
+    await state.set_state(SurveyCreationStates.confirm_launch)
+
+    city_label = "🌐 Всі міста" if not target_city else f"🏙 {target_city}"
+
+    text = (
+        "🚀 <b>Підтвердження запуску опитування</b>\n"
+        "───────────────────\n\n"
+        f"📌 <b>Назва:</b> {html.escape(title)}\n"
+        f"❓ <b>Питань:</b> {len(questions)}\n"
+        f"👥 <b>Цільова аудиторія:</b> {', '.join(roles)}\n"
+        f"🏙 <b>Місто:</b> {city_label}\n"
+        f"🎯 <b>Знайдено отримувачів:</b> <b>{len(recipient_uids)}</b> осіб\n\n"
+        "🌊 <b>Параметри розсилки:</b>\n"
+        "• Хвилі по 50 осіб з паузою 5-10 хв.\n"
+        "• До 3-х нагадувань у робочий час (09:00 - 19:00)\n"
+        "• Максимальний термін: 72 години\n"
+        "• Позначка для користувачів: Анонімне\n\n"
+        "Запустити розсилку опитування?"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="🚀 Запустити розсилку", callback_data="dev_survey_launch")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_surveys_menu")]
+    ]
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_survey_launch(callback: CallbackQuery, state: FSMContext):
+    """Створення опитування в БД та запуск хвильової розсилки."""
+    from database.surveys import create_survey
+    from bot.services.survey_broadcaster import start_survey_wave_broadcast
+
+    data = await state.get_data()
+    title = data.get("title")
+    raw_template = data.get("raw_template")
+    questions = data.get("questions")
+    roles = data.get("selected_roles", ["Працівник"])
+    target_city = data.get("target_city")
+    recipient_uids = data.get("recipient_uids", [])
+
+    if not title or not questions:
+        await callback.answer("Дані опитування застаріли. Почніть знову.", show_alert=True)
+        await dev_surveys_menu_handler(callback, state)
+        return
+
+    survey_id = await create_survey(
+        title=title,
+        template_text=raw_template,
+        created_by=callback.from_user.id,
+        target_roles=roles,
+        target_city=target_city,
+        questions=questions,
+        recipient_uids=recipient_uids
+    )
+
+    await state.clear()
+
+    # Запускаємо хвильову розсилку у фоні
+    await start_survey_wave_broadcast(survey_id, callback.bot)
+
+    await callback.answer("✅ Опитування створено та запущено!", show_alert=True)
+    await _show_survey_card_view(callback, survey_id)
+
+
+async def _show_survey_card_view(callback: CallbackQuery, survey_id: int):
+    """Картка опитування: статус, прогрес та кнопка вивантаження Excel."""
+    from database.surveys import get_survey_by_id, get_survey_summary_stats
+
+    survey = await get_survey_by_id(survey_id)
+    if not survey:
+        await callback.answer("Опитування не знайдено.", show_alert=True)
+        return
+
+    stats = await get_survey_summary_stats(survey_id)
+
+    title = survey.get("title", "Опитування")
+    status = survey.get("status", "active")
+    status_str = "🟢 Активне" if status == "active" else ("🟡 Розсилається" if status == "broadcasting" else "🏁 Завершене")
+
+    created_at_raw = survey.get("created_at", "")
+    try:
+        dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+        dt_str = dt.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        dt_str = created_at_raw[:16]
+
+    raw_roles = survey.get("target_roles", [])
+    if isinstance(raw_roles, str):
+        try:
+            roles = json.loads(raw_roles)
+        except Exception:
+            roles = [raw_roles]
+    elif isinstance(raw_roles, (list, tuple)):
+        roles = list(raw_roles)
+    else:
+        roles = []
+    roles_display = ", ".join(str(r) for r in roles) if roles else "Усі користувачі"
+    city = survey.get("target_city") or "Всі міста"
+
+    total = stats.get("total_recipients", 0)
+    completed = stats.get("completed_count", 0)
+    in_progress = stats.get("in_progress_count", 0)
+    pending = stats.get("pending_count", 0)
+    pct = round((completed / total * 100), 1) if total > 0 else 0.0
+
+    text = (
+        f"📊 <b>Картка опитування #{survey_id}</b>\n"
+        f"───────────────────\n\n"
+        f"📌 <b>Тема:</b> {html.escape(title)}\n"
+        f"⚙️ <b>Статус:</b> {status_str}\n"
+        f"📅 <b>Створено:</b> {dt_str}\n"
+        f"👥 <b>Аудиторія:</b> {roles_display} ({city})\n\n"
+        f"📈 <b>Прогрес проходження:</b>\n"
+        f"• Всього отримувачів: <b>{total}</b>\n"
+        f"• Повністю завершили: <b>{completed}</b> ({pct}%)\n"
+        f"• В процесі (відповіли частково): <b>{in_progress}</b>\n"
+        f"• Ще не розпочали: <b>{pending}</b>\n"
+    )
+
+    buttons = [
+        [InlineKeyboardButton(text="📥 Завантажити звіт Excel", callback_data=f"dev_survey_export_xlsx:{survey_id}")],
+        [InlineKeyboardButton(text="🔙 До списку опитувань", callback_data="dev_surveys_list:0")]
+    ]
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_survey_card_handler(callback: CallbackQuery):
+    """Обробник відкриття картки опитування."""
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+    survey_id = int(callback.data.split(":")[1])
+    await _show_survey_card_view(callback, survey_id)
+
+
+async def dev_surveys_list_handler(callback: CallbackQuery):
+    """Список усіх опитувань з пагінацією."""
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+
+    from database.surveys import get_all_surveys
+    surveys = await get_all_surveys()
+
+    page = 0
+    if callback.data and callback.data.startswith("dev_surveys_list:"):
+        try:
+            page = int(callback.data.split(":")[1])
+        except Exception:
+            page = 0
+
+    if not surveys:
+        text = (
+            "📋 <b>Список опитувань</b>\n"
+            "───────────────────\n\n"
+            "<i>Опитувань ще не було створено.</i>"
+        )
+        buttons = [
+            [InlineKeyboardButton(text="➕ Створити опитування", callback_data="dev_survey_create_start")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_surveys_menu")]
+        ]
+        await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await callback.answer()
+        return
+
+    PER_PAGE = 6
+    pages_total = max(1, (len(surveys) + PER_PAGE - 1) // PER_PAGE)
+    page = max(0, min(page, pages_total - 1))
+    paginated = surveys[page * PER_PAGE : (page + 1) * PER_PAGE]
+
+    buttons = []
+    for s in paginated:
+        st = s.get("status")
+        status_ico = "🟢" if st == "active" else ("🟡" if st == "broadcasting" else "🏁")
+        title_short = s.get("title", "Опитування")[:32]
+        recipients_count = s.get("total_recipients", 0)
+        btn_text = f"{status_ico} {title_short} ({recipients_count} ос.)"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_survey_card:{s['id']}")])
+
+    if pages_total > 1:
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_surveys_list:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {page + 1}/{pages_total}", callback_data="ignore"))
+        if page < pages_total - 1:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_surveys_list:{page + 1}"))
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="➕ Створити нове", callback_data="dev_survey_create_start")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_surveys_menu")])
+
+    text = (
+        "📋 <b>Список опитувань</b>\n"
+        "───────────────────\n"
+        "Оберіть опитування для перегляду аналітики та завантаження Excel:"
+    )
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_survey_export_xlsx_handler(callback: CallbackQuery):
+    """Генерація та вивантаження файлу Excel з результатами опитування."""
+    from aiogram.types import BufferedInputFile
+    from bot.services.survey_excel import generate_survey_results_xlsx
+    from database.surveys import get_survey_by_id
+
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+
+    survey_id = int(callback.data.split(":")[1])
+    survey = await get_survey_by_id(survey_id)
+    if not survey:
+        await callback.answer("Опитування не знайдено.", show_alert=True)
+        return
+
+    await callback.answer("⏳ Формуємо звіт Excel...", show_alert=False)
+
+    try:
+        excel_buf = await generate_survey_results_xlsx(survey_id)
+        title_slug = re.sub(r'[^\w\-]', '_', survey.get("title", "survey")[:25])
+        filename = f"Opituvannya_{survey_id}_{title_slug}.xlsx"
+
+        doc = BufferedInputFile(excel_buf.getvalue(), filename=filename)
+        await callback.message.answer_document(
+            document=doc,
+            caption=(
+                f"📊 <b>Звіт за опитуванням #{survey_id}</b>\n"
+                f"📌 <b>{html.escape(survey.get('title', ''))}</b>\n\n"
+                f"Аркуш 1: Загальна статистика та розподіл відповідей (%).\n"
+                f"Аркуші 2..N: Детальні анкети співробітників за магазинами."
+            ),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.exception(f"Помилка створення Excel для опитування {survey_id}: {e}")
+        await callback.message.answer(f"❌ Не вдалося згенерувати Excel: {e}")
+
+
+
+# ==================== News & Categories Management ====================
+
+
+async def _check_news_access(event: CallbackQuery | Message) -> bool:
+    """Перевіряє, чи має користувач права на управління новинами (адміністратор або наглядач)."""
+    user_id = event.from_user.id
+    if await is_developer_user(user_id):
+        return True
+    if await is_observer_user(user_id):
+        return True
+    return False
+
+
+async def dev_news_menu_handler(callback: CallbackQuery, state: FSMContext = None):
+    """Головне меню управління новинами."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ дозволено лише адміністраторам та наглядачам.", show_alert=True)
+        return
+
+    if state:
+        await state.clear()
+
+    text = (
+        "📰 <b>Управління новинами</b>\n"
+        "───────────────────\n\n"
+        "Публікуйте новини для команди з підтримкою фото, хештегів категорій "
+        "та вибірковою розсилкою за ролями та містами (хвилями по 50 осіб).\n\n"
+        "Оберіть дію:"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="📢 Опублікувати новину", callback_data="dev_news_create_start")],
+        [InlineKeyboardButton(text="🏷 Керування категоріями", callback_data="dev_news_categories_menu")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_broadcasts_menu")]
+    ]
+    await _show_admin_photo_menu(
+        callback,
+        "img/admin/admin_broadcasts.jpg",
+        text,
+        InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+
+async def dev_news_categories_menu_handler(callback: CallbackQuery, state: FSMContext = None):
+    """Меню управління категоріями новин."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ дозволено лише адміністраторам та наглядачам.", show_alert=True)
+        return
+
+    if state:
+        await state.clear()
+
+    from database.news import get_all_news_categories
+    cats = await get_all_news_categories()
+
+    buttons = [
+        [InlineKeyboardButton(text="➕ Додати категорію", callback_data="dev_news_cat_add")]
+    ]
+    for c in cats:
+        buttons.append([
+            InlineKeyboardButton(text=f"🗑 #{c['hashtag']}", callback_data=f"dev_news_cat_del:{c['id']}")
+        ])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_menu")])
+
+    text = (
+        "🏷 <b>Керування категоріями новин</b>\n"
+        "───────────────────\n\n"
+        "Кожна категорія є хештегом (#), який можна обрати під час публікації новини.\n\n"
+    )
+    if cats:
+        text += "<i>Натисніть на кнопку категорії з 🗑, щоб видалити її:</i>"
+    else:
+        text += "<i>Наразі категорій ще немає. Створіть першу!</i>"
+
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_news_cat_add_start(callback: CallbackQuery, state: FSMContext):
+    """Початок додавання нової категорії."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+
+    await state.clear()
+    await state.set_state(NewsCategoryStates.waiting_name)
+
+    text = (
+        "➕ <b>Створення категорії новин</b>\n"
+        "───────────────────\n\n"
+        "Введіть назву або хештег нової категорії (наприклад: <code>Новинки</code>, <code>Вакансії</code>, <code>Важливо</code>):\n\n"
+        "<i>Символ # буде додано автоматично, якщо він відсутній.</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_categories_menu")]
+    ])
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await callback.answer()
+
+
+async def dev_news_cat_process_name(message: Message, state: FSMContext):
+    """Обробка вводу назви нової категорії."""
+    if not await _check_news_access(message):
+        await message.answer("⛔️ Доступ заборонено.")
+        return
+
+    from database.news import add_news_category
+
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer("⚠️ Будь ласка, введіть текстову назву категорії.")
+        return
+
+    success, msg_text, cat_id = await add_news_category(name, created_by=message.from_user.id)
+    if not success:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_categories_menu")]
+        ])
+        await message.answer(f"❌ {msg_text}\n\nСпробуйте ще раз або поверніться назад:", reply_markup=kb)
+        return
+
+    await state.clear()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏷 До категорій", callback_data="dev_news_categories_menu")]
+    ])
+    await message.answer(f"✅ {msg_text}", reply_markup=kb)
+
+
+async def dev_news_cat_delete_handler(callback: CallbackQuery):
+    """Видалення категорії новин."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+
+    from database.news import get_news_category_by_id, delete_news_category
+
+    try:
+        cat_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Некоректний ID категорії.", show_alert=True)
+        return
+
+    cat = await get_news_category_by_id(cat_id)
+    await delete_news_category(cat_id)
+    tag_name = cat['name'] if cat else f"ID {cat_id}"
+    await callback.answer(f"Категорію {tag_name} видалено!", show_alert=True)
+    await dev_news_categories_menu_handler(callback)
+
+
+async def dev_news_create_start(callback: CallbackQuery, state: FSMContext):
+    """Початок майстра створення новини — Крок 1: Контент."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+
+    await state.clear()
+    await state.set_state(NewsCreationStates.waiting_content)
+    await state.update_data(
+        selected_cat_ids=[],
+        selected_roles=["Працівник", "Стажер"],
+        selected_city="all",
+        photo_file_id=None,
+        text_content="",
+        original_text_content="",
+        is_ai_improved=False
+    )
+
+    text = (
+        "📢 <b>Створення новини — Крок 1/4: Контент</b>\n"
+        "───────────────────\n\n"
+        "Надішліть повідомлення з текстом новини.\n\n"
+        "🖼 <i>Ви можете відправити як простий текст, так і фото з описом (caption) в одному повідомленні.</i>\n\n"
+        "💡 <i>Підтримується стандартне HTML-форматування Telegram (жирний, курсив, посилання тощо).</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_menu")]
+    ])
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await callback.answer()
+
+
+async def _show_news_categories_selection(event: Message | CallbackQuery, state: FSMContext):
+    """Відображає екран вибору категорій (хештегів) для новини."""
+    from database.news import get_all_news_categories
+    data = await state.get_data()
+    selected_cat_ids = set(data.get("selected_cat_ids", []))
+    cats = await get_all_news_categories()
+
+    buttons = []
+    for c in cats:
+        is_checked = c['id'] in selected_cat_ids
+        mark = "✅ " if is_checked else ""
+        btn_text = f"{mark}#{c['hashtag']}"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_news_toggle_cat:{c['id']}")])
+
+    buttons.append([InlineKeyboardButton(text="➡️ Продовжити (вибір ролей)", callback_data="dev_news_to_roles")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_menu")])
+
+    text = (
+        "🏷 <b>Створення новини — Крок 2/4: Категорії</b>\n"
+        "───────────────────\n\n"
+        "Оберіть категорії (хештеги), які будуть автоматично додані в кінці публікації.\n\n"
+        "<i>Натискайте на кнопки категорій, щоб обрати або скасувати. Якщо категорії не потрібні, просто натисніть «Продовжити».</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    if isinstance(event, CallbackQuery):
+        await _edit_or_answer(event.message, text, reply_markup=kb)
+        await event.answer()
+    else:
+        await event.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+async def dev_news_process_content(message: Message, state: FSMContext):
+    """Обробка надісланого контенту новини (текст або фото з описом)."""
+    if not await _check_news_access(message):
+        await message.answer("⛔️ Доступ заборонено.")
+        return
+
+    photo_file_id = None
+    text_content = ""
+
+    if message.photo:
+        photo_file_id = message.photo[-1].file_id
+        text_content = message.caption or ""
+    elif message.text:
+        text_content = message.text
+    else:
+        await message.answer("⚠️ Будь ласка, надішліть текст або фото з описом.")
+        return
+
+    if not text_content.strip() and not photo_file_id:
+        await message.answer("⚠️ Текст новини не може бути порожнім. Надішліть повідомлення ще раз.")
+        return
+
+    await state.update_data(
+        photo_file_id=photo_file_id,
+        text_content=text_content,
+        original_text_content=text_content,
+        is_ai_improved=False
+    )
+    await state.set_state(NewsCreationStates.selecting_categories)
+    await _show_news_categories_selection(message, state)
+
+
+async def dev_news_toggle_cat_handler(callback: CallbackQuery, state: FSMContext):
+    """Перемикання вибору категорії в новині."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+
+    cat_id = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    selected_cat_ids = list(data.get("selected_cat_ids", []))
+
+    if cat_id in selected_cat_ids:
+        selected_cat_ids.remove(cat_id)
+    else:
+        selected_cat_ids.append(cat_id)
+
+    await state.update_data(selected_cat_ids=selected_cat_ids)
+    await _show_news_categories_selection(callback, state)
+
+
+async def _show_news_roles_selection(callback: CallbackQuery, state: FSMContext):
+    """Відображає екран вибору ролей для новини."""
+    data = await state.get_data()
+    selected_roles = set(data.get("selected_roles", ["Працівник", "Стажер"]))
+
+    all_roles = ["Працівник", "Стажер", "Керівник", "Наглядач"]
+    buttons = []
+    for r in all_roles:
+        mark = "✅ " if r in selected_roles else "⬜️ "
+        buttons.append([InlineKeyboardButton(text=f"{mark}{r}", callback_data=f"dev_news_toggle_role:{r}")])
+
+    buttons.append([InlineKeyboardButton(text="➡️ Далі (вибір міста)", callback_data="dev_news_to_city")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_back_to_cats")])
+
+    text = (
+        "👥 <b>Створення новини — Крок 3/4: Аудиторія (Ролі)</b>\n"
+        "───────────────────\n\n"
+        "Оберіть ролі співробітників, які мають отримати новину:\n\n"
+        "<i>Оберіть хоча б одну роль за допомогою позначок.</i>"
+    )
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_news_to_roles_handler(callback: CallbackQuery, state: FSMContext):
+    """Перехід до вибору ролей."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+    await state.set_state(NewsCreationStates.selecting_roles)
+    await _show_news_roles_selection(callback, state)
+
+
+async def dev_news_back_to_cats_handler(callback: CallbackQuery, state: FSMContext):
+    """Повернення до вибору категорій."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+    await state.set_state(NewsCreationStates.selecting_categories)
+    await _show_news_categories_selection(callback, state)
+
+
+async def dev_news_toggle_role_handler(callback: CallbackQuery, state: FSMContext):
+    """Перемикання ролі для розсилки."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+
+    role = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    selected_roles = list(data.get("selected_roles", ["Працівник", "Стажер"]))
+
+    if role in selected_roles:
+        if len(selected_roles) <= 1:
+            await callback.answer("⚠️ Необхідно обрати хоча б одну роль.", show_alert=True)
+            return
+        selected_roles.remove(role)
+    else:
+        selected_roles.append(role)
+
+    await state.update_data(selected_roles=selected_roles)
+    await _show_news_roles_selection(callback, state)
+
+
+async def _show_news_city_selection(callback: CallbackQuery, state: FSMContext):
+    """Відображає екран вибору міста для новини."""
+    data = await state.get_data()
+    selected_city = data.get("selected_city", "all")
+
+    buttons = []
+    mark_all = "✅ " if selected_city in ("all", "ALL", "Усі міста") else ""
+    buttons.append([InlineKeyboardButton(text=f"{mark_all}🌐 Усі міста", callback_data="dev_news_select_city:all")])
+
+    city_row = []
+    for c in AVAILABLE_CITIES:
+        mark = "✅ " if selected_city == c else ""
+        city_row.append(InlineKeyboardButton(text=f"{mark}{c}", callback_data=f"dev_news_select_city:{c}"))
+        if len(city_row) == 2:
+            buttons.append(city_row)
+            city_row = []
+    if city_row:
+        buttons.append(city_row)
+
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_to_roles")])
+
+    text = (
+        "🏙 <b>Створення новини — Крок 3/4: Аудиторія (Місто)</b>\n"
+        "───────────────────\n\n"
+        "Оберіть місто для розсилки або залиште «Усі міста»:"
+    )
+
+    if callback.message.photo:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+    else:
+        await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_news_to_city_handler(callback: CallbackQuery, state: FSMContext):
+    """Перехід до вибору міста."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+    await _show_news_city_selection(callback, state)
+
+
+async def _show_news_preview(callback: CallbackQuery, state: FSMContext):
+    """Відображає фінальний екран попереднього перегляду перед відправкою."""
+    from database.news import get_news_category_by_id, get_matching_news_recipients
+
+    data = await state.get_data()
+    photo_file_id = data.get("photo_file_id")
+    text_content = data.get("text_content", "")
+    selected_cat_ids = data.get("selected_cat_ids", [])
+    selected_roles = data.get("selected_roles", ["Працівник", "Стажер"])
+    selected_city = data.get("selected_city", "all")
+    is_ai_improved = data.get("is_ai_improved", False)
+
+    # Формуємо хештеги
+    hashtags = []
+    for cid in selected_cat_ids:
+        c = await get_news_category_by_id(cid)
+        if c:
+            hashtags.append(f"#{c['hashtag']}")
+    hashtags_str = " ".join(hashtags)
+    news_header = "✨ <b>Вам надійшла новина від BULKA</b> ✨"
+    body_parts = [news_header]
+    if text_content:
+        body_parts.append(text_content)
+    if hashtags_str:
+        body_parts.append(hashtags_str)
+
+    full_text = "\n\n".join(body_parts)
+
+    recipients = await get_matching_news_recipients(selected_roles, selected_city)
+    recipients_count = len(recipients)
+    await state.update_data(full_text=full_text, recipient_count=recipients_count)
+
+    roles_str = ", ".join(selected_roles)
+    city_str = "Усі міста" if selected_city in ("all", "ALL", "Усі міста") else selected_city
+
+    buttons = [
+        [InlineKeyboardButton(text=f"🚀 Опублікувати ({recipients_count} ос.)", callback_data="dev_news_launch")]
+    ]
+
+    if is_ai_improved:
+        buttons.append([InlineKeyboardButton(text="🔄 Спробувати ще раз", callback_data="dev_news_ai_improve")])
+        buttons.append([InlineKeyboardButton(text="↩️ Повернути свій варіант", callback_data="dev_news_revert_orig")])
+    else:
+        buttons.append([InlineKeyboardButton(text="✨ Покращити з ШІ", callback_data="dev_news_ai_improve")])
+
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_to_city")])
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    if photo_file_id:
+        preview_meta = (
+            f"👁 <b>Попередній перегляд новини</b>\n"
+            f"👥 <b>Аудиторія:</b> {roles_str} ({city_str}) | 📬 <b>{recipients_count} ос.</b>\n"
+            f"───────────────────\n\n"
+        )
+        caption = preview_meta + full_text
+        if len(caption) > 1024:
+            await callback.message.answer(preview_meta, parse_mode="HTML")
+            await callback.message.answer_photo(
+                photo=photo_file_id,
+                caption=full_text[:1024],
+                reply_markup=kb,
+                parse_mode="HTML"
+            )
+        else:
+            try:
+                await callback.message.edit_caption(
+                    caption=caption,
+                    reply_markup=kb,
+                    parse_mode="HTML"
+                )
+            except Exception:
+                try:
+                    await callback.message.delete()
+                except Exception:
+                    pass
+                await callback.message.answer_photo(
+                    photo=photo_file_id,
+                    caption=caption,
+                    reply_markup=kb,
+                    parse_mode="HTML"
+                )
+    else:
+        text = (
+            f"👁 <b>Попередній перегляд новини</b>\n"
+            f"───────────────────\n"
+            f"👥 <b>Аудиторія:</b> {roles_str} ({city_str})\n"
+            f"📬 <b>Отримувачів:</b> {recipients_count} осіб\n"
+            f"───────────────────\n\n"
+            f"{full_text}"
+        )
+        await _edit_or_answer(callback.message, text, reply_markup=kb)
+
+    await callback.answer()
+
+
+async def dev_news_ai_improve_handler(callback: CallbackQuery, state: FSMContext):
+    """Покращення тексту новини за допомогою gpt-4o-mini."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    orig_text = data.get("original_text_content") or data.get("text_content", "")
+    if not orig_text.strip():
+        await callback.answer("⚠️ Немає тексту для покращення.", show_alert=True)
+        return
+
+    await callback.answer("✨ Покращуємо текст через ШІ...", show_alert=False)
+
+    from bot.services.openai_ai import improve_news_text_with_gpt
+
+    improved = await improve_news_text_with_gpt(orig_text)
+    if not improved:
+        await callback.answer("⚠️ Не вдалося зв'язатися з ШІ (перевірте ключ OpenAI у .env).", show_alert=True)
+        return
+
+    await state.update_data(
+        text_content=improved,
+        is_ai_improved=True
+    )
+    await _show_news_preview(callback, state)
+
+
+async def dev_news_revert_orig_handler(callback: CallbackQuery, state: FSMContext):
+    """Повернення до початкового варіанту тексту користувача."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    orig_text = data.get("original_text_content", "")
+    await state.update_data(
+        text_content=orig_text,
+        is_ai_improved=False
+    )
+    await callback.answer("↩️ Повернуто ваш початковий варіант.", show_alert=False)
+    await _show_news_preview(callback, state)
+
+
+async def dev_news_select_city_handler(callback: CallbackQuery, state: FSMContext):
+    """Обробка вибору міста та перехід до прев'ю."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+
+    city = callback.data.split(":", 1)[1]
+    await state.update_data(selected_city=city)
+    await state.set_state(NewsCreationStates.confirm_dispatch)
+    await _show_news_preview(callback, state)
+
+
+
+async def dev_news_launch_handler(callback: CallbackQuery, state: FSMContext):
+    """Запуск хвильової розсилки новини."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+
+    from database.news import get_matching_news_recipients
+    from bot.services.news_broadcaster import start_news_wave_broadcast
+
+    data = await state.get_data()
+    photo_file_id = data.get("photo_file_id")
+    full_text = data.get("full_text", "")
+    selected_roles = data.get("selected_roles", ["Працівник", "Стажер"])
+    selected_city = data.get("selected_city", "all")
+
+    recipients = await get_matching_news_recipients(selected_roles, selected_city)
+    if not recipients:
+        await callback.answer("⚠️ Не знайдено жодного отримувача за обраними критеріями.", show_alert=True)
+        return
+
+    await state.clear()
+    await callback.answer("🚀 Розсилку новини запущено!", show_alert=True)
+
+    roles_str = ", ".join(selected_roles)
+    city_str = "Усі міста" if selected_city == "all" else selected_city
+
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(
+                caption=f"🚀 <b>Розсилку запущено для {len(recipients)} осіб!</b>\n\nПублікація розсилається хвилями.",
+                reply_markup=None,
+                parse_mode="HTML"
+            )
+        else:
+            await callback.message.edit_text(
+                text=f"🚀 <b>Розсилку запущено для {len(recipients)} осіб!</b>\n\nПублікація розсилається хвилями.",
+                reply_markup=None,
+                parse_mode="HTML"
+            )
+    except Exception:
+        pass
+
+    await callback.message.answer(
+        f"📢 <b>Розсилку новини розпочато!</b>\n"
+        f"───────────────────\n"
+        f"👥 <b>Аудиторія:</b> {roles_str} ({city_str})\n"
+        f"📬 <b>Всього отримувачів:</b> {len(recipients)} осіб\n"
+        f"🌊 <b>Формат:</b> хвилями по 50 осіб з інтервалами 5-10 хв.\n\n"
+        f"<i>Після повної доставки всіх хвиль ви отримаєте підсумковий звіт сюди.</i>",
+        parse_mode="HTML"
+    )
+
+    start_news_wave_broadcast(
+        bot=callback.bot,
+        recipient_uids=recipients,
+        text=full_text,
+        photo_file_id=photo_file_id,
+        admin_chat_id=callback.message.chat.id
+    )
+
+
 # ==================== Tokens Management ====================
+
+
 
 async def developer_tokens_menu(callback: CallbackQuery):
     """Меню управління токенами з поясненнями."""
@@ -6974,17 +8195,29 @@ async def _developer_send_xlsx_report(callback: CallbackQuery, months: int):
 # ==================== Reminder History ====================
 
 async def developer_reminder_history_menu(callback: CallbackQuery):
-    """Displays the reminder history."""
+    """Displays the reminder history with pagination."""
     if not await _ensure_developer(callback):
         return
     
-    # Показуємо 15 останніх записів, щоб не перевищити ліміт символів
-    logs = await get_reminder_history(limit=15)
+    page = 1
+    if callback.data and callback.data.startswith("dev_reminder_history_page:"):
+        try:
+            page = max(1, int(callback.data.split(":")[-1]))
+        except (ValueError, IndexError):
+            page = 1
+
+    per_page = 15
+    total_count = await get_reminder_history_count()
+    total_pages = max(1, math.ceil(total_count / per_page))
+    page = min(page, total_pages)
+    offset = (page - 1) * per_page
+
+    logs = await get_reminder_history(limit=per_page, offset=offset)
     
     if not logs:
         await _edit_or_answer(
             callback.message,
-            "📭 Історія нагадувань порожня.",
+            "📭 <b>Історія нагадувань порожня.</b>\n\nЩе не було надіслано жодного нагадування.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_analyt")]
             ])
@@ -6992,7 +8225,10 @@ async def developer_reminder_history_menu(callback: CallbackQuery):
         await callback.answer()
         return
 
-    lines = [f"📜 <b>Історія нагадувань (останні {len(logs)})</b>", ""]
+    lines = [
+        f"📜 <b>Історія нагадувань</b> (стор. {page}/{total_pages}, всього: {total_count})",
+        "───────────────────"
+    ]
     
     for log in logs:
         sent_at = log['sent_at']
@@ -7022,11 +8258,22 @@ async def developer_reminder_history_menu(callback: CallbackQuery):
         lines.append(f"   <i>Від: {e_by_whom}</i>")
         lines.append("───────────────")
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Оновити", callback_data="dev_reminder_history")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="developer_menu")]
-    ])
+    keyboard_rows = []
     
+    # Пагінація
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_reminder_history_page:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {page}/{total_pages}", callback_data="noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_reminder_history_page:{page + 1}"))
+        keyboard_rows.append(nav_row)
+
+    keyboard_rows.append([InlineKeyboardButton(text="🔄 Оновити", callback_data=f"dev_reminder_history_page:{page}")])
+    keyboard_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_analyt")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
     await _edit_or_answer(callback.message, "\n".join(lines), reply_markup=kb)
     await callback.answer()
 
@@ -7060,13 +8307,19 @@ async def developer_daily_digest(callback: CallbackQuery):
     stats = await get_daily_stats()
 
     text = (
-        "📅 <b>Щоденний дайджест (24 год)</b>\n\n"
-        f"🆕 Нових стажерів: <b>{stats['new_users']}</b>\n"
-        f"✅ Пройдено блоків: <b>{stats['completions']}</b>\n"
-        f"🏃‍♂️ Активних користувачів: <b>{stats['active_users']}</b>\n"
+        "📅 <b>Щоденний дайджест (останні 24 год)</b>\n"
+        "───────────────────\n"
+        f"🆕 Нових стажерів: <b>{stats.get('new_users', 0)}</b>\n"
+        f"🏃‍♂️ Активних стажерів: <b>{stats.get('active_users', 0)}</b>\n"
+        f"👷‍♂️ Активних працівників: <b>{stats.get('active_workers', 0)}</b>\n"
+        f"✅ Пройдено тестів/блоків: <b>{stats.get('completions', 0)}</b>\n"
+        f"🎓 Переведено в працівники: <b>{stats.get('promoted', 0)}</b>\n"
+        f"❌ Відсіялись / відхилені: <b>{stats.get('dropped', 0)}</b>\n"
+        "───────────────────"
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Оновити", callback_data="dev_analytics_digest")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_analytics_menu")]
     ])
     
@@ -7172,43 +8425,62 @@ async def _render_training_added(
     range_token: str,
     city: Optional[str] = None,
     city_idx: Optional[int] = None,
+    page: int = 0,
 ):
     range_days = _range_days_from_token(range_token)
     rows = await get_training_added_interns(range_days=range_days, city=city)
     filter_label = {"7": "останні 7 дн.", "30": "останні 30 дн.", "all": "весь час"}.get(range_token, "весь час")
     city_label = f" | Місто: <b>{html.escape(city)}</b>" if city else ""
 
+    items_per_page = 20
+    pages_total = max((len(rows) + items_per_page - 1) // items_per_page, 1)
+    curr_page = max(0, min(page, pages_total - 1))
+    start = curr_page * items_per_page
+    end = start + items_per_page
+    page_rows = rows[start:end]
+
     lines = [
         f"🆕 <b>Додані стажери</b> ({filter_label}){city_label}",
-        f"Всього: <b>{len(rows)}</b>",
+        f"Всього: <b>{len(rows)}</b> | Стор. <b>{curr_page + 1}/{pages_total}</b>",
         "",
     ]
-    for idx, row in enumerate(rows[:200], start=1):
+    for idx, row in enumerate(page_rows, start=start + 1):
         name = html.escape(_safe_name(row))
         city_v = html.escape(row.get("city") or "—")
         role_v = html.escape(row.get("role") or "—")
         lines.append(f"{idx}. {name} — {city_v} | {role_v} | {row.get('event_at')}")
 
+    city_param = str(city_idx) if city_idx is not None else "all"
+
+    kb_rows = []
+    if pages_total > 1:
+        nav_row = []
+        if curr_page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_training_added_page:{range_token}:{city_param}:{curr_page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {curr_page + 1}/{pages_total}", callback_data="ignore"))
+        if curr_page < pages_total - 1:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_training_added_page:{range_token}:{city_param}:{curr_page + 1}"))
+        kb_rows.append(nav_row)
+
+    kb_rows.append([
+        InlineKeyboardButton(text="7 дн", callback_data=f"dev_training_added:7:{city_param}"),
+        InlineKeyboardButton(text="30 дн", callback_data=f"dev_training_added:30:{city_param}"),
+        InlineKeyboardButton(text="Весь час", callback_data=f"dev_training_added:all:{city_param}"),
+    ])
+    kb_rows.append([InlineKeyboardButton(text="🏙️ За містом", callback_data=f"dev_training_added_city_menu:{range_token}")])
+
     is_obs = await is_observer_user(callback.from_user.id)
-    kb_rows = [
-        [
-            InlineKeyboardButton(text="7 дн", callback_data="dev_training_added:7"),
-            InlineKeyboardButton(text="30 дн", callback_data="dev_training_added:30"),
-            InlineKeyboardButton(text="Весь час", callback_data="dev_training_added:all"),
-        ],
-        [InlineKeyboardButton(text="🏙️ За містом", callback_data=f"dev_training_added_city_menu:{range_token}")],
-    ]
     if not is_obs:
         kb_rows.append([
             InlineKeyboardButton(
                 text="📥 Вивантажити",
-                callback_data=f"dev_training_added_export:{range_token}:{city_idx if city_idx is not None else 'all'}",
+                callback_data=f"dev_training_added_export:{range_token}:{city_param}",
             )
         ])
         kb_rows.append([
             InlineKeyboardButton(
                 text="🧹 Очистити",
-                callback_data=f"dev_training_added_clear_ask:{range_token}:{city_idx if city_idx is not None else 'all'}",
+                callback_data=f"dev_training_added_clear_ask:{range_token}:{city_param}",
             )
         ])
     kb_rows.append([InlineKeyboardButton(text="⬅️ Навчальний процес", callback_data="dev_training_menu")])
@@ -7221,7 +8493,52 @@ async def developer_training_added(callback: CallbackQuery):
         return
     parts = (callback.data or "").split(":")
     token = parts[1] if len(parts) > 1 else "all"
-    await _render_training_added(callback, token)
+    city_token = parts[2] if len(parts) > 2 else "all"
+    city = None
+    city_idx = None
+    if city_token != "all":
+        try:
+            city_idx = int(city_token)
+            cities = await get_training_added_cities()
+            if 0 <= city_idx < len(cities):
+                city = cities[city_idx]
+            else:
+                city_idx = None
+        except ValueError:
+            pass
+    await _render_training_added(callback, token, city=city, city_idx=city_idx, page=0)
+    await callback.answer()
+
+
+async def developer_training_added_page(callback: CallbackQuery):
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) < 4:
+        await callback.answer("Некоректна сторінка.", show_alert=True)
+        return
+    token = parts[1]
+    city_token = parts[2]
+    try:
+        page = int(parts[3])
+    except ValueError:
+        await callback.answer("Некоректна сторінка.", show_alert=True)
+        return
+
+    city = None
+    city_idx = None
+    if city_token != "all":
+        try:
+            city_idx = int(city_token)
+            cities = await get_training_added_cities()
+            if 0 <= city_idx < len(cities):
+                city = cities[city_idx]
+            else:
+                city_idx = None
+        except ValueError:
+            pass
+
+    await _render_training_added(callback, token, city=city, city_idx=city_idx, page=page)
     await callback.answer()
 
 
@@ -7236,7 +8553,7 @@ async def developer_training_added_city_menu(callback: CallbackQuery):
         return
 
     rows = [[InlineKeyboardButton(text=city, callback_data=f"dev_training_added_city:{token}:{idx}")] for idx, city in enumerate(cities)]
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_training_added:{token}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_training_added:{token}:all")])
     await _edit_or_answer(
         callback.message,
         "🏙️ <b>Фільтр доданих стажерів за містом</b>\nОберіть місто:",
@@ -7264,7 +8581,7 @@ async def developer_training_added_city(callback: CallbackQuery):
         await callback.answer("Місто не знайдено.", show_alert=True)
         return
 
-    await _render_training_added(callback, token, city=cities[city_idx], city_idx=city_idx)
+    await _render_training_added(callback, token, city=cities[city_idx], city_idx=city_idx, page=0)
     await callback.answer()
 
 
@@ -7330,7 +8647,7 @@ async def developer_training_added_clear_cancel(callback: CallbackQuery):
     city_token = parts[2] if len(parts) > 2 else "all"
     city = await _resolve_training_added_city(city_token)
     city_idx = int(city_token) if city_token != "all" and city_token.isdigit() else None
-    await _render_training_added(callback, token, city=city, city_idx=city_idx)
+    await _render_training_added(callback, token, city=city, city_idx=city_idx, page=0)
     await callback.answer("Скасовано")
 
 
@@ -7347,20 +8664,25 @@ async def developer_training_added_clear_confirm(callback: CallbackQuery):
         city=city,
     )
     city_idx = int(city_token) if city_token != "all" and city_token.isdigit() else None
-    await _render_training_added(callback, token, city=city, city_idx=city_idx)
+    await _render_training_added(callback, token, city=city, city_idx=city_idx, page=0)
     await callback.answer(f"Очищено: {deleted_count}", show_alert=True)
 
 
-async def developer_training_left(callback: CallbackQuery):
-    if not await _ensure_developer(callback, allow_observer=True):
-        return
+async def _render_training_left(callback: CallbackQuery, page: int = 0):
     rows = await get_training_left_inactive(days=3)
+    items_per_page = 20
+    pages_total = max((len(rows) + items_per_page - 1) // items_per_page, 1)
+    curr_page = max(0, min(page, pages_total - 1))
+    start = curr_page * items_per_page
+    end = start + items_per_page
+    page_rows = rows[start:end]
+
     lines = [
         "😴 <b>Залишили навчання</b> (неактивні ≥ 3 днів)",
-        f"Всього: <b>{len(rows)}</b>",
+        f"Всього: <b>{len(rows)}</b> | Стор. <b>{curr_page + 1}/{pages_total}</b>",
         "",
     ]
-    for idx, row in enumerate(rows[:200], start=1):
+    for idx, row in enumerate(page_rows, start=start + 1):
         name = html.escape(_safe_name(row))
         shop = html.escape((row.get("shop") or "—").split(" ")[0])
         if row.get("deleted"):
@@ -7374,11 +8696,35 @@ async def developer_training_left(callback: CallbackQuery):
                 f"магазин: <b>{shop}</b> | статус: <b>Неактивний</b>"
             )
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Оновити", callback_data="dev_training_left")],
-        [InlineKeyboardButton(text="⬅️ Навчальний процес", callback_data="dev_training_menu")],
-    ])
+    kb_rows = []
+    if pages_total > 1:
+        nav_row = []
+        if curr_page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_training_left_page:{curr_page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {curr_page + 1}/{pages_total}", callback_data="ignore"))
+        if curr_page < pages_total - 1:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_training_left_page:{curr_page + 1}"))
+        kb_rows.append(nav_row)
+
+    kb_rows.append([InlineKeyboardButton(text="🔄 Оновити", callback_data="dev_training_left")])
+    kb_rows.append([InlineKeyboardButton(text="⬅️ Навчальний процес", callback_data="dev_training_menu")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     await _edit_or_answer(callback.message, "\n".join(lines), reply_markup=kb)
+
+
+async def developer_training_left(callback: CallbackQuery):
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+    await _render_training_left(callback, page=0)
+    await callback.answer()
+
+
+async def developer_training_left_page(callback: CallbackQuery):
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+    parts = (callback.data or "").split(":")
+    page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    await _render_training_left(callback, page=page)
     await callback.answer()
 
 
@@ -7402,14 +8748,14 @@ async def _render_training_promoted(callback: CallbackQuery, token: str, page: i
         role_v = html.escape(row.get("role") or "—")
         lines.append(f"{idx}. {name} — {role_v} | {row.get('event_at')}")
 
-    nav_row = []
-    if curr_page > 0:
-        nav_row.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"dev_training_promoted_page:{token}:{curr_page - 1}"))
-    if curr_page < pages_total - 1:
-        nav_row.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"dev_training_promoted_page:{token}:{curr_page + 1}"))
-
     kb_rows = []
-    if nav_row:
+    if pages_total > 1:
+        nav_row = []
+        if curr_page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_training_promoted_page:{token}:{curr_page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {curr_page + 1}/{pages_total}", callback_data="ignore"))
+        if curr_page < pages_total - 1:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_training_promoted_page:{token}:{curr_page + 1}"))
         kb_rows.append(nav_row)
     
     is_obs = await is_observer_user(callback.from_user.id)
@@ -7430,7 +8776,7 @@ async def developer_training_promoted(callback: CallbackQuery):
         return
     parts = (callback.data or "").split(":")
     token = parts[1] if len(parts) > 1 else "all"
-    await _render_training_promoted(callback, token)
+    await _render_training_promoted(callback, token, page=0)
     await callback.answer()
 
 async def developer_training_promoted_page(callback: CallbackQuery):
@@ -7450,26 +8796,41 @@ async def developer_training_promoted_page(callback: CallbackQuery):
     await callback.answer()
 
 
-async def _render_training_rejected(callback: CallbackQuery, token: str):
+async def _render_training_rejected(callback: CallbackQuery, token: str, page: int = 0):
     rows = await get_training_rejected(range_days=_range_days_from_token(token))
     filter_label = {"7": "останні 7 дн.", "30": "останні 30 дн.", "all": "весь час"}.get(token, "весь час")
+    items_per_page = 20
+    pages_total = max((len(rows) + items_per_page - 1) // items_per_page, 1)
+    curr_page = max(0, min(page, pages_total - 1))
+    start = curr_page * items_per_page
+    end = start + items_per_page
+    page_rows = rows[start:end]
+
     lines = [
         f"❌ <b>Відхилені стажери</b> ({filter_label})",
-        f"Всього: <b>{len(rows)}</b>",
+        f"Всього: <b>{len(rows)}</b> | Стор. <b>{curr_page + 1}/{pages_total}</b>",
         "",
     ]
-    for idx, row in enumerate(rows[:200], start=1):
+    for idx, row in enumerate(page_rows, start=start + 1):
         name = html.escape(_safe_name(row))
         lines.append(f"{idx}. {name} — дата відхилення: <b>{row.get('event_at') or '—'}</b>")
 
+    kb_rows = []
+    if pages_total > 1:
+        nav_row = []
+        if curr_page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_training_rejected_page:{token}:{curr_page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {curr_page + 1}/{pages_total}", callback_data="ignore"))
+        if curr_page < pages_total - 1:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_training_rejected_page:{token}:{curr_page + 1}"))
+        kb_rows.append(nav_row)
+
     is_obs = await is_observer_user(callback.from_user.id)
-    kb_rows = [
-        [
-            InlineKeyboardButton(text="7 дн", callback_data="dev_training_rejected:7"),
-            InlineKeyboardButton(text="30 дн", callback_data="dev_training_rejected:30"),
-            InlineKeyboardButton(text="Весь час", callback_data="dev_training_rejected:all"),
-        ]
-    ]
+    kb_rows.append([
+        InlineKeyboardButton(text="7 дн", callback_data="dev_training_rejected:7"),
+        InlineKeyboardButton(text="30 дн", callback_data="dev_training_rejected:30"),
+        InlineKeyboardButton(text="Весь час", callback_data="dev_training_rejected:all"),
+    ])
     if not is_obs:
         kb_rows.append([InlineKeyboardButton(text="📥 Вивантажити", callback_data=f"dev_training_rejected_export:{token}")])
     kb_rows.append([InlineKeyboardButton(text="⬅️ Навчальний процес", callback_data="dev_training_menu")])
@@ -7482,7 +8843,24 @@ async def developer_training_rejected(callback: CallbackQuery):
         return
     parts = (callback.data or "").split(":")
     token = parts[1] if len(parts) > 1 else "all"
-    await _render_training_rejected(callback, token)
+    await _render_training_rejected(callback, token, page=0)
+    await callback.answer()
+
+
+async def developer_training_rejected_page(callback: CallbackQuery):
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) < 3:
+        await callback.answer("Некоректна сторінка.", show_alert=True)
+        return
+    token = parts[1]
+    try:
+        page = int(parts[2])
+    except ValueError:
+        await callback.answer("Некоректна сторінка.", show_alert=True)
+        return
+    await _render_training_rejected(callback, token, page=page)
     await callback.answer()
 
 
@@ -9152,6 +10530,7 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_dropout_report, lambda c: c.data == "dev_analytics_funnel")
     dp.callback_query.register(developer_training_menu, lambda c: c.data == "dev_training_menu")
     dp.callback_query.register(developer_training_added, lambda c: c.data and c.data.startswith("dev_training_added:"))
+    dp.callback_query.register(developer_training_added_page, lambda c: c.data and c.data.startswith("dev_training_added_page:"))
     dp.callback_query.register(developer_training_added_city_menu, lambda c: c.data and c.data.startswith("dev_training_added_city_menu:"))
     dp.callback_query.register(developer_training_added_city, lambda c: c.data and c.data.startswith("dev_training_added_city:"))
     dp.callback_query.register(developer_training_added_export, lambda c: c.data and c.data.startswith("dev_training_added_export:"))
@@ -9159,9 +10538,52 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_training_added_clear_cancel, lambda c: c.data and c.data.startswith("dev_training_added_clear_cancel:"))
     dp.callback_query.register(developer_training_added_clear_confirm, lambda c: c.data and c.data.startswith("dev_training_added_clear_confirm:"))
     dp.callback_query.register(developer_training_left, lambda c: c.data == "dev_training_left")
+    dp.callback_query.register(developer_training_left_page, lambda c: c.data and c.data.startswith("dev_training_left_page:"))
     dp.callback_query.register(developer_training_promoted, lambda c: c.data and c.data.startswith("dev_training_promoted:"))
     dp.callback_query.register(developer_training_promoted_page, lambda c: c.data and c.data.startswith("dev_training_promoted_page:"))
     dp.callback_query.register(developer_training_rejected, lambda c: c.data and c.data.startswith("dev_training_rejected:"))
+    dp.callback_query.register(developer_training_rejected_page, lambda c: c.data and c.data.startswith("dev_training_rejected_page:"))
     dp.callback_query.register(developer_training_promoted_export, lambda c: c.data and c.data.startswith("dev_training_promoted_export:"))
     dp.callback_query.register(developer_training_rejected_export, lambda c: c.data and c.data.startswith("dev_training_rejected_export:"))
-    dp.callback_query.register(developer_reminder_history_menu, lambda c: c.data == "dev_reminder_history")
+    dp.callback_query.register(developer_reminder_history_menu, lambda c: c.data and (c.data == "dev_reminder_history" or c.data.startswith("dev_reminder_history_page:")))
+
+    # Broadcasts & Surveys Handlers
+    dp.callback_query.register(dev_main_broadcasts_handler, lambda c: c.data == "dev_broadcasts_menu")
+    dp.callback_query.register(dev_surveys_menu_handler, lambda c: c.data == "dev_surveys_menu")
+    dp.callback_query.register(dev_survey_create_start, lambda c: c.data == "dev_survey_create_start")
+    dp.message.register(dev_survey_process_title, SurveyCreationStates.waiting_title)
+    dp.message.register(dev_survey_process_template, SurveyCreationStates.waiting_template)
+    dp.callback_query.register(dev_survey_back_to_summary, lambda c: c.data == "dev_survey_back_to_summary")
+    dp.callback_query.register(dev_survey_reenter_template, lambda c: c.data == "dev_survey_reenter_template")
+    dp.callback_query.register(dev_survey_preview_look, lambda c: c.data == "dev_survey_preview_look")
+    dp.callback_query.register(dev_survey_to_roles, lambda c: c.data == "dev_survey_to_roles")
+    dp.callback_query.register(dev_survey_toggle_role, lambda c: c.data and c.data.startswith("dev_survey_toggle_role:"))
+    dp.callback_query.register(dev_survey_to_city, lambda c: c.data == "dev_survey_to_city")
+    dp.callback_query.register(dev_survey_select_city, lambda c: c.data and c.data.startswith("dev_survey_select_city:"))
+    dp.callback_query.register(dev_survey_launch, SurveyCreationStates.confirm_launch, lambda c: c.data == "dev_survey_launch")
+    dp.callback_query.register(dev_surveys_list_handler, lambda c: c.data and c.data.startswith("dev_surveys_list:"))
+    dp.callback_query.register(dev_survey_card_handler, lambda c: c.data and c.data.startswith("dev_survey_card:"))
+    dp.callback_query.register(dev_survey_export_xlsx_handler, lambda c: c.data and c.data.startswith("dev_survey_export_xlsx:"))
+
+    # News & Categories Handlers
+    dp.callback_query.register(dev_news_menu_handler, lambda c: c.data == "dev_news_menu")
+    dp.callback_query.register(dev_news_categories_menu_handler, lambda c: c.data == "dev_news_categories_menu")
+    dp.callback_query.register(dev_news_cat_add_start, lambda c: c.data == "dev_news_cat_add")
+    dp.message.register(dev_news_cat_process_name, NewsCategoryStates.waiting_name)
+    dp.callback_query.register(dev_news_cat_delete_handler, lambda c: c.data and c.data.startswith("dev_news_cat_del:"))
+
+    dp.callback_query.register(dev_news_create_start, lambda c: c.data == "dev_news_create_start")
+    dp.message.register(dev_news_process_content, NewsCreationStates.waiting_content)
+    dp.callback_query.register(dev_news_toggle_cat_handler, lambda c: c.data and c.data.startswith("dev_news_toggle_cat:"))
+    dp.callback_query.register(dev_news_to_roles_handler, lambda c: c.data == "dev_news_to_roles")
+    dp.callback_query.register(dev_news_back_to_cats_handler, lambda c: c.data == "dev_news_back_to_cats")
+    dp.callback_query.register(dev_news_toggle_role_handler, lambda c: c.data and c.data.startswith("dev_news_toggle_role:"))
+    dp.callback_query.register(dev_news_to_city_handler, lambda c: c.data == "dev_news_to_city")
+    dp.callback_query.register(dev_news_select_city_handler, lambda c: c.data and c.data.startswith("dev_news_select_city:"))
+    dp.callback_query.register(dev_news_ai_improve_handler, lambda c: c.data == "dev_news_ai_improve")
+    dp.callback_query.register(dev_news_revert_orig_handler, lambda c: c.data == "dev_news_revert_orig")
+    dp.callback_query.register(dev_news_launch_handler, NewsCreationStates.confirm_dispatch, lambda c: c.data == "dev_news_launch")
+
+    # Attestation Handlers
+    from bot.menus.attestation import register_attestation_handlers
+    register_attestation_handlers(dp)

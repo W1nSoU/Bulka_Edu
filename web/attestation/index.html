@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>BULKA 🥐 Корпоративна атестація</title>
+  <!-- Google Fonts: Inter & Outfit -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@600;700;800&display=swap" rel="stylesheet">
+  <!-- Telegram WebApp JS SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <!-- Canvas Confetti -->
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
+  <!-- Custom CSS -->
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="app-container">
+
+    <!-- 1. LOADING SCREEN -->
+    <div id="screen-loading" class="screen active">
+      <div class="loader-content">
+        <div class="croissant-spinner">🥐</div>
+        <h2 class="brand-title">BULKA</h2>
+        <p class="loader-text">Перевірка доступу до атестації...</p>
+        <div class="progress-line"><div class="progress-indeterminate"></div></div>
+      </div>
+    </div>
+
+    <!-- 2. LOCKED / RESTRICTED SCREEN -->
+    <div id="screen-locked" class="screen">
+      <div class="glass-card locked-card">
+        <div class="card-icon" id="locked-icon">🔒</div>
+        <h2 id="locked-title">Доступ закрито</h2>
+        <p id="locked-message" class="card-desc">Атестація наразі не активна для вашого магазину.</p>
+        <button id="btn-close-locked" class="btn btn-secondary">
+          <span>Закрити</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 3. WELCOME SCREEN -->
+    <div id="screen-welcome" class="screen">
+      <div class="welcome-header">
+        <div class="badge-season" id="welcome-wave-badge">Атестація 2026</div>
+        <h1 class="welcome-title">Твоя піврічна атестація</h1>
+        <p class="welcome-subtitle">Покажи свій професійний рівень майстерності в BULKA!</p>
+      </div>
+
+      <div class="glass-card profile-card">
+        <div class="profile-avatar">👤</div>
+        <div class="profile-info">
+          <div class="profile-name" id="welcome-user-name">Співробітник</div>
+          <div class="profile-meta">
+            <span class="badge badge-role" id="welcome-role">Посада</span>
+            <span class="badge badge-shop" id="welcome-shop">Магазин</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="glass-card rules-card">
+        <div class="rule-item">
+          <span class="rule-icon">⏱</span>
+          <div class="rule-content">
+            <div class="rule-title">Час на тест</div>
+            <div class="rule-desc" id="rule-time">20 хвилин з моменту старту</div>
+          </div>
+        </div>
+        <div class="rule-item">
+          <span class="rule-icon">📝</span>
+          <div class="rule-content">
+            <div class="rule-title">Кількість питань</div>
+            <div class="rule-desc" id="rule-questions-count">25 фахових питань</div>
+          </div>
+        </div>
+        <div class="rule-item">
+          <span class="rule-icon">🎯</span>
+          <div class="rule-content">
+            <div class="rule-title">Прохідний бал</div>
+            <div class="rule-desc" id="rule-pass-pct">Не менше 80% вірних відповідей</div>
+          </div>
+        </div>
+        <div class="rule-item">
+          <span class="rule-icon">⚠️</span>
+          <div class="rule-content">
+            <div class="rule-title">Суворе правило</div>
+            <div class="rule-desc">Лише 1 спроба. Таймер не зупиняється!</div>
+          </div>
+        </div>
+      </div>
+
+      <button id="btn-start-quiz" class="btn btn-primary pulse-btn">
+        <span>🚀 Розпочати атестацію</span>
+      </button>
+    </div>
+
+    <!-- 4. INTERACTIVE QUIZ SCREEN -->
+    <div id="screen-quiz" class="screen">
+      <!-- Top Sticky Bar -->
+      <div class="quiz-top-bar">
+        <div class="timer-badge" id="quiz-timer">
+          <span class="timer-icon">⏱</span>
+          <span id="timer-display">20:00</span>
+        </div>
+        <div class="quiz-step-counter">
+          Питання <span id="current-q-num">1</span> з <span id="total-q-num">25</span>
+        </div>
+      </div>
+
+      <!-- Linear Progress Bar -->
+      <div class="progress-bar-container">
+        <div class="progress-bar-fill" id="progress-fill"></div>
+      </div>
+
+      <!-- Quick Question Selector Ribbon -->
+      <div class="questions-ribbon-container">
+        <div class="questions-ribbon" id="questions-ribbon">
+          <!-- Populated dynamically: 1, 2, 3 ... -->
+        </div>
+      </div>
+
+      <!-- Question Card (Slide Container) -->
+      <div class="question-container" id="question-container">
+        <div class="glass-card question-card" id="question-card">
+          <div class="question-badge" id="question-points-badge">1 бал</div>
+          <div class="question-text" id="question-text">Текст запитання завантажується...</div>
+          <div class="options-list" id="options-list">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom Nav Controls -->
+      <div class="quiz-bottom-nav">
+        <button id="btn-prev-question" class="btn btn-nav btn-prev" disabled>
+          <span>⬅️ Назад</span>
+        </button>
+        <button id="btn-next-question" class="btn btn-nav btn-next">
+          <span>Далі ➡️</span>
+        </button>
+        <button id="btn-finish-quiz" class="btn btn-finish hidden">
+          <span>✅ Завершити</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 5. FINAL RESULT SCREEN -->
+    <div id="screen-result" class="screen">
+      <div class="glass-card result-card">
+        <div class="result-celebration-badge" id="result-badge">🎉</div>
+        <h2 class="result-title" id="result-title">Атестацію складено!</h2>
+        <p class="result-subtitle" id="result-subtitle">Твій внесок зараховано до рейтингу магазину!</p>
+
+        <!-- Circular or Big Counter Score -->
+        <div class="score-circle-container">
+          <div class="score-circle" id="score-circle">
+            <div class="score-number" id="result-score-pct">92%</div>
+            <div class="score-label" id="result-score-fraction">23 / 25 балів</div>
+          </div>
+        </div>
+
+        <div class="result-stats-grid">
+          <div class="stat-box">
+            <div class="stat-val" id="res-shop-name">-</div>
+            <div class="stat-lbl">Магазин</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-val" id="res-role-name">-</div>
+            <div class="stat-lbl">Посада</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-val" id="res-duration">-</div>
+            <div class="stat-lbl">Витрачено часу</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-val" id="res-status-label">Складено</div>
+            <div class="stat-lbl">Вердикт</div>
+          </div>
+        </div>
+
+        <button id="btn-close-app" class="btn btn-primary">
+          <span>Закрити вікно</span>
+        </button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Custom JS Application Logic -->
+  <script src="app.js"></script>
+</body>
+</html>
