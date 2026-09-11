@@ -551,15 +551,17 @@ async def get_wave_shop_stats(wave_id: int, db_path: str = DB_PATH) -> List[Dict
     """Повертає статистику в розрізі магазинів."""
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
-        # Отримуємо всі магазини хвилі
+        # Отримуємо всі магазини хвилі разом з id
         async with db.execute(
-            "SELECT shop_name FROM attestation_wave_shops WHERE wave_id = ? ORDER BY shop_name",
+            "SELECT id, shop_name FROM attestation_wave_shops WHERE wave_id = ? ORDER BY shop_name",
             (wave_id,)
         ) as cur_shops:
-            shops = [r[0] for r in await cur_shops.fetchall()]
+            shops_rows = await cur_shops.fetchall()
 
         results = []
-        for shop in shops:
+        for r in shops_rows:
+            shop_id = r["id"]
+            shop = r["shop_name"]
             # Учасники магазину
             async with db.execute(
                 "SELECT COUNT(*) FROM attestation_participants WHERE wave_id = ? AND shop_name = ?",
@@ -581,6 +583,7 @@ async def get_wave_shop_stats(wave_id: int, db_path: str = DB_PATH) -> List[Dict
             avg_pct = round(sum(a[1] for a in attempts) / completed, 1) if completed > 0 else 0.0
 
             results.append({
+                "shop_id": shop_id,
                 "shop_name": shop,
                 "total_participants": total_shop_participants,
                 "completed": completed,
@@ -589,6 +592,19 @@ async def get_wave_shop_stats(wave_id: int, db_path: str = DB_PATH) -> List[Dict
             })
 
         return results
+
+
+async def get_wave_shop_by_id(wave_shop_id: int, db_path: str = DB_PATH) -> Optional[Dict[str, Any]]:
+    """Повертає магазин хвилі за його ID."""
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, wave_id, shop_name FROM attestation_wave_shops WHERE id = ?",
+            (wave_shop_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
 
 
 async def get_shop_members_details(wave_id: int, shop_name: str, db_path: str = DB_PATH) -> List[Dict[str, Any]]:

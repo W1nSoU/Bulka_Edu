@@ -23,6 +23,7 @@ from bot.constants import AVAILABLE_SHOPS
 from database.attestation import (
     get_active_wave,
     get_wave_by_id,
+    get_wave_shop_by_id,
     get_all_waves,
     create_wave,
     activate_wave,
@@ -345,12 +346,13 @@ async def _render_shops_picker(message_or_cb, state: FSMContext, page: int = 1):
     )
 
     buttons = []
-    for s in page_shops:
+    for idx_in_page, s in enumerate(page_shops):
+        global_idx = start_idx + idx_in_page
         is_sel = s in selected_shops
         mark = "✅ " if is_sel else "⬜️ "
         # Обрізаємо для компактності назви на кнопці
         btn_text = f"{mark}{s[:24]}"
-        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_att_tgl_shop:{s}")])
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_att_tgl_sh:{global_idx}")])
 
     # Пагінація
     nav_row = []
@@ -381,7 +383,14 @@ async def _render_shops_picker(message_or_cb, state: FSMContext, page: int = 1):
 
 
 async def dev_att_toggle_shop_handler(callback: CallbackQuery, state: FSMContext):
-    shop_name = callback.data.split(":", 1)[1]
+    all_shops = await get_all_system_shops()
+    try:
+        shop_idx = int(callback.data.split(":", 1)[1])
+        shop_name = all_shops[shop_idx]
+    except (IndexError, ValueError):
+        await callback.answer("Помилка вибору магазину", show_alert=True)
+        return
+
     data = await state.get_data()
     selected_shops = set(data.get("selected_shops", []))
 
@@ -391,14 +400,7 @@ async def dev_att_toggle_shop_handler(callback: CallbackQuery, state: FSMContext
         selected_shops.add(shop_name)
 
     await state.update_data(selected_shops=list(selected_shops))
-    # Визначаємо поточну сторінку
-    all_shops = await get_all_system_shops()
-    try:
-        idx = all_shops.index(shop_name)
-        page = (idx // 6) + 1
-    except Exception:
-        page = 1
-
+    page = (shop_idx // 6) + 1
     await _render_shops_picker(callback, state, page=page)
 
 
@@ -677,10 +679,11 @@ async def dev_att_active_wave_handler(callback: CallbackQuery):
     buttons = []
     # Сортуємо магазини
     for s in shop_stats:
+        sh_id = s.get("shop_id", 0)
         sh_name = s["shop_name"]
         icon = "✅" if s["completed"] == s["total_participants"] and s["total_participants"] > 0 else "⏳"
         label = f"{icon} {sh_name[:20]} ({s['completed']}/{s['total_participants']} — {s['avg_score_pct']}%)"
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"dev_att_shop:{wave_id}:{sh_name}")])
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"dev_att_sh_dt:{sh_id}")])
 
     buttons.append([InlineKeyboardButton(text="📊 Вивантажити звіт XLSX", callback_data=f"dev_att_export_xlsx:{wave_id}")])
     if wave.get("status") == "active":
@@ -695,8 +698,14 @@ async def dev_att_shop_details_handler(callback: CallbackQuery):
     if not await _check_admin(callback):
         return
 
-    _, wave_id_str, shop_name = callback.data.split(":", 2)
-    wave_id = int(wave_id_str)
+    wave_shop_id = int(callback.data.split(":", 1)[1])
+    wave_shop = await get_wave_shop_by_id(wave_shop_id)
+    if not wave_shop:
+        await callback.answer("Магазин не знайдено", show_alert=True)
+        return
+
+    wave_id = wave_shop["wave_id"]
+    shop_name = wave_shop["shop_name"]
 
     members = await get_shop_members_details(wave_id, shop_name)
     wave = await get_wave_by_id(wave_id)
@@ -729,7 +738,7 @@ async def dev_att_shop_details_handler(callback: CallbackQuery):
             else:
                 buttons.append([InlineKeyboardButton(
                     text=f"🔄 Дозволити перездачу: {m.get('full_name')[:18]}",
-                    callback_data=f"dev_att_retake:{wave_id}:{m['user_id']}:{shop_name}"
+                    callback_data=f"dev_att_rtk:{wave_shop_id}:{m['user_id']}"
                 )])
 
     buttons.append([InlineKeyboardButton(text="🔙 До списку магазинів", callback_data=f"dev_att_active_wave:{wave_id}")])
@@ -742,9 +751,16 @@ async def dev_att_grant_retake_handler(callback: CallbackQuery, bot: Bot):
     if not await _check_admin(callback):
         return
 
-    _, wave_id_str, user_id_str, shop_name = callback.data.split(":", 3)
-    wave_id = int(wave_id_str)
+    _, wave_shop_id_str, user_id_str = callback.data.split(":", 2)
+    wave_shop_id = int(wave_shop_id_str)
     user_id = int(user_id_str)
+
+    wave_shop = await get_wave_shop_by_id(wave_shop_id)
+    if not wave_shop:
+        await callback.answer("Магазин не знайдено", show_alert=True)
+        return
+
+    wave_id = wave_shop["wave_id"]
 
     success = await allow_user_retake(wave_id, user_id, callback.from_user.id)
     if success:
@@ -767,7 +783,7 @@ async def dev_att_grant_retake_handler(callback: CallbackQuery, bot: Bot):
             logger.warning(f"Не вдалося сповістити користувача {user_id} про перездачу: {e}")
 
         # Оновлюємо екран магазину
-        callback.data = f"dev_att_shop:{wave_id}:{shop_name}"
+        callback.data = f"dev_att_sh_dt:{wave_shop_id}"
         await dev_att_shop_details_handler(callback)
     else:
         await callback.answer("⚠️ Не вдалося надати дозвіл на перездачу.", show_alert=True)
@@ -852,7 +868,7 @@ def register_attestation_handlers(dp: Dispatcher):
     dp.message.register(att_process_wave_title, AttestationStates.create_wave_title)
 
     # Вибір магазинів
-    dp.callback_query.register(dev_att_toggle_shop_handler, lambda c: c.data and c.data.startswith("dev_att_tgl_shop:"))
+    dp.callback_query.register(dev_att_toggle_shop_handler, lambda c: c.data and c.data.startswith("dev_att_tgl_sh:"))
     dp.callback_query.register(dev_att_select_all_shops_handler, lambda c: c.data == "dev_att_sh_all")
     dp.callback_query.register(dev_att_clear_shops_handler, lambda c: c.data == "dev_att_sh_clear")
     dp.callback_query.register(dev_att_shops_page_handler, lambda c: c.data and c.data.startswith("dev_att_sh_p:"))
@@ -866,8 +882,8 @@ def register_attestation_handlers(dp: Dispatcher):
 
     # Моніторинг та звіти
     dp.callback_query.register(dev_att_active_wave_handler, lambda c: c.data and c.data.startswith("dev_att_active_wave"))
-    dp.callback_query.register(dev_att_shop_details_handler, lambda c: c.data and c.data.startswith("dev_att_shop:"))
-    dp.callback_query.register(dev_att_grant_retake_handler, lambda c: c.data and c.data.startswith("dev_att_retake:"))
+    dp.callback_query.register(dev_att_shop_details_handler, lambda c: c.data and c.data.startswith("dev_att_sh_dt:"))
+    dp.callback_query.register(dev_att_grant_retake_handler, lambda c: c.data and c.data.startswith("dev_att_rtk:"))
     dp.callback_query.register(dev_att_export_xlsx_handler, lambda c: c.data and c.data.startswith("dev_att_export_xlsx:"))
     dp.callback_query.register(dev_att_close_wave_handler, lambda c: c.data and c.data.startswith("dev_att_close:"))
     dp.callback_query.register(dev_att_history_handler, lambda c: c.data == "dev_att_history")
