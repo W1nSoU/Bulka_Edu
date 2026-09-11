@@ -140,10 +140,18 @@ async def create_recipients_for_event(event_id: int, role: str) -> int:
                     if not uid or uid in seen_user_ids or uid in excluded_user_ids:
                         continue
                     seen_user_ids.add(uid)
+                    mgr_shop = row['shops'] or 'Не вказано'
+                    if mgr_shop and mgr_shop.startswith('[') and mgr_shop.endswith(']'):
+                        try:
+                            parsed_s = json.loads(mgr_shop)
+                            if isinstance(parsed_s, list) and parsed_s:
+                                mgr_shop = parsed_s[0]
+                        except Exception:
+                            pass
                     recipients_data.append({
                         'user_id': uid,
                         'role_type': 'керівник',
-                        'shop': row['shops'] or 'Не вказано',
+                        'shop': mgr_shop,
                         'city': row['city'] or 'Не вказано'
                     })
     except Exception as e:
@@ -626,7 +634,7 @@ async def get_event_all_shop_users(event_id: int, shop: str) -> List[Dict[str, A
         async with db.execute(query, (event_id, shop)) as cursor:
             recipients = [dict(r) for r in await cursor.fetchall()]
 
-    # Збагачуємо ПІБ та username з users.db або managers.db
+    # Збагачуємо ПІБ та username з users.db, managers.db або hr_users
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         for rec in recipients:
@@ -636,8 +644,8 @@ async def get_event_all_shop_users(event_id: int, shop: str) -> List[Dict[str, A
             async with db.execute("SELECT full_name, username FROM users WHERE user_id = ?", (uid,)) as cursor:
                 u_row = await cursor.fetchone()
                 if u_row:
-                    full_name = u_row['full_name']
-                    username = u_row['username']
+                    full_name = (u_row['full_name'] or "").strip()
+                    username = (u_row['username'] or "").strip()
 
             if not full_name:
                 try:
@@ -646,12 +654,24 @@ async def get_event_all_shop_users(event_id: int, shop: str) -> List[Dict[str, A
                         async with m_db.execute("SELECT full_name, username FROM managers WHERE uid = ?", (uid,)) as m_cursor:
                             m_row = await m_cursor.fetchone()
                             if m_row:
-                                full_name = m_row['full_name']
-                                username = m_row['username']
+                                full_name = (m_row['full_name'] or "").strip()
+                                if not username:
+                                    username = (m_row['username'] or "").strip()
                 except Exception:
                     pass
 
-            rec['full_name'] = full_name or f"Користувач ID {uid}"
+            if not full_name:
+                try:
+                    async with db.execute("SELECT full_name, username FROM hr_users WHERE user_id = ?", (uid,)) as hr_cursor:
+                        hr_row = await hr_cursor.fetchone()
+                        if hr_row:
+                            full_name = (hr_row['full_name'] or "").strip()
+                            if not username:
+                                username = (hr_row['username'] or "").strip()
+                except Exception:
+                    pass
+
+            rec['full_name'] = full_name or (f"@{username}" if username else f"ID {uid}")
             rec['username'] = username or ""
 
     return recipients

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import sys
+import re
 import json
 import aiosqlite
 import html
@@ -6174,8 +6175,8 @@ async def developer_ack_shop_users_view(callback: CallbackQuery):
             others.append(u)
 
     def _format_user_line(u: Dict[str, Any]) -> str:
-        name = u.get('full_name', f"ID {u['user_id']}")
-        uname = f" (@{u['username']})" if u.get('username') else ""
+        name = u.get('full_name') or (f"@{u['username']}" if u.get('username') else f"ID {u['user_id']}")
+        uname_part = f" (@{u['username']})" if u.get('username') and u.get('username') not in name else ""
         if u.get('acknowledged_at'):
             ack_raw = u['acknowledged_at']
             try:
@@ -6183,14 +6184,14 @@ async def developer_ack_shop_users_view(callback: CallbackQuery):
                 ack_str = dt_ack.strftime("%d.%m %H:%M")
             except Exception:
                 ack_str = ack_raw[:16]
-            late_str = " ⏳ <i>(після 72 год)</i>" if u.get('is_late') else ""
-            return f"• <b>{name}</b>{uname} — ✅ {ack_str}{late_str}"
+            late_str = " <i>(після 72 год)</i>" if u.get('is_late') else ""
+            return f"• {name}{uname_part} — ✅ {ack_str}{late_str}"
         else:
-            return f"• <b>{name}</b>{uname} — ❌ <i>Не ознайомився</i>"
+            return f"• {name}{uname_part} — ❌"
 
     lines = [
-        f"🏪 <b>Магазин: {shop_name}</b>",
-        f"📚 Посада: <b>{event['role']}</b> | 📅 День: <b>{event['day']}</b>",
+        f"🏪 <b>{shop_name}</b>",
+        f"Посада: <b>{event['role']}</b> (День {event['day']})",
         "───────────────────",
         "👔 <b>Керівник:</b>"
     ]
@@ -6198,31 +6199,31 @@ async def developer_ack_shop_users_view(callback: CallbackQuery):
         for u in kerivnyky:
             lines.append(_format_user_line(u))
     else:
-        lines.append("<i>Не призначено</i>")
+        lines.append("• <i>Не призначено</i>")
 
     lines.append("\n👷 <b>Працівники:</b>")
     if pracivnyky:
         for u in pracivnyky:
             lines.append(_format_user_line(u))
     else:
-        lines.append("<i>Немає працівників</i>")
+        lines.append("• <i>Відсутні</i>")
 
     lines.append("\n🎓 <b>Стажери:</b>")
     if stazhery:
         for u in stazhery:
             lines.append(_format_user_line(u))
     else:
-        lines.append("<i>Немає стажерів</i>")
+        lines.append("• <i>Відсутні</i>")
 
     if others:
-        lines.append("\n🗺 <b>Інші (територіали тощо):</b>")
+        lines.append("\n🗺 <b>Інші (територіали):</b>")
         for u in others:
             lines.append(_format_user_line(u))
 
     ack_total = sum(1 for u in users if u.get('acknowledged_at'))
     unack_total = len(users) - ack_total
     lines.append("───────────────────")
-    lines.append(f"👥 Всього: <b>{len(users)}</b> | ✅ Ознайомились: <b>{ack_total}</b> | ❌ Не ознайомились: <b>{unack_total}</b>")
+    lines.append(f"Всього: <b>{len(users)}</b> | ✅ <b>{ack_total}</b> | ❌ <b>{unack_total}</b>")
 
     text = "\n".join(lines)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -6297,6 +6298,7 @@ async def developer_ack_export_xlsx_callback(callback: CallbackQuery):
 
     await callback.answer("⏳ Формування XLSX-звіту...", show_alert=False)
 
+    logger = get_logger()
     from database.material_notifications import get_event_by_id
     from bot.services.material_ack_excel import generate_material_ack_xlsx
     from aiogram.types import BufferedInputFile
