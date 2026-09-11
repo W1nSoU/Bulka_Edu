@@ -509,3 +509,149 @@ async def prune_old_material_events(days: int = 90) -> int:
         )
         await db.commit()
         return max(0, deleted_count)
+
+
+async def get_all_material_events(days_limit: int = 90) -> List[Dict[str, Any]]:
+    """
+    Повертає список усіх подій за останні days_limit днів, відсортованих за created_at DESC.
+    """
+    async with aiosqlite.connect(NOTIFICATIONS_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        query = '''
+        SELECT id, role, day, content_type, description, pages_json, created_at, status
+        FROM material_change_events
+        WHERE created_at >= datetime('now', ?)
+        ORDER BY created_at DESC
+        '''
+        async with db.execute(query, (f"-{days_limit} days",)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+
+async def get_event_overall_stats(event_id: int) -> Dict[str, Any]:
+    """
+    Рахує загальну статистику події (по всіх ролях разом):
+    - total
+    - acknowledged_count
+    - acknowledged_late_count
+    - unacknowledged_count
+    - ack_percent
+    - unack_percent
+    """
+    async with aiosqlite.connect(NOTIFICATIONS_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT COUNT(*) FROM material_change_recipients WHERE event_id = ?",
+            (event_id,)
+        ) as cursor:
+            total = (await cursor.fetchone())[0]
+
+        async with db.execute(
+            "SELECT COUNT(*) FROM material_change_recipients WHERE event_id = ? AND acknowledged_at IS NOT NULL",
+            (event_id,)
+        ) as cursor:
+            ack_count = (await cursor.fetchone())[0]
+
+        async with db.execute(
+            "SELECT COUNT(*) FROM material_change_recipients WHERE event_id = ? AND acknowledged_at IS NOT NULL AND is_late = 1",
+            (event_id,)
+        ) as cursor:
+            ack_late_count = (await cursor.fetchone())[0]
+
+        unack_count = max(0, total - ack_count)
+        return {
+            'total': total,
+            'acknowledged_count': ack_count,
+            'acknowledged_late_count': ack_late_count,
+            'unacknowledged_count': unack_count,
+            'ack_percent': round((ack_count / total * 100), 1) if total > 0 else 0.0,
+            'unack_percent': round((unack_count / total * 100), 1) if total > 0 else 0.0
+        }
+
+
+async def get_event_shops_summary(event_id: int) -> List[Dict[str, Any]]:
+    """
+    Повертає список унікальних магазинів для події із загальною кількістю отримувачів
+    та кількістю тих, хто ознайомився:
+    [{'shop': 'b-12', 'total_count': 4, 'ack_count': 3}, ...]
+    """
+    query = '''
+    SELECT 
+        shop,
+        COUNT(*) as total_count,
+        SUM(CASE WHEN acknowledged_at IS NOT NULL THEN 1 ELSE 0 END) as ack_count
+    FROM material_change_recipients
+    WHERE event_id = ?
+    GROUP BY shop
+    ORDER BY 
+        CASE 
+            WHEN shop LIKE 'Всі магазини%' THEN 1
+            ELSE 0
+        END ASC,
+        shop ASC
+    '''
+    async with aiosqlite.connect(NOTIFICATIONS_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(query, (event_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+
+async def get_event_all_shop_users(event_id: int, shop: str) -> List[Dict[str, Any]]:
+    """
+    Повертає всіх отримувачів зазначеного магазину для події,
+    збагачених ПІБ та username, відсортованих:
+    1) Керівники
+    2) Працівники
+    3) Стажери
+    4) Територіали / інші
+    """
+    async with aiosqlite.connect(NOTIFICATIONS_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        query = '''
+        SELECT id, user_id, role_type, shop, city, sent_at, acknowledged_at, is_late
+        FROM material_change_recipients
+        WHERE event_id = ? AND shop = ?
+        ORDER BY 
+            CASE LOWER(role_type)
+                WHEN 'керівник' THEN 1
+                WHEN 'працівник' THEN 2
+                WHEN 'стажер' THEN 3
+                WHEN 'територіал' THEN 4
+                ELSE 5
+            END ASC,
+            acknowledged_at DESC,
+            id ASC
+        '''
+        async with db.execute(query, (event_id, shop)) as cursor:
+            recipients = [dict(r) for r in await cursor.fetchall()]
+
+    # Збагачуємо ПІБ та username з users.db або managers.db
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        for rec in recipients:
+            uid = rec['user_id']
+            full_name = None
+            username = None
+            async with db.execute("SELECT full_name, username FROM users WHERE user_id = ?", (uid,)) as cursor:
+                u_row = await cursor.fetchone()
+                if u_row:
+                    full_name = u_row['full_name']
+                    username = u_row['username']
+
+            if not full_name:
+                try:
+                    async with aiosqlite.connect(MANAGERS_DB_PATH) as m_db:
+                        m_db.row_factory = aiosqlite.Row
+                        async with m_db.execute("SELECT full_name, username FROM managers WHERE uid = ?", (uid,)) as m_cursor:
+                            m_row = await m_cursor.fetchone()
+                            if m_row:
+                                full_name = m_row['full_name']
+                                username = m_row['username']
+                except Exception:
+                    pass
+
+            rec['full_name'] = full_name or f"Користувач ID {uid}"
+            rec['username'] = username or ""
+
+    return recipients

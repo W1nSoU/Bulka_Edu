@@ -5967,56 +5967,34 @@ async def process_notify_message(message: Message, state: FSMContext):
 # ==================== Material Acknowledgment Analytics ====================
 
 async def developer_ack_analytics_menu(callback: CallbackQuery):
-    """Головне меню аналітики ознайомлення — вибір категорії."""
+    """Головне меню аналітики ознайомлення — одразу відкриває список дат оновлень матеріалів."""
+    await developer_ack_events_list_view(callback, page=0)
+
+
+async def developer_ack_events_list_view(callback: CallbackQuery, page: int = 0):
+    """Список дат змін навчальних матеріалів з пагінацією."""
     if not await _ensure_developer(callback, allow_observer=True):
         return
 
-    text = (
-        "📋 <b>Аналітика ознайомлення з матеріалами</b>\n"
-        "───────────────────\n"
-        "Оберіть категорію співробітників для перегляду звітів про ознайомлення зі змінами:"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👔 Керівники", callback_data="dev_ack_cat:керівник")],
-        [InlineKeyboardButton(text="🗺 Територіали", callback_data="dev_ack_cat:територіал")],
-        [InlineKeyboardButton(text="👷 Працівники", callback_data="dev_ack_cat:працівник")],
-        [InlineKeyboardButton(text="🎓 Стажери", callback_data="dev_ack_cat:стажер")],
-        [InlineKeyboardButton(text="⬅️ Назад до аналітики", callback_data="dev_main_analyt")]
-    ])
-    await _edit_or_answer(callback.message, text, reply_markup=kb)
-    await callback.answer()
+    # Якщо викликано з callback_data виду dev_ack_events_list:{page}
+    if callback.data and callback.data.startswith("dev_ack_events_list:"):
+        try:
+            page = int(callback.data.split(":")[1])
+        except (IndexError, ValueError):
+            page = 0
 
-
-async def developer_ack_category_events_view(callback: CallbackQuery):
-    """Список дат змін навчальних матеріалів для обраної категорії з пагінацією."""
-    if not await _ensure_developer(callback, allow_observer=True):
-        return
-
-    # Callback formats: dev_ack_cat:{cat} or dev_ack_cat_pg:{cat}:{page}
-    parts = callback.data.split(":")
-    category = parts[1]
-    page = int(parts[2]) if len(parts) > 2 else 0
-
-    from database.material_notifications import get_events_for_category, prune_old_material_events
+    from database.material_notifications import get_all_material_events, prune_old_material_events
     await prune_old_material_events(days=90)
-    events = await get_events_for_category(category, days_limit=90)
-
-    cat_titles = {
-        "керівник": "👔 Керівники",
-        "територіал": "🗺 Територіали",
-        "працівник": "👷 Працівники",
-        "стажер": "🎓 Стажери"
-    }
-    cat_title = cat_titles.get(category.lower(), category.title())
+    events = await get_all_material_events(days_limit=90)
 
     if not events:
         text = (
-            f"📋 <b>Аналітика ознайомлення — {cat_title}</b>\n"
-            f"───────────────────\n\n"
-            f"<i>За останні 90 днів оновлень матеріалів для цієї категорії не знайдено.</i>"
+            "📋 <b>Аналітика ознайомлення з матеріалами</b>\n"
+            "───────────────────\n\n"
+            "<i>За останні 90 днів оновлень матеріалів не знайдено.</i>"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_an_ack_menu")]
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_analyt")]
         ])
         await _edit_or_answer(callback.message, text, reply_markup=kb)
         await callback.answer()
@@ -6041,230 +6019,311 @@ async def developer_ack_category_events_view(callback: CallbackQuery):
         btn_text = f"📅 {dt_formatted} — {ev['role']} (День {ev['day']})"
         buttons.append([InlineKeyboardButton(
             text=btn_text,
-            callback_data=f"dev_ack_ev:{ev['id']}:{category}"
+            callback_data=f"dev_ack_ev:{ev['id']}:0"
         )])
 
     # Рядок пагінації якщо подій більше ніж 6
     if pages_total > 1:
         nav_row = []
         if page > 0:
-            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_ack_cat_pg:{category}:{page - 1}"))
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_ack_events_list:{page - 1}"))
         nav_row.append(InlineKeyboardButton(text=f"📄 {page + 1}/{pages_total}", callback_data="ignore"))
         if page < pages_total - 1:
-            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_ack_cat_pg:{category}:{page + 1}"))
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_ack_events_list:{page + 1}"))
         buttons.append(nav_row)
 
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_an_ack_menu")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_analyt")])
 
     text = (
-        f"📋 <b>Аналітика ознайомлення — {cat_title}</b>\n"
-        f"───────────────────\n"
-        f"Оберіть дату та подію зміни матеріалу для перегляду звіту:"
+        "📋 <b>Аналітика ознайомлення з матеріалами</b>\n"
+        "───────────────────\n"
+        "Оберіть дату та подію зміни матеріалу для перегляду звіту:"
     )
     await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 
 async def developer_ack_event_card_view(callback: CallbackQuery):
-    """Картка події: перевірка 75h порогу (таймер або повний звіт)."""
+    """Картка події: загальний прогрес, інлайни магазинів, кнопки дій."""
     if not await _ensure_developer(callback, allow_observer=True):
         return
 
-    # Format: dev_ack_ev:{event_id}:{category}
+    # Format: dev_ack_ev:{event_id}:{page}
     parts = callback.data.split(":")
     event_id = int(parts[1])
-    category = parts[2]
+    page = int(parts[2]) if len(parts) > 2 else 0
 
-    from database.material_notifications import get_event_by_id, get_event_analytics_for_category
+    from database.material_notifications import (
+        get_event_by_id,
+        get_event_overall_stats,
+        get_event_shops_summary
+    )
     event = await get_event_by_id(event_id)
     if not event:
         await callback.answer("Подію не знайдено.", show_alert=True)
         return
 
-    stats = await get_event_analytics_for_category(event_id, category)
-
-    cat_titles = {
-        "керівник": "👔 Керівники",
-        "територіал": "🗺 Територіали",
-        "працівник": "👷 Працівники",
-        "стажер": "🎓 Стажери"
-    }
-    cat_title = cat_titles.get(category.lower(), category.title())
+    overall_stats = await get_event_overall_stats(event_id)
+    shops_summary = await get_event_shops_summary(event_id)
 
     created_str = event.get('created_at', '')
     try:
         dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
         dt_formatted = dt.strftime("%d.%m.%Y %H:%M")
     except Exception:
-        try:
-            dt = datetime.strptime(created_str, "%Y-%m-%d %H:%M:%S")
-            dt_formatted = dt.strftime("%d.%m.%Y %H:%M")
-        except Exception:
-            dt = datetime.utcnow()
-            dt_formatted = created_str
+        dt_formatted = created_str[:16]
 
-    time_passed = datetime.utcnow() - dt
-    threshold_seconds = 75 * 3600
-
-    # Перевірка 75-годинного порогу
-    if time_passed.total_seconds() < threshold_seconds:
-        rem_sec = int(threshold_seconds - time_passed.total_seconds())
-        rem_hours = rem_sec // 3600
-        rem_mins = (rem_sec % 3600) // 60
-
-        text = (
-            f"⏳ <b>Аналітика ознайомлення (Формування звіту)</b>\n"
-            f"───────────────────\n"
-            f"📚 Посада: <b>{event['role']}</b> | 📅 День: <b>{event['day']}</b>\n"
-            f"📝 Зміна: <b>{event.get('description', '')}</b>\n"
-            f"🕒 Створено: <b>{dt_formatted}</b>\n\n"
-            f"👥 Категорія: <b>{cat_title}</b>\n"
-            f"• Всього отримувачів: <b>{stats['total']}</b>\n"
-            f"• Вже ознайомились: <b>{stats['acknowledged_count']}</b> ({stats['ack_percent']}%)\n\n"
-            f"⚠️ <i>Аналітика формується лише через 75 годин після повідомлення про зміни.</i>\n\n"
-            f"⏳ <b>До повного формування звіту залишилось:</b> {rem_hours} год {rem_mins} хв."
-        )
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Оновити статус", callback_data=f"dev_ack_ev:{event_id}:{category}")],
-            [InlineKeyboardButton(text="⬅️ Назад до дат", callback_data=f"dev_ack_cat:{category}")]
-        ])
+    desc = event.get('description', '') or 'не вказано'
+    if len(desc) > 120:
+        desc_preview = desc[:117] + "..."
     else:
-        text = (
-            f"📊 <b>Аналітика ознайомлення</b>\n"
-            f"───────────────────\n"
-            f"📚 Посада: <b>{event['role']}</b> | 📅 День: <b>{event['day']}</b>\n"
-            f"📝 Зміна: <b>{event.get('description', '')}</b>\n"
-            f"🕒 Дата розсилки: <b>{dt_formatted}</b>\n\n"
-            f"👥 Категорія: <b>{cat_title}</b>\n"
-            f"• Всього в категорії: <b>{stats['total']}</b> осіб\n"
-            f"• ✅ <b>Ознайомились:</b> {stats['acknowledged_count']} ({stats['ack_percent']}%)\n"
-            f"  └ ⏳ з них із запізненням (>72 год): <b>{stats['acknowledged_late_count']}</b>\n"
-            f"• ❌ <b>Не ознайомились:</b> {stats['unacknowledged_count']} ({stats['unack_percent']}%)\n"
-            f"───────────────────\n"
-            f"Оберіть групу для перегляду списку по магазинах:"
-        )
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"✅ Ознайомились ({stats['acknowledged_count']})", callback_data=f"dev_ack_shops:{event_id}:{category}:ack:0")],
-            [InlineKeyboardButton(text=f"❌ Не ознайомились ({stats['unacknowledged_count']})", callback_data=f"dev_ack_shops:{event_id}:{category}:noack:0")],
-            [InlineKeyboardButton(text="⬅️ Назад до дат", callback_data=f"dev_ack_cat:{category}")]
-        ])
+        desc_preview = desc
 
-    await _edit_or_answer(callback.message, text, reply_markup=kb)
-    await callback.answer()
+    text = (
+        f"📋 <b>Аналітика ознайомлення</b>\n"
+        f"───────────────────\n"
+        f"📚 Посада: <b>{event['role']}</b> | 📅 День: <b>{event['day']}</b>\n"
+        f"📝 Зміна: <i>{desc_preview}</i>\n"
+        f"🕒 Дата розсилки: <b>{dt_formatted}</b>\n\n"
+        f"📊 <b>Загальний прогрес:</b>\n"
+        f"• Всього в розсилці: <b>{overall_stats['total']}</b> осіб\n"
+        f"• ✅ <b>Ознайомились:</b> {overall_stats['acknowledged_count']} ({overall_stats['ack_percent']}%)\n"
+        f"  └ ⏳ з них із запізненням (>72 год): <b>{overall_stats['acknowledged_late_count']}</b>\n"
+        f"• ❌ <b>Не ознайомились:</b> {overall_stats['unacknowledged_count']} ({overall_stats['unack_percent']}%)\n"
+        f"───────────────────\n"
+        f"Оберіть магазин для перегляду списку співробітників:"
+    )
 
+    buttons = [
+        [InlineKeyboardButton(text="📝 Зміст змін", callback_data=f"dev_ack_changes:{event_id}:{page}")],
+        [InlineKeyboardButton(text="📥 Вивантажити результати (XLSX)", callback_data=f"dev_ack_export_xlsx:{event_id}")]
+    ]
 
-async def developer_ack_shops_list_view(callback: CallbackQuery):
-    """Список магазинів для обраної групи (ознайомлені/неознайомлені) з пагінацією."""
-    if not await _ensure_developer(callback, allow_observer=True):
-        return
-
-    # Format: dev_ack_shops:{event_id}:{category}:{status_key}:{page}
-    parts = callback.data.split(":")
-    event_id = int(parts[1])
-    category = parts[2]
-    status_key = parts[3]
-    page = int(parts[4]) if len(parts) > 4 else 0
-    is_ack = (status_key == "ack")
-
-    from database.material_notifications import get_event_shop_breakdown
-    shops = await get_event_shop_breakdown(event_id, category, is_ack)
-
-    status_title = "✅ Ознайомлені" if is_ack else "❌ Не ознайомлені"
-
-    if not shops:
-        text = f"📋 <b>{status_title} по магазинах</b>\n\n<i>Користувачів у цій групі не знайдено.</i>"
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_ack_ev:{event_id}:{category}")]
-        ])
-        await _edit_or_answer(callback.message, text, reply_markup=kb)
-        await callback.answer()
-        return
-
-    PER_PAGE = 6
-    pages_total = max(1, (len(shops) + PER_PAGE - 1) // PER_PAGE)
+    # Інлайн-кнопки магазинів з пагінацією
+    SHOPS_PER_PAGE = 6
+    pages_total = max(1, (len(shops_summary) + SHOPS_PER_PAGE - 1) // SHOPS_PER_PAGE)
     page = max(0, min(page, pages_total - 1))
-    
-    start_idx = page * PER_PAGE
-    paginated_shops = shops[start_idx:start_idx + PER_PAGE]
 
-    buttons = []
-    for s in paginated_shops:
+    start_idx = page * SHOPS_PER_PAGE
+    paginated_shops = shops_summary[start_idx:start_idx + SHOPS_PER_PAGE]
+
+    for idx_offset, s in enumerate(paginated_shops):
+        actual_shop_idx = start_idx + idx_offset
         shop_name = s['shop']
-        btn_text = f"🏪 {shop_name} ({s['user_count']} чол.)"
+        btn_text = f"🏪 {shop_name} (✅ {s['ack_count']}/{s['total_count']})"
         buttons.append([InlineKeyboardButton(
             text=btn_text,
-            callback_data=f"dev_ack_shop_u:{event_id}:{category}:{status_key}:{shop_name[:30]}"
+            callback_data=f"dev_ack_shop:{event_id}:{actual_shop_idx}:{page}"
         )])
 
     if pages_total > 1:
         nav_row = []
         if page > 0:
-            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_ack_shops:{event_id}:{category}:{status_key}:{page - 1}"))
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_ack_ev:{event_id}:{page - 1}"))
         nav_row.append(InlineKeyboardButton(text=f"📄 {page + 1}/{pages_total}", callback_data="ignore"))
         if page < pages_total - 1:
-            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_ack_shops:{event_id}:{category}:{status_key}:{page + 1}"))
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_ack_ev:{event_id}:{page + 1}"))
         buttons.append(nav_row)
 
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_ack_ev:{event_id}:{category}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_an_ack_menu")])
 
-    text = (
-        f"📋 <b>{status_title} — Список магазинів</b>\n"
-        f"───────────────────\n"
-        f"Оберіть магазин для перегляду співробітників:"
-    )
     await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 
 async def developer_ack_shop_users_view(callback: CallbackQuery):
-    """Детальний список співробітників конкретного магазину."""
+    """Детальний список співробітників конкретного магазину (керівник, працівники, стажери)."""
     if not await _ensure_developer(callback, allow_observer=True):
         return
 
-    # Format: dev_ack_shop_u:{event_id}:{category}:{status_key}:{shop}
-    parts = callback.data.split(":", 4)
+    # Format: dev_ack_shop:{event_id}:{shop_idx}:{page}
+    parts = callback.data.split(":")
     event_id = int(parts[1])
-    category = parts[2]
-    status_key = parts[3]
-    shop = parts[4]
-    is_ack = (status_key == "ack")
+    shop_idx = int(parts[2])
+    page = int(parts[3]) if len(parts) > 3 else 0
 
-    from database.material_notifications import get_event_shop_users
-    users = await get_event_shop_users(event_id, category, is_ack, shop)
+    from database.material_notifications import (
+        get_event_by_id,
+        get_event_shops_summary,
+        get_event_all_shop_users
+    )
+    event = await get_event_by_id(event_id)
+    shops_summary = await get_event_shops_summary(event_id)
+    if not event or shop_idx >= len(shops_summary):
+        await callback.answer("Дані не знайдено.", show_alert=True)
+        return
 
-    status_title = "✅ Ознайомлені" if is_ack else "❌ Не ознайомлені"
+    shop_name = shops_summary[shop_idx]['shop']
+    users = await get_event_all_shop_users(event_id, shop_name)
+
+    # Групуємо користувачів
+    kerivnyky = []
+    pracivnyky = []
+    stazhery = []
+    others = []
+
+    for u in users:
+        rt = (u.get('role_type') or '').lower()
+        if rt == 'керівник':
+            kerivnyky.append(u)
+        elif rt == 'працівник':
+            pracivnyky.append(u)
+        elif rt == 'стажер':
+            stazhery.append(u)
+        else:
+            others.append(u)
+
+    def _format_user_line(u: Dict[str, Any]) -> str:
+        name = u.get('full_name', f"ID {u['user_id']}")
+        uname = f" (@{u['username']})" if u.get('username') else ""
+        if u.get('acknowledged_at'):
+            ack_raw = u['acknowledged_at']
+            try:
+                dt_ack = datetime.fromisoformat(ack_raw.replace("Z", "+00:00"))
+                ack_str = dt_ack.strftime("%d.%m %H:%M")
+            except Exception:
+                ack_str = ack_raw[:16]
+            late_str = " ⏳ <i>(після 72 год)</i>" if u.get('is_late') else ""
+            return f"• <b>{name}</b>{uname} — ✅ {ack_str}{late_str}"
+        else:
+            return f"• <b>{name}</b>{uname} — ❌ <i>Не ознайомився</i>"
 
     lines = [
-        f"🏪 <b>Магазин:</b> {shop}",
-        f"📋 <b>Статус:</b> {status_title}",
-        f"👥 <b>Кількість:</b> {len(users)} чол.",
-        "───────────────────"
+        f"🏪 <b>Магазин: {shop_name}</b>",
+        f"📚 Посада: <b>{event['role']}</b> | 📅 День: <b>{event['day']}</b>",
+        "───────────────────",
+        "👔 <b>Керівник:</b>"
     ]
-
-    if not users:
-        lines.append("<i>Список порожній.</i>")
+    if kerivnyky:
+        for u in kerivnyky:
+            lines.append(_format_user_line(u))
     else:
-        for idx, u in enumerate(users, 1):
-            name = u['full_name']
-            username_str = f" (@{u['username']})" if u.get('username') else ""
-            if is_ack:
-                ack_str = u.get('acknowledged_at', '')
-                try:
-                    dt = datetime.fromisoformat(ack_str.replace("Z", "+00:00"))
-                    dt_fmt = dt.strftime("%d.%m %H:%M")
-                except Exception:
-                    dt_fmt = ack_str[:16]
-                late_badge = " ⏳ <i>(після 72 год)</i>" if u.get('is_late') else ""
-                lines.append(f"{idx}. <b>{name}</b>{username_str} — {dt_fmt}{late_badge}")
-            else:
-                lines.append(f"{idx}. <b>{name}</b>{username_str} — ❌ <i>Не ознайомився (>72 год)</i>")
+        lines.append("<i>Не призначено</i>")
+
+    lines.append("\n👷 <b>Працівники:</b>")
+    if pracivnyky:
+        for u in pracivnyky:
+            lines.append(_format_user_line(u))
+    else:
+        lines.append("<i>Немає працівників</i>")
+
+    lines.append("\n🎓 <b>Стажери:</b>")
+    if stazhery:
+        for u in stazhery:
+            lines.append(_format_user_line(u))
+    else:
+        lines.append("<i>Немає стажерів</i>")
+
+    if others:
+        lines.append("\n🗺 <b>Інші (територіали тощо):</b>")
+        for u in others:
+            lines.append(_format_user_line(u))
+
+    ack_total = sum(1 for u in users if u.get('acknowledged_at'))
+    unack_total = len(users) - ack_total
+    lines.append("───────────────────")
+    lines.append(f"👥 Всього: <b>{len(users)}</b> | ✅ Ознайомились: <b>{ack_total}</b> | ❌ Не ознайомились: <b>{unack_total}</b>")
 
     text = "\n".join(lines)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад до магазинів", callback_data=f"dev_ack_shops:{event_id}:{category}:{status_key}:0")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_ack_ev:{event_id}:{page}")]
     ])
     await _edit_or_answer(callback.message, text, reply_markup=kb)
     await callback.answer()
+
+
+async def developer_ack_changes_view(callback: CallbackQuery):
+    """Відображення опису та змісту змінених матеріалів."""
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+
+    # Format: dev_ack_changes:{event_id}:{page}
+    parts = callback.data.split(":")
+    event_id = int(parts[1])
+    page = int(parts[2]) if len(parts) > 2 else 0
+
+    from database.material_notifications import get_event_by_id
+    event = await get_event_by_id(event_id)
+    if not event:
+        await callback.answer("Подію не знайдено.", show_alert=True)
+        return
+
+    created_str = event.get('created_at', '')
+    try:
+        dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+        dt_formatted = dt.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        dt_formatted = created_str[:16]
+
+    pages = []
+    try:
+        pages = json.loads(event.get('pages_json', '[]'))
+    except Exception:
+        pass
+
+    lines = [
+        "📝 <b>Зміст оновлення матеріалу</b>",
+        "───────────────────",
+        f"📚 Посада: <b>{event['role']}</b> | 📅 День: <b>{event['day']}</b>",
+        f"🕒 Дата оновлення: <b>{dt_formatted}</b>",
+        "───────────────────",
+        f"<b>Короткий опис:</b>\n{event.get('description', '') or 'Не вказано'}\n"
+    ]
+
+    if pages:
+        lines.append("<b>Матеріали:</b>")
+        for p_idx, p_text in enumerate(pages, 1):
+            lines.append(f"\n📄 <i>Сторінка {p_idx}:</i>\n{p_text}")
+
+    full_text = "\n".join(lines)
+    if len(full_text) > 4000:
+        full_text = full_text[:3950] + "\n\n<i>[Текст скорочено через обмеження Telegram]</i>"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_ack_ev:{event_id}:{page}")]
+    ])
+    await _edit_or_answer(callback.message, full_text, reply_markup=kb)
+    await callback.answer()
+
+
+async def developer_ack_export_xlsx_callback(callback: CallbackQuery):
+    """Генерує та відправляє XLSX звіт по події ознайомлення."""
+    if not await _ensure_developer(callback, allow_observer=True):
+        return
+
+    # Format: dev_ack_export_xlsx:{event_id}
+    parts = callback.data.split(":")
+    event_id = int(parts[1])
+
+    await callback.answer("⏳ Формування XLSX-звіту...", show_alert=False)
+
+    from database.material_notifications import get_event_by_id
+    from bot.services.material_ack_excel import generate_material_ack_xlsx
+    from aiogram.types import BufferedInputFile
+
+    event = await get_event_by_id(event_id)
+    if not event:
+        await callback.answer("Подію не знайдено.", show_alert=True)
+        return
+
+    try:
+        excel_buf = await generate_material_ack_xlsx(event_id)
+        role_clean = re.sub(r'[^\w\-]', '_', event['role'])
+        date_str = datetime.now().strftime("%Y%m%d")
+        filename = f"oznayomlennya_{role_clean}_day_{event['day']}_{date_str}.xlsx"
+
+        doc = BufferedInputFile(excel_buf.getvalue(), filename=filename)
+        await callback.message.answer_document(
+            document=doc,
+            caption=(
+                f"📊 <b>Звіт про ознайомлення з матеріалами</b>\n"
+                f"📚 Посада: <b>{event['role']}</b> | 📅 День: <b>{event['day']}</b>\n"
+                f"🏪 Окремі аркуші по кожному магазину + Зведений звіт."
+            )
+        )
+    except Exception as e:
+        logger.exception(f"Помилка експорту XLSX для події {event_id}: {e}")
+        await callback.message.answer(f"❌ Не вдалося згенерувати XLSX: {e}")
 
 
 # ==================== Tokens Management ====================
@@ -8917,10 +8976,11 @@ def register_developer_menu_handlers(dp: Dispatcher):
 
     # Material Acknowledgment Analytics (Point 8)
     dp.callback_query.register(developer_ack_analytics_menu, lambda c: c.data == "dev_an_ack_menu")
-    dp.callback_query.register(developer_ack_category_events_view, lambda c: c.data and (c.data.startswith("dev_ack_cat:") or c.data.startswith("dev_ack_cat_pg:")))
+    dp.callback_query.register(developer_ack_events_list_view, lambda c: c.data and c.data.startswith("dev_ack_events_list:"))
     dp.callback_query.register(developer_ack_event_card_view, lambda c: c.data and c.data.startswith("dev_ack_ev:"))
-    dp.callback_query.register(developer_ack_shops_list_view, lambda c: c.data and c.data.startswith("dev_ack_shops:"))
-    dp.callback_query.register(developer_ack_shop_users_view, lambda c: c.data and c.data.startswith("dev_ack_shop_u:"))
+    dp.callback_query.register(developer_ack_shop_users_view, lambda c: c.data and c.data.startswith("dev_ack_shop:"))
+    dp.callback_query.register(developer_ack_changes_view, lambda c: c.data and c.data.startswith("dev_ack_changes:"))
+    dp.callback_query.register(developer_ack_export_xlsx_callback, lambda c: c.data and c.data.startswith("dev_ack_export_xlsx:"))
 
     # Materials Editor
     dp.callback_query.register(developer_materials_menu, lambda c: c.data == "dev_materials_menu")
