@@ -378,11 +378,15 @@ async def get_wave_by_id(wave_id: int, db_path: str = DB_PATH) -> Optional[Dict[
             return wave_dict
 
 
-async def get_all_waves(db_path: str = DB_PATH) -> List[Dict[str, Any]]:
-    """Повертає всі хвилі від нових до старих."""
+async def get_all_waves(include_archived: bool = False, db_path: str = DB_PATH) -> List[Dict[str, Any]]:
+    """Повертає всі хвилі від нових до старих (за замовчуванням без заархівованих)."""
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM attestation_waves ORDER BY id DESC") as cursor:
+        if include_archived:
+            query = "SELECT * FROM attestation_waves ORDER BY id DESC"
+        else:
+            query = "SELECT * FROM attestation_waves WHERE status != 'archived' ORDER BY id DESC"
+        async with db.execute(query) as cursor:
             rows = await cursor.fetchall()
             waves = []
             for r in rows:
@@ -395,6 +399,194 @@ async def get_all_waves(db_path: str = DB_PATH) -> List[Dict[str, Any]]:
                     w["shops"] = [sr[0] for sr in s_rows]
                 waves.append(w)
             return waves
+
+
+async def get_archived_waves(db_path: str = DB_PATH) -> List[Dict[str, Any]]:
+    """Повертає заархівовані хвилі від нових до старих."""
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM attestation_waves WHERE status = 'archived' ORDER BY id DESC") as cursor:
+            rows = await cursor.fetchall()
+            waves = []
+            for r in rows:
+                w = dict(r)
+                async with db.execute(
+                    "SELECT shop_name FROM attestation_wave_shops WHERE wave_id = ?",
+                    (w["id"],)
+                ) as s_cursor:
+                    s_rows = await s_cursor.fetchall()
+                    w["shops"] = [sr[0] for sr in s_rows]
+                waves.append(w)
+            return waves
+
+
+async def archive_completed_waves(db_path: str = DB_PATH) -> int:
+    """Переводить усі завершені хвилі ('completed') у статус 'archived'."""
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute("UPDATE attestation_waves SET status = 'archived' WHERE status = 'completed'")
+        archived_count = cur.rowcount
+        await db.commit()
+        return archived_count
+
+
+async def delete_wave(wave_id: int, db_path: str = DB_PATH) -> bool:
+    """Безповоротно видаляє хвилю та всі пов'язані з нею спроби і магазини."""
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("DELETE FROM attestation_attempts WHERE wave_id = ?", (wave_id,))
+        await db.execute("DELETE FROM attestation_participants WHERE wave_id = ?", (wave_id,))
+        await db.execute("DELETE FROM attestation_wave_shops WHERE wave_id = ?", (wave_id,))
+        cur = await db.execute("DELETE FROM attestation_waves WHERE id = ?", (wave_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_comparative_attestation_analytics(db_path: str = DB_PATH) -> Dict[str, Any]:
+    """
+    Збирає агреговані історичні дані по всіх хвилях (крім draft) для побудови
+    порівняльного звіту з 3 аркушами: 'Загальне', 'Керівники', 'Працівники'.
+    """
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+
+        # 1. Завантажуємо всі хвилі в хронологічному порядку (від найстарішої до найновішої)
+        async with db.execute(
+            "SELECT * FROM attestation_waves WHERE status != 'draft' ORDER BY id ASC"
+        ) as w_cur:
+            w_rows = await w_cur.fetchall()
+            waves = [dict(r) for r in w_rows]
+
+        if not waves:
+            return {"waves": [], "shops": [], "data": {}, "network_summary": {}}
+
+        wave_ids = [w["id"] for w in waves]
+
+        # 2. Отримуємо всіх учасників та їхні фінальні спроби для кожної хвилі
+        placeholders = ",".join("?" for _ in wave_ids)
+        query = f'''
+        SELECT p.wave_id, p.user_id, p.full_name, p.role_name, p.shop_name, p.is_manager,
+               a.status AS attempt_status, a.score, a.max_score, a.score_pct, a.finished_at
+        FROM attestation_participants p
+        LEFT JOIN (
+            SELECT * FROM attestation_attempts
+            WHERE wave_id IN ({placeholders})
+            GROUP BY wave_id, user_id
+            HAVING id = MAX(id)
+        ) a ON p.wave_id = a.wave_id AND p.user_id = a.user_id
+        WHERE p.wave_id IN ({placeholders})
+        ORDER BY p.wave_id ASC, p.shop_name ASC
+        '''
+        # Параметри повторюються двічі: для підзапиту та для основного WHERE
+        params = tuple(wave_ids) * 2
+
+        async with db.execute(query, params) as cur:
+            records = [dict(r) for r in await cur.fetchall()]
+
+        # 3. Визначаємо всі унікальні магазини
+        shops_set = set()
+        for r in records:
+            if r.get("shop_name"):
+                shops_set.add(r["shop_name"].strip())
+
+        # Також додаємо магазини з attestation_wave_shops (на випадок якщо учасники ще не додались)
+        async with db.execute(
+            f"SELECT DISTINCT shop_name FROM attestation_wave_shops WHERE wave_id IN ({placeholders})",
+            tuple(wave_ids)
+        ) as s_cur:
+            for s_row in await s_cur.fetchall():
+                if s_row[0]:
+                    shops_set.add(s_row[0].strip())
+
+        sorted_shops = sorted(list(shops_set))
+
+        # 4. Агрегація даних по кожному магазину та по кожній хвилі
+        # Структура:
+        # per_shop[shop_name][wave_id] = {
+        #    "total_participants": int, "completed": int, "passed": int, "avg_score": float,
+        #    "manager": {"name": str, "score_pct": float, "status": str},
+        #    "staff": {"total": int, "completed": int, "passed": int, "avg_score": float}
+        # }
+        per_shop: Dict[str, Dict[int, Dict[str, Any]]] = {s: {} for s in sorted_shops}
+        network_per_wave: Dict[int, Dict[str, Any]] = {}
+
+        for w in waves:
+            w_id = w["id"]
+            network_per_wave[w_id] = {
+                "total_participants": 0,
+                "completed": 0,
+                "passed": 0,
+                "scores": []
+            }
+            for s in sorted_shops:
+                per_shop[s][w_id] = {
+                    "total_participants": 0,
+                    "completed": 0,
+                    "passed": 0,
+                    "scores": [],
+                    "manager": None,
+                    "staff_scores": [],
+                    "staff_completed": 0,
+                    "staff_passed": 0,
+                    "staff_total": 0
+                }
+
+        for r in records:
+            w_id = r["wave_id"]
+            s_name = (r.get("shop_name") or "").strip()
+            if not s_name or s_name not in per_shop:
+                continue
+
+            shop_wave = per_shop[s_name][w_id]
+            net_wave = network_per_wave[w_id]
+
+            shop_wave["total_participants"] += 1
+            net_wave["total_participants"] += 1
+
+            is_mgr = bool(r.get("is_manager"))
+            if is_mgr:
+                shop_wave["manager"] = {
+                    "name": r.get("full_name") or "Не вказано",
+                    "score_pct": r.get("score_pct"),
+                    "status": r.get("attempt_status")
+                }
+            else:
+                shop_wave["staff_total"] += 1
+
+            status = r.get("attempt_status")
+            if status in ("passed", "failed", "timeout") and r.get("score_pct") is not None:
+                pct = float(r["score_pct"])
+                shop_wave["completed"] += 1
+                shop_wave["scores"].append(pct)
+                net_wave["completed"] += 1
+                net_wave["scores"].append(pct)
+
+                if status == "passed":
+                    shop_wave["passed"] += 1
+                    net_wave["passed"] += 1
+
+                if not is_mgr:
+                    shop_wave["staff_completed"] += 1
+                    shop_wave["staff_scores"].append(pct)
+                    if status == "passed":
+                        shop_wave["staff_passed"] += 1
+
+        # Обчислюємо фінальні середні для магазинів та мережі
+        for s in sorted_shops:
+            for w in waves:
+                sw = per_shop[s][w["id"]]
+                sw["avg_score"] = round(sum(sw["scores"]) / len(sw["scores"]), 1) if sw["scores"] else None
+                sw["staff_avg"] = round(sum(sw["staff_scores"]) / len(sw["staff_scores"]), 1) if sw["staff_scores"] else None
+
+        for w in waves:
+            nw = network_per_wave[w["id"]]
+            nw["avg_score"] = round(sum(nw["scores"]) / len(nw["scores"]), 1) if nw["scores"] else None
+            nw["pass_rate"] = round(nw["passed"] / nw["completed"] * 100, 1) if nw["completed"] else 0.0
+
+        return {
+            "waves": waves,
+            "shops": sorted_shops,
+            "per_shop": per_shop,
+            "network_per_wave": network_per_wave
+        }
 
 
 # -------------------------------------------------------------

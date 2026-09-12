@@ -18,6 +18,10 @@ from database.attestation import (
     activate_wave,
     get_active_wave,
     get_wave_by_id,
+    get_all_waves,
+    get_archived_waves,
+    archive_completed_waves,
+    delete_wave,
     close_wave,
     add_participants_batch,
     get_wave_participants,
@@ -38,7 +42,8 @@ from database.attestation import (
 from bot.services.attestation_excel import (
     generate_attestation_template,
     parse_attestation_excel,
-    generate_attestation_results_xlsx
+    generate_attestation_results_xlsx,
+    generate_comparative_attestation_xlsx
 )
 from bot.menus.attestation import _collect_eligible_participants
 
@@ -513,6 +518,181 @@ class TestAttestationFlow(unittest.IsolatedAsyncioTestCase):
         # Рядок другого питання (помилкова відповідь)
         self.assertEqual(ws_mgr["E7"].value, "❌ Помилка")
         self.assertEqual(ws_mgr["F7"].value, 0)
+
+    async def test_wave_archiving_and_deletion(self):
+        # 1. Створюємо дві хвилі
+        w1_id = await create_wave(
+            title="Хвиля 1",
+            duration_minutes=15,
+            passing_score_pct=70,
+            deadline_date="2026-09-20 23:59:59",
+            shops=["Пекарня 1"],
+            created_by=1,
+            target_type="staff",
+            db_path=TEST_DB
+        )
+        w2_id = await create_wave(
+            title="Хвиля 2",
+            duration_minutes=15,
+            passing_score_pct=70,
+            deadline_date="2026-09-21 23:59:59",
+            shops=["Пекарня 2"],
+            created_by=1,
+            target_type="managers",
+            db_path=TEST_DB
+        )
+
+        # 2. Завершуємо хвилю 1
+        await close_wave(w1_id, db_path=TEST_DB)
+
+        # Перевіряємо що get_all_waves бачить обидві хвилі
+        waves_before = await get_all_waves(include_archived=False, db_path=TEST_DB)
+        wave_ids_before = [w["id"] for w in waves_before]
+        self.assertIn(w1_id, wave_ids_before)
+        self.assertIn(w2_id, wave_ids_before)
+
+        # 3. Архівуємо завершені хвилі
+        archived_count = await archive_completed_waves(db_path=TEST_DB)
+        self.assertGreaterEqual(archived_count, 1)
+
+        # 4. Перевіряємо: хвиля 1 зникла з активного списку історії, але є в архіві
+        waves_after = await get_all_waves(include_archived=False, db_path=TEST_DB)
+        wave_ids_after = [w["id"] for w in waves_after]
+        self.assertNotIn(w1_id, wave_ids_after)
+        self.assertIn(w2_id, wave_ids_after)
+
+        archived_list = await get_archived_waves(db_path=TEST_DB)
+        archived_ids = [w["id"] for w in archived_list]
+        self.assertIn(w1_id, archived_ids)
+
+        # include_archived=True повертає обидві
+        all_including = await get_all_waves(include_archived=True, db_path=TEST_DB)
+        all_ids = [w["id"] for w in all_including]
+        self.assertIn(w1_id, all_ids)
+        self.assertIn(w2_id, all_ids)
+
+        # 5. Видаляємо хвилю 2 назавжди
+        deleted = await delete_wave(w2_id, db_path=TEST_DB)
+        self.assertTrue(deleted)
+
+        waves_final = await get_all_waves(include_archived=True, db_path=TEST_DB)
+        final_ids = [w["id"] for w in waves_final]
+        self.assertNotIn(w2_id, final_ids)
+
+    async def test_comparative_excel_analytics_generation(self):
+        import openpyxl
+
+        # 1. Створюємо банк питань для пекаря та керівника
+        questions = [{
+            "question_text": "Температура випікання круасанів?",
+            "option_1": "100",
+            "option_2": "180",
+            "option_3": "250",
+            "option_4": "300",
+            "correct_option": 2,
+            "points": 1,
+            "explanation": "Стандарт 180 градусів."
+        }]
+        await save_questions_for_role("Пекар", questions, db_path=TEST_DB)
+
+        mgr_questions = [{
+            "question_text": "Термін подачі графіка змін?",
+            "option_1": "1 число",
+            "option_2": "25 число",
+            "option_3": "10 число",
+            "option_4": "Будь-коли",
+            "correct_option": 2,
+            "points": 1,
+            "explanation": "До 25 числа."
+        }]
+        await save_questions_for_role("Керівник", mgr_questions, db_path=TEST_DB)
+
+        # 2. Створюємо Хвилю 1 (Працівники) для двох магазинів
+        w1_id = await create_wave(
+            title="Осіння атестація 1",
+            duration_minutes=15,
+            passing_score_pct=70,
+            deadline_date="2026-09-20 23:59:59",
+            shops=["Магазин Альфа", "Магазин Бета"],
+            created_by=1,
+            target_type="staff",
+            questions_count=1,
+            db_path=TEST_DB
+        )
+        await activate_wave(w1_id, db_path=TEST_DB)
+
+        # Додаємо учасників у Хвилю 1
+        await add_participants_batch(w1_id, [
+            {"user_id": 601, "full_name": "Іван Працівник", "role_name": "Пекар", "shop_name": "Магазин Альфа", "is_manager": 0},
+            {"user_id": 602, "full_name": "Петро Працівник", "role_name": "Пекар", "shop_name": "Магазин Бета", "is_manager": 0}
+        ], db_path=TEST_DB)
+
+        # Учасник Альфа складає на 100%, Бета не складає (0%)
+        att1 = await start_inline_attempt(w1_id, 601, "Пекар", "Магазин Альфа", 15, db_path=TEST_DB)
+        q_order1 = json.loads(att1["questions_order_json"])
+        await save_inline_answer(att1["id"], q_order1[0], 2, db_path=TEST_DB)
+        await finish_inline_attempt(att1["id"], db_path=TEST_DB)
+
+        att2 = await start_inline_attempt(w1_id, 602, "Пекар", "Магазин Бета", 15, db_path=TEST_DB)
+        q_order2 = json.loads(att2["questions_order_json"])
+        await save_inline_answer(att2["id"], q_order2[0], 1, db_path=TEST_DB)
+        await finish_inline_attempt(att2["id"], db_path=TEST_DB)
+
+        await close_wave(w1_id, db_path=TEST_DB)
+
+        # 3. Створюємо Хвилю 2 (Керівники)
+        w2_id = await create_wave(
+            title="Осіння атестація Керуючих",
+            duration_minutes=20,
+            passing_score_pct=75,
+            deadline_date="2026-09-25 23:59:59",
+            shops=["Магазин Альфа"],
+            created_by=1,
+            target_type="managers",
+            questions_count=1,
+            db_path=TEST_DB
+        )
+        await activate_wave(w2_id, db_path=TEST_DB)
+
+        await add_participants_batch(w2_id, [
+            {"user_id": 701, "full_name": "Сидор Керівник", "role_name": "Керівник", "shop_name": "Магазин Альфа", "is_manager": 1}
+        ], db_path=TEST_DB)
+
+        att_mgr = await start_inline_attempt(w2_id, 701, "Керівник", "Магазин Альфа", 20, db_path=TEST_DB)
+        q_order_m = json.loads(att_mgr["questions_order_json"])
+        await save_inline_answer(att_mgr["id"], q_order_m[0], 2, db_path=TEST_DB)
+        await finish_inline_attempt(att_mgr["id"], db_path=TEST_DB)
+
+        await close_wave(w2_id, db_path=TEST_DB)
+
+        # 4. Генеруємо великий порівняльний звіт
+        excel_io = await generate_comparative_attestation_xlsx(db_path=TEST_DB)
+        self.assertIsNotNone(excel_io)
+
+        wb = openpyxl.load_workbook(excel_io)
+        self.assertIn("Загальне", wb.sheetnames)
+        self.assertIn("Керівники", wb.sheetnames)
+        self.assertIn("Працівники", wb.sheetnames)
+
+        # Перевірка наявності діаграм
+        ws_gen = wb["Загальне"]
+        self.assertGreaterEqual(len(ws_gen._charts), 1)
+
+        ws_mgr = wb["Керівники"]
+        self.assertGreaterEqual(len(ws_mgr._charts), 1)
+
+        ws_stf = wb["Працівники"]
+        self.assertGreaterEqual(len(ws_stf._charts), 1)
+
+        # Перевірка вмісту аркуша "Загальне"
+        self.assertIn("ПОРІВНЯЛЬНА АНАЛІТИКА", ws_gen["A1"].value)
+        self.assertEqual(ws_gen["A4"].value, "№")
+        self.assertEqual(ws_gen["B4"].value, "Магазин")
+
+        # Перевіряємо що обидва магазини присутні
+        shops_in_excel = [ws_gen.cell(row=r, column=2).value for r in range(5, ws_gen.max_row + 1)]
+        self.assertIn("Магазин Альфа", shops_in_excel)
+        self.assertIn("Магазин Бета", shops_in_excel)
 
 
 if __name__ == "__main__":

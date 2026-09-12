@@ -26,6 +26,9 @@ from database.attestation import (
     get_wave_by_id,
     get_wave_shop_by_id,
     get_all_waves,
+    get_archived_waves,
+    archive_completed_waves,
+    delete_wave,
     create_wave,
     activate_wave,
     close_wave,
@@ -59,7 +62,8 @@ import aiosqlite
 from bot.services.attestation_excel import (
     generate_attestation_template,
     parse_attestation_excel,
-    generate_attestation_results_xlsx
+    generate_attestation_results_xlsx,
+    generate_comparative_attestation_xlsx
 )
 from bot.services.attestation_worker import (
     launch_attestation_broadcast,
@@ -1132,6 +1136,7 @@ async def dev_att_active_wave_handler(callback: CallbackQuery):
     buttons.append([InlineKeyboardButton(text="📊 Вивантажити звіт XLSX", callback_data=f"dev_att_export_xlsx:{wave_id}")])
     if wave.get("status") == "active":
         buttons.append([InlineKeyboardButton(text="🛑 Завершити всю атестацію", callback_data=f"dev_att_close:{wave_id}")])
+    buttons.append([InlineKeyboardButton(text="🗑 Видалити хвилю", callback_data=f"dev_att_del_confirm:{wave_id}")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_attestation_menu")])
 
     await _safe_edit_or_answer(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -1517,28 +1522,186 @@ async def dev_att_history_handler(callback: CallbackQuery):
     if not await _check_admin(callback):
         return
 
-    waves = await get_all_waves()
+    parts = callback.data.split(":")
+    page = int(parts[1]) if len(parts) > 1 and parts[0] == "dev_att_hist_p" else 1
+
+    waves = await get_all_waves(include_archived=False)
+    archived_waves = await get_archived_waves()
+    has_completed = any(w.get("status") == "completed" for w in waves)
+
     text = "📁 <b>Історія хвиль корпоративної атестації</b>\n\n"
 
+    buttons = []
+    # Верхній блок керування
+    buttons.append([InlineKeyboardButton(text="📊 Порівняльна аналітика (Excel)", callback_data="dev_att_export_comp")])
+
+    manage_row = []
+    if has_completed:
+        manage_row.append(InlineKeyboardButton(text="🗄 Архівувати завершені", callback_data="dev_att_arch_all"))
+    if archived_waves:
+        manage_row.append(InlineKeyboardButton(text=f"📦 Архів хвиль ({len(archived_waves)})", callback_data="dev_att_arch_list"))
+    if manage_row:
+        buttons.append(manage_row)
+
     if not waves:
-        text += "<i>Хвиль атестації ще не створювалось.</i>"
+        if archived_waves:
+            text += "<i>Усі завершені хвилі перенесені в архів. Ви можете переглянути їх за кнопкою «📦 Архів хвиль».</i>\n"
+        else:
+            text += "<i>Хвиль атестації ще не створювалось.</i>\n"
+    else:
+        PER_PAGE = 7
+        total_pages = max(1, (len(waves) + PER_PAGE - 1) // PER_PAGE)
+        page = max(1, min(page, total_pages))
+        start_idx = (page - 1) * PER_PAGE
+        page_waves = waves[start_idx:start_idx + PER_PAGE]
+
+        for w in page_waves:
+            status_icon = "🟢" if w.get("status") == "active" else "🏁"
+            tgt = "Працівники" if w.get("target_type") == "staff" else "Керівники"
+            btn_text = f"{status_icon} {w['title'][:22]} ({tgt}, {len(w.get('shops', []))} маг.)"
+            buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_att_active_wave:{w['id']}")])
+
+        if total_pages > 1:
+            nav_row = []
+            if page > 1:
+                nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_att_hist_p:{page - 1}"))
+            nav_row.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
+            if page < total_pages:
+                nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_att_hist_p:{page + 1}"))
+            buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_attestation_menu")])
+    await _safe_edit_or_answer(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_att_arch_all_handler(callback: CallbackQuery):
+    if not await _check_admin(callback):
+        return
+
+    archived_count = await archive_completed_waves()
+    if archived_count > 0:
+        await callback.answer(f"🗄 Заархівовано хвиль: {archived_count}!\nВони збережені в архіві та враховуються в аналітиці.", show_alert=True)
+    else:
+        await callback.answer("Немає завершених хвиль для архівації.", show_alert=True)
+
+    await dev_att_history_handler(callback)
+
+
+async def dev_att_arch_list_handler(callback: CallbackQuery):
+    if not await _check_admin(callback):
+        return
+
+    parts = callback.data.split(":")
+    page = int(parts[1]) if len(parts) > 1 and parts[0] == "dev_att_arch_p" else 1
+
+    archived_waves = await get_archived_waves()
+    text = "📦 <b>Архів хвиль корпоративної атестації</b>\n\n"
+
+    if not archived_waves:
+        text += "<i>В архіві немає жодної хвилі.</i>"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_attestation_menu")]
+            [InlineKeyboardButton(text="🔙 До списку історії", callback_data="dev_att_history")]
         ])
         await _safe_edit_or_answer(callback, text, reply_markup=kb)
         await callback.answer()
         return
 
+    PER_PAGE = 7
+    total_pages = max(1, (len(archived_waves) + PER_PAGE - 1) // PER_PAGE)
+    page = max(1, min(page, total_pages))
+    start_idx = (page - 1) * PER_PAGE
+    page_waves = archived_waves[start_idx:start_idx + PER_PAGE]
+
     buttons = []
-    for w in waves:
-        status_icon = "🟢" if w.get("status") == "active" else "🏁"
+    for w in page_waves:
         tgt = "Працівники" if w.get("target_type") == "staff" else "Керівники"
-        btn_text = f"{status_icon} {w['title']} ({tgt}, {len(w.get('shops', []))} маг.)"
+        btn_text = f"📦 {w['title'][:22]} ({tgt}, {len(w.get('shops', []))} маг.)"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_att_active_wave:{w['id']}")])
 
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_attestation_menu")])
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_att_arch_p:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_att_arch_p:{page + 1}"))
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="🔙 До списку історії", callback_data="dev_att_history")])
     await _safe_edit_or_answer(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
+
+
+async def dev_att_export_comp_handler(callback: CallbackQuery, bot: Bot):
+    if not await _check_admin(callback):
+        return
+
+    await callback.answer("⏳ Формуємо порівняльну аналітику з графіками...")
+    bot_instance = bot or callback.bot
+
+    try:
+        excel_io = await generate_comparative_attestation_xlsx()
+        date_stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        filename = f"Bulka_Attestation_Comparative_{date_stamp}.xlsx"
+        doc = BufferedInputFile(excel_io.read(), filename=filename)
+
+        caption = (
+            "📊 <b>Зведена порівняльна аналітика корпоративних атестацій BULKA</b>\n\n"
+            "📄 <b>Аркуші файлу:</b>\n"
+            "• <b>Загальне:</b> динаміка кожного магазину та всієї мережі у часі + графіки тренду\n"
+            "• <b>Керівники:</b> порівняння успішності керуючих по магазинах + діаграма\n"
+            "• <b>Працівники:</b> динаміка та середній бал лінійного персоналу + діаграма\n\n"
+            "🥐 <i>Дані включають усі збережені в історії хвилі.</i>"
+        )
+        await bot_instance.send_document(
+            chat_id=callback.from_user.id,
+            document=doc,
+            caption=caption,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Помилка генерації порівняльної аналітики: {e}")
+        await callback.answer("❌ Помилка під час формування файлу аналітики.", show_alert=True)
+
+
+async def dev_att_del_confirm_handler(callback: CallbackQuery):
+    if not await _check_admin(callback):
+        return
+
+    wave_id = int(callback.data.split(":")[1])
+    wave = await get_wave_by_id(wave_id)
+    if not wave:
+        await callback.answer("Хвилю не знайдено", show_alert=True)
+        return
+
+    text = (
+        f"⚠️ <b>Видалення хвилі атестації</b>\n\n"
+        f"Ви дійсно бажаєте безповоротно видалити хвилю:\n"
+        f"«<b>{wave['title']}</b>» (ID: {wave_id})?\n\n"
+        f"❗ <i>Будуть стерті всі пов'язані з нею спроби учасників, оцінки та результати. "
+        f"Цю дію неможливо буде скасувати!</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Так, видалити назавжди", callback_data=f"dev_att_del_do:{wave_id}")],
+        [InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"dev_att_active_wave:{wave_id}")]
+    ])
+    await _safe_edit_or_answer(callback, text, reply_markup=kb)
+    await callback.answer()
+
+
+async def dev_att_del_do_handler(callback: CallbackQuery):
+    if not await _check_admin(callback):
+        return
+
+    wave_id = int(callback.data.split(":")[1])
+    success = await delete_wave(wave_id)
+    if success:
+        await callback.answer("🗑 Хвилю успішно видалено!", show_alert=True)
+    else:
+        await callback.answer("Не вдалося видалити хвилю", show_alert=True)
+
+    await dev_att_history_handler(callback)
 
 
 # =============================================================
@@ -1857,7 +2020,12 @@ def register_attestation_handlers(dp: Dispatcher):
     dp.callback_query.register(dev_att_grant_retake_mgr_handler, lambda c: c.data and c.data.startswith("dev_att_rtk_mgr:"))
     dp.callback_query.register(dev_att_export_xlsx_handler, lambda c: c.data and c.data.startswith("dev_att_export_xlsx:"))
     dp.callback_query.register(dev_att_close_wave_handler, lambda c: c.data and c.data.startswith("dev_att_close:"))
-    dp.callback_query.register(dev_att_history_handler, lambda c: c.data == "dev_att_history")
+    dp.callback_query.register(dev_att_history_handler, lambda c: c.data and (c.data == "dev_att_history" or c.data.startswith("dev_att_hist_p:")))
+    dp.callback_query.register(dev_att_export_comp_handler, lambda c: c.data == "dev_att_export_comp")
+    dp.callback_query.register(dev_att_arch_all_handler, lambda c: c.data == "dev_att_arch_all")
+    dp.callback_query.register(dev_att_arch_list_handler, lambda c: c.data and (c.data == "dev_att_arch_list" or c.data.startswith("dev_att_arch_p:")))
+    dp.callback_query.register(dev_att_del_confirm_handler, lambda c: c.data and c.data.startswith("dev_att_del_confirm:"))
+    dp.callback_query.register(dev_att_del_do_handler, lambda c: c.data and c.data.startswith("dev_att_del_do:"))
 
     # Інтерактивне тестування для співробітників
     dp.callback_query.register(att_start_test_handler, lambda c: c.data in ("att_start_test", "attestation_start"))
