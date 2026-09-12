@@ -143,16 +143,14 @@ async def start_bot():
     scheduler.start()
     print_status("✅", "Планувальник запущено", indent=5)
     
-    # Запускаємо фонову перевірку та генерацію AI-резюме матеріалів
-    asyncio.create_task(backfill_materials_summaries_background())
+    # Запускаємо фонові воркери
+    background_tasks = [
+        asyncio.create_task(backfill_materials_summaries_background()),
+        asyncio.create_task(survey_reminder_worker(bot)),
+        asyncio.create_task(attestation_reminder_worker(bot))
+    ]
     print_status("🧠", "Фонова синхронізація AI-паспортів матеріалів запущена", indent=5)
-
-    # Запускаємо фоновий воркер опитувань та нагадувань
-    asyncio.create_task(survey_reminder_worker(bot))
     print_status("📝", "Фоновий воркер опитувань та нагадувань запущено", indent=5)
-
-    # Запускаємо фоновий воркер атестації
-    asyncio.create_task(attestation_reminder_worker(bot))
     print_status("🎓", "Фоновий воркер атестації запущено", indent=5)
     
     # Логуємо запущені задачі
@@ -192,6 +190,10 @@ async def start_bot():
         logger.critical(f"Bot polling error: {e}", send_alert=True)
         raise
     finally:
+        for t in background_tasks:
+            t.cancel()
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
         await bot.session.close()
         print("💤 Сесія бота закрита")
 

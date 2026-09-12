@@ -5,10 +5,9 @@ python-dotenv
 apscheduler
 httpx
 openpyxl
-sentence-transformers
-faiss-cpu
+openai
+# sentence-transformers і faiss-cpu видалено: замінено на OpenAI GPT
+
 cryptography
 psutil
-fastapi
-uvicorn[standard]
 pyinstaller

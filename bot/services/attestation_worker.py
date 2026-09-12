@@ -178,8 +178,14 @@ async def attestation_reminder_worker(bot: Bot) -> None:
                     except Exception as e:
                         logger.error(f"Помилка обробки дедлайну атестації у воркері: {e}")
 
+        except asyncio.CancelledError:
+            logger.info("attestation_reminder_worker gracefully stopped.")
+            break
         except Exception as e:
             logger.error(f"Помилка в attestation_reminder_worker: {e}")
 
         # Перевірка щогодини
-        await asyncio.sleep(3600)
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            break
