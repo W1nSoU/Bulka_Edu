@@ -35,7 +35,18 @@ from database.attestation import (
     get_wave_shop_stats,
     get_shop_members_details,
     allow_user_retake,
-    add_participants_batch
+    add_participants_batch,
+    get_wave_participants,
+    get_user_latest_attempt,
+    add_shop_to_active_wave,
+    close_shop_in_active_wave,
+    is_shop_active_in_wave,
+    get_wave_shops_status,
+    start_inline_attempt,
+    get_inline_attempt_card_data,
+    save_inline_answer,
+    navigate_inline_question,
+    finish_inline_attempt
 )
 from database.positions import get_all_positions
 from database.managers import get_all_managers
@@ -58,8 +69,10 @@ logger = logging.getLogger(__name__)
 
 class AttestationStates(StatesGroup):
     waiting_excel_file = State()
+    create_wave_target_type = State()
     create_wave_title = State()
     create_wave_shops = State()
+    create_wave_managers = State()
     create_wave_duration = State()
     create_wave_passing = State()
     create_wave_deadline = State()
@@ -81,7 +94,6 @@ async def get_all_system_shops() -> List[str]:
         for s in sh_list:
             shops_set.add(s.strip())
 
-    # Також зчитуємо магазини з користувачів
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT DISTINCT shop FROM users WHERE shop IS NOT NULL AND shop != ''") as cur:
             rows = await cur.fetchall()
@@ -117,17 +129,19 @@ async def dev_attestation_menu_handler(callback: CallbackQuery, state: Optional[
 
     text = "🎓 <b>Корпоративна піврічна атестація BULKA</b>\n\n"
     if active_wave:
+        tgt_badge = "🥐 Працівники пекарень" if active_wave.get("target_type") == "staff" else "👔 Керівники"
         text += (
             f"🟢 <b>Активна хвиля:</b> <b>{active_wave['title']}</b>\n"
+            f"🎯 <b>Цільова група:</b> {tgt_badge}\n"
             f"🏪 <b>Магазинів у хвилі:</b> {len(active_wave.get('shops', []))}\n"
             f"⏱ <b>Таймер:</b> {active_wave['duration_minutes']} хв | <b>Поріг:</b> {active_wave['passing_score_pct']}%\n"
             f"📅 <b>Дедлайн:</b> {active_wave['deadline_date']}\n\n"
-            f"<i>Тестування триває. Ви можете переглядати результати в реальному часі.</i>"
+            f"<i>Тестування триває у Telegram через нативні кнопки.</i>"
         )
     else:
         text += (
             "⚪️ <b>Статус:</b> Наразі немає активної хвилі атестації.\n\n"
-            "Ви можете оновити банк питань через Excel або створити нову хвилю для обраних магазинів."
+            "Ви можете оновити банк питань через Excel або створити нову хвилю для працівників або керівників."
         )
 
     buttons = []
@@ -285,7 +299,7 @@ async def dev_att_create_wave_handler(callback: CallbackQuery, state: FSMContext
     if active_wave:
         text = (
             f"⚠️ <b>Увага:</b> В системі вже діє активна хвиля <b>«{active_wave['title']}»</b>!\n\n"
-            "Запуск нової хвилі автоматично закриє поточну активну хвилю.\nБажаєте продовжити?"
+            "Запуск нової хвилі автоматично завершить поточну активну хвилю.\nБажаєте продовжити?"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Продовжити", callback_data="dev_att_create_wave_confirmed")],
@@ -303,11 +317,36 @@ async def dev_att_create_wave_confirmed_handler(callback: CallbackQuery, state: 
 
 
 async def _start_create_wave_flow(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(AttestationStates.create_wave_title)
+    await state.clear()
+    await state.set_state(AttestationStates.create_wave_target_type)
     text = (
         "➕ <b>Створення нової хвилі атестації</b> [Крок 1/4]\n\n"
+        "Оберіть <b>цільову категорію учасників</b> для цієї атестації:\n\n"
+        "• <b>Працівники пекарень</b> — атестація персоналу за обраними пекарнями.\n"
+        "• <b>Керівники</b> — окрема управлінська атестація керуючих пекарень."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🥐 Працівники пекарень", callback_data="dev_att_tgt:staff")],
+        [InlineKeyboardButton(text="👔 Керівники", callback_data="dev_att_tgt:managers")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
+    ])
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+
+async def dev_att_target_type_handler(callback: CallbackQuery, state: FSMContext):
+    if not await _check_admin(callback):
+        return
+
+    target_type = callback.data.split(":")[1]
+    await state.update_data(target_type=target_type)
+    await state.set_state(AttestationStates.create_wave_title)
+
+    tgt_label = "Працівники пекарень" if target_type == "staff" else "Керівники"
+    text = (
+        f"➕ <b>Створення нової хвилі атестації ({tgt_label})</b> [Крок 2/4]\n\n"
         "Введіть назву хвилі атестації:\n"
-        "<i>(наприклад: <b>Осіння атестація 2026</b> або <b>Атестація: Вересень</b>)</i>"
+        f"<i>(наприклад: <b>Осіння атестація 2026 ({tgt_label})</b>)</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
@@ -325,10 +364,23 @@ async def att_process_wave_title(message: Message, state: FSMContext):
         await message.answer("⚠️ Назва занадто коротка. Введіть назву хвилі:")
         return
 
-    await state.update_data(wave_title=title, selected_shops=[])
-    await state.set_state(AttestationStates.create_wave_shops)
-    await _render_shops_picker(message, state, page=1)
+    await state.update_data(wave_title=title)
+    data = await state.get_data()
+    target_type = data.get("target_type", "staff")
 
+    if target_type == "managers":
+        await state.update_data(selected_managers=[])
+        await state.set_state(AttestationStates.create_wave_managers)
+        await _render_managers_picker(message, state, page=1)
+    else:
+        await state.update_data(selected_shops=[])
+        await state.set_state(AttestationStates.create_wave_shops)
+        await _render_shops_picker(message, state, page=1)
+
+
+# -------------------------------------------------------------
+# Вибір магазинів (для Staff)
+# -------------------------------------------------------------
 
 async def _render_shops_picker(message_or_cb, state: FSMContext, page: int = 1):
     data = await state.get_data()
@@ -346,7 +398,7 @@ async def _render_shops_picker(message_or_cb, state: FSMContext, page: int = 1):
         f"🏪 <b>Вибір магазинів для атестації</b> [Крок 2/4]\n"
         f"Хвиля: <b>{data.get('wave_title')}</b>\n\n"
         f"Обрано магазинів: <b>{len(selected_shops)}</b> з {len(all_shops)}\n\n"
-        f"<i>Натискайте на кнопки магазинів, щоб додати або зняти позначку:</i>"
+        f"<i>Натискайте на кнопки пекарень, щоб додати або зняти позначку:</i>"
     )
 
     buttons = []
@@ -354,11 +406,9 @@ async def _render_shops_picker(message_or_cb, state: FSMContext, page: int = 1):
         global_idx = start_idx + idx_in_page
         is_sel = s in selected_shops
         mark = "✅ " if is_sel else "⬜️ "
-        # Обрізаємо для компактності назви на кнопці
         btn_text = f"{mark}{s[:24]}"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_att_tgl_sh:{global_idx}")])
 
-    # Пагінація
     nav_row = []
     if page > 1:
         nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_att_sh_p:{page - 1}"))
@@ -368,7 +418,6 @@ async def _render_shops_picker(message_or_cb, state: FSMContext, page: int = 1):
     if nav_row:
         buttons.append(nav_row)
 
-    # Кнопки масового вибору
     buttons.append([
         InlineKeyboardButton(text="☑️ Обрати всі", callback_data="dev_att_sh_all"),
         InlineKeyboardButton(text="◻️ Очистити", callback_data="dev_att_sh_clear")
@@ -431,10 +480,133 @@ async def dev_att_shops_done_handler(callback: CallbackQuery, state: FSMContext)
         await callback.answer("⚠️ Оберіть щонайменше 1 магазин для атестації!", show_alert=True)
         return
 
+    await _prompt_duration_step(callback, state)
+
+
+# -------------------------------------------------------------
+# Вибір керівників (для Managers)
+# -------------------------------------------------------------
+
+async def _get_active_managers_list() -> List[Dict[str, Any]]:
+    managers = await get_all_managers()
+    active_mgrs = [m for m in managers if m.get("status") != "fired"]
+    return sorted(active_mgrs, key=lambda m: m.get("name") or m.get("full_name") or "")
+
+
+async def _render_managers_picker(message_or_cb, state: FSMContext, page: int = 1):
+    data = await state.get_data()
+    selected_mgr_ids: Set[int] = set(data.get("selected_managers", []))
+    all_mgrs = await _get_active_managers_list()
+
+    per_page = 6
+    total_pages = max(1, (len(all_mgrs) + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+
+    start_idx = (page - 1) * per_page
+    page_mgrs = all_mgrs[start_idx:start_idx + per_page]
+
+    text = (
+        f"👔 <b>Вибір керівників для атестації</b>\n"
+        f"Хвиля: <b>{data.get('wave_title')}</b>\n\n"
+        f"Обрано керівників: <b>{len(selected_mgr_ids)}</b> з {len(all_mgrs)}\n\n"
+        f"<i>Натискайте на керівників для вибору:</i>"
+    )
+
+    buttons = []
+    for idx_in_page, m in enumerate(page_mgrs):
+        global_idx = start_idx + idx_in_page
+        uid = int(m.get("uid") or m.get("user_id"))
+        is_sel = uid in selected_mgr_ids
+        mark = "✅ " if is_sel else "⬜️ "
+        name = m.get("full_name") or m.get("name") or "Керівник"
+        btn_text = f"{mark}{name[:24]}"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_att_tgl_mgr:{global_idx}")])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_att_mgr_p:{page - 1}"))
+    nav_row.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_att_mgr_p:{page + 1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([
+        InlineKeyboardButton(text="☑️ Обрати всіх", callback_data="dev_att_mgr_all"),
+        InlineKeyboardButton(text="◻️ Очистити", callback_data="dev_att_mgr_clear")
+    ])
+    buttons.append([
+        InlineKeyboardButton(text=f"Далі ➡️ ({len(selected_mgr_ids)} обр.)", callback_data="dev_att_mgr_done")
+    ])
+    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    if isinstance(message_or_cb, CallbackQuery):
+        await message_or_cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        await message_or_cb.answer()
+    else:
+        await message_or_cb.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+async def dev_att_toggle_manager_handler(callback: CallbackQuery, state: FSMContext):
+    all_mgrs = await _get_active_managers_list()
+    try:
+        mgr_idx = int(callback.data.split(":", 1)[1])
+        mgr = all_mgrs[mgr_idx]
+        uid = int(mgr.get("uid") or mgr.get("user_id"))
+    except (IndexError, ValueError):
+        await callback.answer("Помилка вибору керівника", show_alert=True)
+        return
+
+    data = await state.get_data()
+    selected = set(data.get("selected_managers", []))
+
+    if uid in selected:
+        selected.remove(uid)
+    else:
+        selected.add(uid)
+
+    await state.update_data(selected_managers=list(selected))
+    page = (mgr_idx // 6) + 1
+    await _render_managers_picker(callback, state, page=page)
+
+
+async def dev_att_select_all_managers_handler(callback: CallbackQuery, state: FSMContext):
+    all_mgrs = await _get_active_managers_list()
+    all_uids = [int(m.get("uid") or m.get("user_id")) for m in all_mgrs]
+    await state.update_data(selected_managers=all_uids)
+    await _render_managers_picker(callback, state, page=1)
+
+
+async def dev_att_clear_managers_handler(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(selected_managers=[])
+    await _render_managers_picker(callback, state, page=1)
+
+
+async def dev_att_managers_page_handler(callback: CallbackQuery, state: FSMContext):
+    page = int(callback.data.split(":")[1])
+    await _render_managers_picker(callback, state, page=page)
+
+
+async def dev_att_managers_done_handler(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected_mgrs = data.get("selected_managers", [])
+    if not selected_mgrs:
+        await callback.answer("⚠️ Оберіть щонайменше 1 керівника для атестації!", show_alert=True)
+        return
+
+    await _prompt_duration_step(callback, state)
+
+
+# -------------------------------------------------------------
+# Кроки: Тривалість, Поріг, Підтвердження
+# -------------------------------------------------------------
+
+async def _prompt_duration_step(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AttestationStates.create_wave_duration)
     text = (
         "⏱ <b>Тривалість тестування</b> [Крок 3/4]\n\n"
-        "Скільки хвилин надається працівнику на проходження атестації з моменту натискання кнопки старту?\n"
+        "Скільки хвилин надається на проходження атестації з моменту натискання кнопки старту?\n"
         "<i>(Таймер рахується на сервері)</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -443,8 +615,8 @@ async def dev_att_shops_done_handler(callback: CallbackQuery, state: FSMContext)
             InlineKeyboardButton(text="20 хв (реком.)", callback_data="dev_att_dur:20")
         ],
         [
-            InlineKeyboardButton(text="30 хв", callback_data="dev_att_dur:30"),
-            InlineKeyboardButton(text="45 хв", callback_data="dev_att_dur:45")
+            InlineKeyboardButton(text="25 хв", callback_data="dev_att_dur:25"),
+            InlineKeyboardButton(text="30 хв", callback_data="dev_att_dur:30")
         ],
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
     ])
@@ -480,7 +652,7 @@ async def dev_att_duration_handler(callback: CallbackQuery, state: FSMContext):
 async def dev_att_passing_handler(callback: CallbackQuery, state: FSMContext):
     passing = int(callback.data.split(":")[1])
     
-    # Атестація завжди триває 1 день (без зайвого кроку вибору)
+    # Атестація діє 1 день за замовчуванням
     days = 1
     tz = pytz.timezone(TIMEZONE)
     deadline_dt = datetime.now(tz) + timedelta(days=days)
@@ -489,22 +661,28 @@ async def dev_att_passing_handler(callback: CallbackQuery, state: FSMContext):
 
     data = await state.get_data()
     title = data["wave_title"]
-    shops = data["selected_shops"]
     dur = data["wave_duration"]
     pass_pct = passing
+    target_type = data.get("target_type", "staff")
 
-    # Розраховуємо кількість людей
-    participants_to_register = await _collect_eligible_participants(shops)
+    if target_type == "managers":
+        mgr_ids = data.get("selected_managers", [])
+        participants_to_register = await _collect_eligible_participants(mgr_ids, target_type="managers")
+        tgt_text = f"👔 <b>Цільова група:</b> Керівники ({len(mgr_ids)} обрано)\n"
+    else:
+        shops = data.get("selected_shops", [])
+        participants_to_register = await _collect_eligible_participants(shops, target_type="staff")
+        tgt_text = f"🏪 <b>Обрано пекарень:</b> {len(shops)}\n"
 
     text = (
         "📋 <b>Підтвердження запуску атестації</b>\n\n"
         f"🏷 <b>Назва:</b> {title}\n"
-        f"🏪 <b>Обрано магазинів:</b> {len(shops)}\n"
-        f"👥 <b>Потенційних учасників:</b> {len(participants_to_register)} ос. (Працівники та Керівники)\n"
-        f"⏱ <b>Час на тест:</b> {dur} хв\n"
+        f"{tgt_text}"
+        f"👥 <b>Потенційних учасників:</b> {len(participants_to_register)} ос.\n"
+        f"⏱ <b>Час на тест:</b> {dur} хв (серверний таймер)\n"
         f"🎯 <b>Прохідний поріг:</b> {pass_pct}%\n"
         f"📅 <b>Дедлайн здачі:</b> 1 день (до {deadline_dt.strftime('%d.%m.%Y о 23:59')})\n\n"
-        "<i>Після натискання «Запустити» хвиля активується, а всім учасникам буде надіслано персональне запрошення у Mini App.</i>"
+        "<i>Після натискання «Запустити» хвиля активується, а всім учасникам буде надіслано персональне запрошення з інлайн-кнопкою старту тесту.</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Запустити атестацію", callback_data="dev_att_confirm_launch")],
@@ -514,97 +692,72 @@ async def dev_att_passing_handler(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-async def dev_att_deadline_handler(callback: CallbackQuery, state: FSMContext):
-    # Зворотна сумісність, якщо хтось натисне стару кнопку
-    days = int(callback.data.split(":")[1])
-    tz = pytz.timezone(TIMEZONE)
-    deadline_dt = datetime.now(tz) + timedelta(days=days)
-    deadline_str = deadline_dt.strftime("%Y-%m-%d 23:59:59")
-    await state.update_data(wave_deadline=deadline_str, wave_deadline_days=days)
-
-    data = await state.get_data()
-    title = data["wave_title"]
-    shops = data["selected_shops"]
-    dur = data["wave_duration"]
-    pass_pct = data["wave_passing"]
-
-    participants_to_register = await _collect_eligible_participants(shops)
-
-    text = (
-        "📋 <b>Підтвердження запуску атестації</b>\n\n"
-        f"🏷 <b>Назва:</b> {title}\n"
-        f"🏪 <b>Обрано магазинів:</b> {len(shops)}\n"
-        f"👥 <b>Потенційних учасників:</b> {len(participants_to_register)} ос. (Працівники та Керівники)\n"
-        f"⏱ <b>Час на тест:</b> {dur} хв\n"
-        f"🎯 <b>Прохідний поріг:</b> {pass_pct}%\n"
-        f"📅 <b>Дедлайн здачі:</b> до {deadline_dt.strftime('%d.%m.%Y о 23:59')} ({days} дн.)\n\n"
-        "<i>Після натискання «Запустити» хвиля активується, а всім учасникам буде надіслано персональне запрошення у Mini App.</i>"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Запустити атестацію", callback_data="dev_att_confirm_launch")],
-        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
-    ])
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    await callback.answer()
-
-
-async def _collect_eligible_participants(shops: List[str]) -> List[Dict[str, Any]]:
-    """Знаходить усіх діючих працівників та керівників обраних магазинів."""
+async def _collect_eligible_participants(
+    targets: List[Any],
+    target_type: str = "staff"
+) -> List[Dict[str, Any]]:
+    """
+    Знаходить діючих працівників або керівників для атестації.
+    - target_type == 'staff': шукає тільки працівників обраних магазинів (без керівників).
+    - target_type == 'managers': шукає керівників за переданими user_id або магазинами.
+    """
     participants = []
     seen_uids = set()
 
-    # 1. Працівники та керівники з бази users (status = 'Працівник' або role = 'Керівник')
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        for shop in shops:
-            async with db.execute(
-                "SELECT user_id, full_name, role, shop, status FROM users WHERE shop = ? AND (status = 'Працівник' OR role = 'Керівник')",
-                (shop,)
-            ) as cur:
-                rows = await cur.fetchall()
-                for r in rows:
-                    uid = r["user_id"]
-                    if uid not in seen_uids:
-                        seen_uids.add(uid)
-                        is_mgr = 1 if r["role"] == "Керівник" else 0
-                        participants.append({
-                            "user_id": uid,
-                            "full_name": r["full_name"],
-                            "role_name": r["role"] or ("Керівник" if is_mgr else "Працівник"),
-                            "shop_name": r["shop"],
-                            "is_manager": is_mgr
-                        })
+    if target_type == "managers":
+        managers = await get_all_managers()
+        target_uids = set(int(t) for t in targets) if targets else set()
 
-    # 2. Керівники з бази managers.db
-    managers = await get_all_managers()
-    for m in managers:
-        if m.get("status") == "fired":
-            continue
-        m_uid = m.get("uid") or m.get("user_id")
-        if not m_uid or m_uid in seen_uids:
-            continue
+        for m in managers:
+            if m.get("status") == "fired":
+                continue
+            m_uid = int(m.get("uid") or m.get("user_id") or 0)
+            if not m_uid or (target_uids and m_uid not in target_uids):
+                continue
+            if m_uid in seen_uids:
+                continue
 
-        # Перевіряємо прив'язку магазинів
-        m_shops = m.get("shops", [])
-        if isinstance(m_shops, str):
-            try:
-                m_shops = json.loads(m_shops)
-            except Exception:
-                m_shops = [m_shops]
-        elif not isinstance(m_shops, list):
-            m_shops = []
+            seen_uids.add(m_uid)
+            m_shops = m.get("shops", [])
+            if isinstance(m_shops, str):
+                try:
+                    m_shops = json.loads(m_shops)
+                except Exception:
+                    m_shops = [m_shops]
+            elif not isinstance(m_shops, list):
+                m_shops = []
+            primary_shop = m_shops[0] if m_shops else "Керівництво"
 
-        for s in m_shops:
-            if s in shops:
-                seen_uids.add(m_uid)
-                participants.append({
-                    "user_id": m_uid,
-                    "full_name": m.get("full_name") or m.get("name") or "Керівник",
-                    "role_name": "Керівник",
-                    "shop_name": s,
-                    "is_manager": 1
-                })
-                break
+            participants.append({
+                "user_id": m_uid,
+                "full_name": m.get("full_name") or m.get("name") or "Керівник",
+                "role_name": "Керівник",
+                "shop_name": primary_shop,
+                "is_manager": 1
+            })
+
+    else:
+        # staff mode: шукаємо працівників пекарень
+        shops = [str(s) for s in targets]
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            for shop in shops:
+                async with db.execute(
+                    "SELECT user_id, full_name, role, shop, status FROM users WHERE shop = ? AND status = 'Працівник' AND (role != 'Керівник' OR role IS NULL)",
+                    (shop,)
+                ) as cur:
+                    rows = await cur.fetchall()
+                    for r in rows:
+                        uid = r["user_id"]
+                        if uid not in seen_uids:
+                            seen_uids.add(uid)
+                            participants.append({
+                                "user_id": uid,
+                                "full_name": r["full_name"],
+                                "role_name": r["role"] or "ВВ Пекар",
+                                "shop_name": r["shop"],
+                                "is_manager": 0
+                            })
 
     return participants
 
@@ -615,15 +768,26 @@ async def dev_att_confirm_launch_handler(callback: CallbackQuery, state: FSMCont
 
     data = await state.get_data()
     title = data.get("wave_title")
-    shops = data.get("selected_shops", [])
     dur = data.get("wave_duration", 20)
     pass_pct = data.get("wave_passing", 80)
     deadline = data.get("wave_deadline")
+    target_type = data.get("target_type", "staff")
 
-    if not title or not shops:
-        await callback.answer("⚠️ Дані сесії втрачено. Почніть знову.", show_alert=True)
-        await state.clear()
-        return
+    if target_type == "managers":
+        mgr_ids = data.get("selected_managers", [])
+        if not title or not mgr_ids:
+            await callback.answer("⚠️ Дані сесії втрачено. Почніть знову.", show_alert=True)
+            await state.clear()
+            return
+        participants = await _collect_eligible_participants(mgr_ids, target_type="managers")
+        shops = list(set(p["shop_name"] for p in participants))
+    else:
+        shops = data.get("selected_shops", [])
+        if not title or not shops:
+            await callback.answer("⚠️ Дані сесії втрачено. Почніть знову.", show_alert=True)
+            await state.clear()
+            return
+        participants = await _collect_eligible_participants(shops, target_type="staff")
 
     await callback.message.edit_text("⏳ Створення та активація хвилі атестації...", parse_mode="HTML")
 
@@ -634,12 +798,12 @@ async def dev_att_confirm_launch_handler(callback: CallbackQuery, state: FSMCont
         duration_minutes=dur,
         passing_score_pct=pass_pct,
         deadline_date=deadline,
-        shops=shops
+        shops=shops,
+        target_type=target_type
     )
     await activate_wave(wave_id)
 
     # Реєструємо учасників
-    participants = await _collect_eligible_participants(shops)
     await add_participants_batch(wave_id, participants)
 
     # Запускаємо похвильову розсилку у фоні
@@ -647,11 +811,13 @@ async def dev_att_confirm_launch_handler(callback: CallbackQuery, state: FSMCont
     asyncio.create_task(launch_attestation_broadcast(bot_instance, wave_id))
 
     await state.clear()
+    tgt_desc = "Працівники пекарень" if target_type == "staff" else "Керівники"
     await callback.message.answer(
         f"🎉 <b>Хвилю атестації «{title}» успішно запущено!</b>\n\n"
-        f"🏪 Магазинів: <b>{len(shops)}</b>\n"
+        f"🎯 Цільова група: <b>{tgt_desc}</b>\n"
+        f"🏪 Пекарень: <b>{len(shops)}</b>\n"
         f"👥 Зареєстровано учасників: <b>{len(participants)}</b>\n\n"
-        f"Похвильова розсилка сповіщень у Telegram розпочалася.",
+        f"Похвильова розсилка запрошень розпочалася.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📊 Деталі активної хвилі", callback_data=f"dev_att_active_wave:{wave_id}")],
@@ -669,7 +835,7 @@ async def dev_att_active_wave_handler(callback: CallbackQuery):
         return
 
     parts = callback.data.split(":")
-    wave_id = int(parts[1]) if len(parts) > 1 else None
+    wave_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
 
     if wave_id:
         wave = await get_wave_by_id(wave_id)
@@ -682,12 +848,15 @@ async def dev_att_active_wave_handler(callback: CallbackQuery):
 
     wave_id = wave["id"]
     stats = await get_wave_statistics(wave_id)
-    shop_stats = await get_wave_shop_stats(wave_id)
+    shop_statuses = await get_wave_shops_status(wave_id)
+    status_map = {s["shop_name"]: s["status"] for s in shop_statuses}
 
     pct_done = round((stats["completed_count"] / stats["total_participants"] * 100), 1) if stats["total_participants"] > 0 else 0.0
+    tgt_desc = "🥐 Працівники пекарень" if wave.get("target_type") == "staff" else "👔 Керівники"
 
     text = (
-        f"📊 <b>Результати атестації: {wave['title']}</b>\n\n"
+        f"📊 <b>Результати атестації: {wave['title']}</b>\n"
+        f"🎯 Цільова група: <b>{tgt_desc}</b>\n"
         f"📅 <b>Дедлайн:</b> {wave['deadline_date']}\n"
         f"🎯 <b>Прохідний бал:</b> {wave['passing_score_pct']}%\n\n"
         f"📈 <b>Прогрес мережі:</b>\n"
@@ -696,26 +865,104 @@ async def dev_att_active_wave_handler(callback: CallbackQuery):
         f"• ✅ Склали успішно: <b>{stats['passed_count']}</b>\n"
         f"• ❌ Не склали: <b>{stats['failed_count']}</b>\n"
         f"• ⭐️ Середній бал: <b>{stats['avg_score']}%</b>\n\n"
-        f"🏪 <b>Магазини хвилі (натисніть для деталей):</b>"
+        f"🏪 <b>Пекарні хвилі (натисніть для деталей):</b>"
     )
 
     buttons = []
-    # Сортуємо магазини
+    shop_stats = await get_wave_shop_stats(wave_id)
     for s in shop_stats:
         sh_id = s.get("shop_id", 0)
         sh_name = s["shop_name"]
-        icon = "✅" if s["completed"] == s["total_participants"] and s["total_participants"] > 0 else "⏳"
-        label = f"{icon} {sh_name[:20]} ({s['completed']}/{s['total_participants']} — {s['avg_score_pct']}%)"
+        is_active = status_map.get(sh_name, "active") == "active"
+        icon = "🟢" if is_active else "🔴"
+        status_suffix = "" if is_active else " (Зупинено)"
+        label = f"{icon} {sh_name[:20]}{status_suffix} ({s['completed']}/{s['total_participants']} — {s['avg_score_pct']}%)"
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"dev_att_sh_dt:{sh_id}")])
+
+    # Кнопка підключення ще одного магазину для активних staff хвиль
+    if wave.get("status") == "active" and wave.get("target_type") == "staff":
+        buttons.append([InlineKeyboardButton(text="➕ Запустити ще магазин", callback_data=f"dev_att_add_sh_menu:{wave_id}")])
 
     buttons.append([InlineKeyboardButton(text="📊 Вивантажити звіт XLSX", callback_data=f"dev_att_export_xlsx:{wave_id}")])
     if wave.get("status") == "active":
-        buttons.append([InlineKeyboardButton(text="🛑 Завершити хвилю", callback_data=f"dev_att_close:{wave_id}")])
+        buttons.append([InlineKeyboardButton(text="🛑 Завершити всю атестацію", callback_data=f"dev_att_close:{wave_id}")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_attestation_menu")])
 
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
+
+# -------------------------------------------------------------
+# Динамічне підключення магазину до активної хвилі
+# -------------------------------------------------------------
+
+async def dev_att_add_shop_menu_handler(callback: CallbackQuery):
+    if not await _check_admin(callback):
+        return
+
+    wave_id = int(callback.data.split(":")[1])
+    wave = await get_wave_by_id(wave_id)
+    if not wave:
+        await callback.answer("Хвилю не знайдено", show_alert=True)
+        return
+
+    current_shops = set(wave.get("shops", []))
+    all_shops = await get_all_system_shops()
+    available_to_add = [s for s in all_shops if s not in current_shops]
+
+    if not available_to_add:
+        await callback.answer("Усі діючі магазини мережі вже підключені до цієї хвилі!", show_alert=True)
+        return
+
+    text = (
+        f"➕ <b>Підключити магазин до активної атестації</b>\n"
+        f"Хвиля: <b>{wave['title']}</b>\n\n"
+        f"Оберіть пекарню для відкриття тестування та відправки запрошень працівникам:"
+    )
+
+    buttons = []
+    for s in available_to_add[:12]:
+        buttons.append([InlineKeyboardButton(text=f"🏪 {s[:26]}", callback_data=f"dev_att_add_sh_confirm:{wave_id}:{s}")])
+
+    buttons.append([InlineKeyboardButton(text="🔙 До активної хвилі", callback_data=f"dev_att_active_wave:{wave_id}")])
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_att_add_shop_confirm_handler(callback: CallbackQuery, bot: Bot):
+    if not await _check_admin(callback):
+        return
+
+    parts = callback.data.split(":", 2)
+    wave_id = int(parts[1])
+    shop_name = parts[2]
+
+    await callback.answer("⏳ Підключення пекарні...")
+
+    # Додаємо магазин у БД
+    await add_shop_to_active_wave(wave_id, shop_name)
+
+    # Збираємо працівників цього магазину
+    new_participants = await _collect_eligible_participants([shop_name], target_type="staff")
+    if new_participants:
+        await add_participants_batch(wave_id, new_participants)
+
+        # Надсилаємо їм запрошення
+        bot_instance = bot or callback.bot
+        asyncio.create_task(launch_attestation_broadcast(bot_instance, wave_id))
+
+    await callback.answer(
+        f"✅ Магазин «{shop_name}» підключено!\nЗареєстровано {len(new_participants)} працівників.",
+        show_alert=True
+    )
+    # Повертаємось на екран активної хвилі
+    callback.data = f"dev_att_active_wave:{wave_id}"
+    await dev_att_active_wave_handler(callback)
+
+
+# -------------------------------------------------------------
+# Деталі магазину та зупинка / відновлення
+# -------------------------------------------------------------
 
 async def dev_att_shop_details_handler(callback: CallbackQuery):
     if not await _check_admin(callback):
@@ -729,12 +976,18 @@ async def dev_att_shop_details_handler(callback: CallbackQuery):
 
     wave_id = wave_shop["wave_id"]
     shop_name = wave_shop["shop_name"]
+    is_active = await is_shop_active_in_wave(wave_id, shop_name)
 
     members = await get_shop_members_details(wave_id, shop_name)
     wave = await get_wave_by_id(wave_id)
 
-    text = f"🏪 <b>Магазин: {shop_name}</b>\n"
-    text += f"Хвиля: <i>{wave['title'] if wave else ''}</i>\n\n"
+    status_badge = "🟢 Активний (тест відкритий)" if is_active else "🔴 Зупинено (тест заблоковано)"
+    text = (
+        f"🏪 <b>Пекарня: {shop_name}</b>\n"
+        f"Хвиля: <i>{wave['title'] if wave else ''}</i>\n"
+        f"Статус тестування: <b>{status_badge}</b>\n\n"
+        f"👥 <b>Працівники пекарні:</b>\n"
+    )
 
     buttons = []
     for m in members:
@@ -746,6 +999,8 @@ async def dev_att_shop_details_handler(callback: CallbackQuery):
             st_text = f"✅ {m.get('score_pct')}% ({m.get('score')}/{m.get('max_score')} б.)"
         elif status == "failed":
             st_text = f"❌ {m.get('score_pct')}% ({m.get('score')}/{m.get('max_score')} б.)"
+        elif status == "timeout":
+            st_text = f"⏱ Час вичерпано ({m.get('score_pct')}%)"
         elif status == "in_progress":
             st_text = "⏳ Проходить тест"
         else:
@@ -753,8 +1008,7 @@ async def dev_att_shop_details_handler(callback: CallbackQuery):
 
         text += f"• {role_pfx} <b>{m.get('full_name')}</b> ({m.get('role_name')})\n  Статус: {st_text}\n"
 
-        # Кнопка перездачі, якщо тест завалено
-        if status == "failed":
+        if status in ("failed", "timeout"):
             can_retake = m.get("can_retake", 0)
             if can_retake == 1:
                 text += "  <i>(Дозвіл на перездачу вже надано)</i>\n"
@@ -764,10 +1018,46 @@ async def dev_att_shop_details_handler(callback: CallbackQuery):
                     callback_data=f"dev_att_rtk:{wave_shop_id}:{m['user_id']}"
                 )])
 
+    # Кнопка зупинки або відновлення тесту для цього магазину
+    if is_active:
+        buttons.append([InlineKeyboardButton(text="⏹ Зупинити для цього магазину", callback_data=f"dev_att_stop_sh:{wave_shop_id}")])
+    else:
+        buttons.append([InlineKeyboardButton(text="▶️ Відновити для цього магазину", callback_data=f"dev_att_resume_sh:{wave_shop_id}")])
+
     buttons.append([InlineKeyboardButton(text="🔙 До списку магазинів", callback_data=f"dev_att_active_wave:{wave_id}")])
 
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
+
+
+async def dev_att_stop_shop_handler(callback: CallbackQuery):
+    if not await _check_admin(callback):
+        return
+
+    wave_shop_id = int(callback.data.split(":")[1])
+    wave_shop = await get_wave_shop_by_id(wave_shop_id)
+    if not wave_shop:
+        await callback.answer("Магазин не знайдено", show_alert=True)
+        return
+
+    await close_shop_in_active_wave(wave_shop["wave_id"], wave_shop["shop_name"])
+    await callback.answer("⏹ Атестацію для цього магазину зупинено.", show_alert=True)
+    await dev_att_shop_details_handler(callback)
+
+
+async def dev_att_resume_shop_handler(callback: CallbackQuery):
+    if not await _check_admin(callback):
+        return
+
+    wave_shop_id = int(callback.data.split(":")[1])
+    wave_shop = await get_wave_shop_by_id(wave_shop_id)
+    if not wave_shop:
+        await callback.answer("Магазин не знайдено", show_alert=True)
+        return
+
+    await add_shop_to_active_wave(wave_shop["wave_id"], wave_shop["shop_name"])
+    await callback.answer("▶️ Атестацію для цього магазину відновлено.", show_alert=True)
+    await dev_att_shop_details_handler(callback)
 
 
 async def dev_att_grant_retake_handler(callback: CallbackQuery, bot: Bot):
@@ -788,7 +1078,6 @@ async def dev_att_grant_retake_handler(callback: CallbackQuery, bot: Bot):
     success = await allow_user_retake(wave_id, user_id, callback.from_user.id)
     if success:
         await callback.answer("✅ Дозвіл на перездачу надано!", show_alert=True)
-        # Надсилаємо повідомлення співробітнику в бот
         try:
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [get_attestation_action_button("🚀 Пройти атестацію повторно", user_id=user_id)]
@@ -805,7 +1094,6 @@ async def dev_att_grant_retake_handler(callback: CallbackQuery, bot: Bot):
         except Exception as e:
             logger.warning(f"Не вдалося сповістити користувача {user_id} про перездачу: {e}")
 
-        # Оновлюємо екран магазину
         callback.data = f"dev_att_sh_dt:{wave_shop_id}"
         await dev_att_shop_details_handler(callback)
     else:
@@ -864,7 +1152,8 @@ async def dev_att_history_handler(callback: CallbackQuery):
     buttons = []
     for w in waves:
         status_icon = "🟢" if w.get("status") == "active" else "🏁"
-        btn_text = f"{status_icon} {w['title']} ({len(w.get('shops', []))} маг.)"
+        tgt = "Працівники" if w.get("target_type") == "staff" else "Керівники"
+        btn_text = f"{status_icon} {w['title']} ({tgt}, {len(w.get('shops', []))} маг.)"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_att_active_wave:{w['id']}")])
 
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_attestation_menu")])
@@ -873,11 +1162,271 @@ async def dev_att_history_handler(callback: CallbackQuery):
 
 
 # =============================================================
-# РЕЄСТРАЦІЯ ХЕНДЛЕРІВ
+# 5. ІНТЕРАКТИВНЕ ТЕСТУВАННЯ У ЧАТІ (SINGLE MESSAGE UI)
+# =============================================================
+
+async def att_start_test_handler(callback: CallbackQuery):
+    """
+    Запуск або продовження тестування для співробітника / керівника.
+    Працює як через 'att_start_test', так і через 'attestation_start'.
+    """
+    user_id = callback.from_user.id
+    wave = await get_active_wave()
+
+    if not wave:
+        await callback.answer("Наразі немає активної хвилі атестації.", show_alert=True)
+        return
+
+    wave_id = wave["id"]
+
+    # Знаходимо запис учасника у цій хвилі
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM attestation_participants WHERE wave_id = ? AND user_id = ?",
+            (wave_id, user_id)
+        ) as cur:
+            participant_row = await cur.fetchone()
+
+    if not participant_row:
+        await callback.answer("Ви не зареєстровані у цій хвилі атестації. Зверніться до адміністратора.", show_alert=True)
+        return
+
+    participant = dict(participant_row)
+    shop_name = participant["shop_name"]
+    role_name = participant["role_name"]
+
+    # Якщо хвиля для працівників — перевіряємо чи відкритий магазин
+    if wave.get("target_type") == "staff":
+        is_active_shop = await is_shop_active_in_wave(wave_id, shop_name)
+        if not is_active_shop:
+            await callback.answer("⚠️ Атестацію для вашого магазину наразі закрито або зупинено.", show_alert=True)
+            return
+
+    # Перевіряємо чи є питання для посади
+    q_count = (await get_questions_count_by_role()).get(role_name, 0)
+    if q_count == 0:
+        await callback.answer(f"⚠️ Для посади «{role_name}» ще не завантажено питань в систему.", show_alert=True)
+        return
+
+    # Запускаємо або отримуємо спробу
+    try:
+        attempt = await start_inline_attempt(
+            wave_id=wave_id,
+            user_id=user_id,
+            role_name=role_name,
+            shop_name=shop_name,
+            duration_minutes=wave["duration_minutes"]
+        )
+    except Exception as e:
+        logger.error(f"Помилка старту спроби для {user_id}: {e}")
+        await callback.answer(f"Помилка ініціалізації тесту: {e}", show_alert=True)
+        return
+
+    attempt_id = attempt["id"]
+
+    # Якщо спроба вже завершена і перездача не надана
+    if attempt.get("status") in ("passed", "failed", "timeout") and attempt.get("can_retake") != 1:
+        await callback.answer("Ви вже пройшли атестацію.", show_alert=True)
+        await _render_inline_finish_card(callback, attempt)
+        return
+
+    # Відображаємо поточне питання
+    await _render_inline_question(callback, attempt_id)
+
+
+async def att_ans_handler(callback: CallbackQuery):
+    """
+    Обробник вибору варіанта відповіді.
+    Формат callback_data: att_ans:{attempt_id}:{question_id}:{orig_num}
+    """
+    parts = callback.data.split(":")
+    try:
+        attempt_id = int(parts[1])
+        question_id = int(parts[2])
+        orig_num = int(parts[3])
+    except (IndexError, ValueError):
+        await callback.answer("Помилка відповіді.", show_alert=True)
+        return
+
+    try:
+        attempt_dict, is_finished = await save_inline_answer(attempt_id, question_id, orig_num)
+    except Exception as e:
+        logger.error(f"Помилка збереження відповіді: {e}")
+        await callback.answer("Помилка збереження відповіді.", show_alert=True)
+        return
+
+    await _render_inline_question(callback, attempt_id)
+
+
+async def att_nav_handler(callback: CallbackQuery):
+    """
+    Обробник переходу [ ⬅️ Назад ] або [ Далі ➡️ ].
+    Формат callback_data: att_nav:{attempt_id}:{delta}
+    """
+    parts = callback.data.split(":")
+    try:
+        attempt_id = int(parts[1])
+        delta = int(parts[2])
+    except (IndexError, ValueError):
+        await callback.answer("Помилка навігації.", show_alert=True)
+        return
+
+    try:
+        await navigate_inline_question(attempt_id, delta)
+    except Exception as e:
+        logger.error(f"Помилка навігації: {e}")
+        await callback.answer("Помилка навігації.", show_alert=True)
+        return
+
+    await _render_inline_question(callback, attempt_id)
+
+
+async def _render_inline_question(callback: CallbackQuery, attempt_id: int):
+    """
+    Відображає поточне питання у єдиному повідомленні з тост-таймером та кнопками відповідей.
+    """
+    card_data = await get_inline_attempt_card_data(attempt_id)
+    if not card_data:
+        await callback.answer("Тест не знайдено або завершено.", show_alert=True)
+        return
+
+    if card_data.get("is_finished"):
+        if card_data.get("timeout"):
+            await callback.answer("⏱ Час на тестування вичерпано!", show_alert=True)
+        else:
+            await callback.answer("🏁 Тест завершено!", show_alert=False)
+        await _render_inline_finish_card(callback, card_data["attempt"])
+        return
+
+    # Сервісний Toast-таймер зверху екрана
+    rem_secs = card_data["remaining_seconds"]
+    mins = rem_secs // 60
+    secs = rem_secs % 60
+    await callback.answer(f"⏱ Залишилось: {mins:02d} хв {secs:02d} с", show_alert=False)
+
+    # Форматуємо час дедлайну
+    exp_hm = ""
+    if card_data.get("expires_at"):
+        try:
+            exp_dt = datetime.strptime(card_data["expires_at"], "%Y-%m-%d %H:%M:%S")
+            exp_hm = exp_dt.strftime("%H:%M")
+        except Exception:
+            exp_hm = ""
+
+    header_time = f"⏱ <b>Час спливає о {exp_hm}</b> ({mins} хв {secs} с)\n" if exp_hm else f"⏱ <b>Залишилось:</b> {mins} хв {secs} с\n"
+
+    text = (
+        f"{header_time}"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"❓ <b>Питання {card_data['current_q_num']} з {card_data['total_questions']}:</b>\n\n"
+        f"{card_data['question_text']}"
+    )
+
+    buttons = []
+    # Варіанти відповідей: широкий рядок на кожен варіант
+    for opt in card_data["options"]:
+        radio_icon = "🔘 " if opt["is_selected"] else "⚪️ "
+        opt_text = f"{radio_icon}{opt['text']}"
+        cb_data = f"att_ans:{attempt_id}:{card_data['question_id']}:{opt['orig_num']}"
+        buttons.append([InlineKeyboardButton(text=opt_text[:50], callback_data=cb_data)])
+
+    # Навігаційний рядок (Назад / Далі)
+    nav_row = []
+    if card_data["has_previous"]:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"att_nav:{attempt_id}:-1"))
+    if card_data["has_next"]:
+        nav_row.append(InlineKeyboardButton(text="Далі ➡️", callback_data=f"att_nav:{attempt_id}:1"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        # Ігноруємо помилку, якщо вміст не змінився
+        logger.debug(f"Message edit ignored: {e}")
+
+
+async def _render_inline_finish_card(callback: CallbackQuery, attempt: Dict[str, Any]):
+    """
+    Відображає фінальну картку результатів тестування у тому самому повідомленні.
+    """
+    user_id = attempt["user_id"]
+    wave_id = attempt["wave_id"]
+    score = attempt.get("score", 0)
+    max_score = attempt.get("max_score", 0)
+    score_pct = attempt.get("score_pct", 0.0)
+    status = attempt.get("status", "failed")
+    duration_secs = attempt.get("duration_seconds", 0)
+    mins = duration_secs // 60
+    secs = duration_secs % 60
+
+    # Отримуємо ПІБ та прохідний поріг
+    wave = await get_wave_by_id(wave_id)
+    pass_pct = wave.get("passing_score_pct", 80) if wave else 80
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT full_name FROM attestation_participants WHERE wave_id = ? AND user_id = ?", (wave_id, user_id)) as cur:
+            p_row = await cur.fetchone()
+            full_name = p_row["full_name"] if p_row else "Колега"
+
+    if status == "passed":
+        text = (
+            "🎉 <b>Вітаємо! Атестацію успішно складено!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 <b>Співробітник:</b> {full_name}\n"
+            f"🏪 <b>Пекарня:</b> {attempt.get('shop_name')}\n"
+            f"👔 <b>Посада:</b> {attempt.get('role_name')}\n\n"
+            f"📊 <b>Ваш результат:</b> {score} з {max_score} б. (<b>{score_pct}%</b>)\n"
+            f"🎯 <b>Прохідний поріг:</b> {pass_pct}%\n"
+            f"⏱ <b>Витрачено часу:</b> {mins} хв {secs} с\n\n"
+            "<i>Твій результат успішно зараховано до рейтингу пекарні! Дякуємо за професіоналізм! 🥐</i>"
+        )
+    elif status == "timeout":
+        text = (
+            "⏱ <b>Час на проходження атестації вичерпано!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 <b>Співробітник:</b> {full_name}\n"
+            f"🏪 <b>Пекарня:</b> {attempt.get('shop_name')}\n"
+            f"👔 <b>Посада:</b> {attempt.get('role_name')}\n\n"
+            f"📊 <b>Зарахований результат:</b> {score} з {max_score} б. (<b>{score_pct}%</b>)\n"
+            f"🎯 <b>Прохідний поріг:</b> {pass_pct}%\n\n"
+            "<i>Тестування зупинено за таймером. Зверніться до свого керівника щодо призначення повторної спроби.</i>"
+        )
+    else:
+        text = (
+            "⏳ <b>Атестацію не складено</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 <b>Співробітник:</b> {full_name}\n"
+            f"🏪 <b>Пекарня:</b> {attempt.get('shop_name')}\n"
+            f"👔 <b>Посада:</b> {attempt.get('role_name')}\n\n"
+            f"📊 <b>Ваш результат:</b> {score} з {max_score} б. (<b>{score_pct}%</b>)\n"
+            f"🎯 <b>Прохідний поріг:</b> {pass_pct}%\n"
+            f"⏱ <b>Витрачено часу:</b> {mins} хв {secs} с\n\n"
+            "<i>На жаль, набраних балів недостатньо для прохідного порогу. Зверніться до свого керівника щодо призначення повторної спроби.</i>"
+        )
+
+    # Якщо користувач адміністратор — даємо кнопку повернення в меню
+    is_admin = await is_developer_user(user_id)
+    buttons = []
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text="🎓 В меню атестації", callback_data="dev_attestation_menu")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        logger.debug(f"Finish card edit: {e}")
+
+
+# =============================================================
+# 6. РЕЄСТРАЦІЯ ХЕНДЛЕРІВ
 # =============================================================
 
 def register_attestation_handlers(dp: Dispatcher):
-    """Реєструє всі обробники меню атестації."""
+    """Реєструє всі обробники меню атестації та інлайн-тестування."""
     # Головне меню та банк питань
     dp.callback_query.register(dev_attestation_menu_handler, lambda c: c.data == "dev_attestation_menu")
     dp.callback_query.register(dev_att_questions_menu_handler, lambda c: c.data == "dev_att_questions_menu")
@@ -885,28 +1434,44 @@ def register_attestation_handlers(dp: Dispatcher):
     dp.callback_query.register(dev_att_upload_excel_handler, lambda c: c.data == "dev_att_upload_excel")
     dp.message.register(att_process_excel_document, AttestationStates.waiting_excel_file)
 
-    # Майстер створення хвилі
+    # Майстер створення хвилі: вибір цілі та назва
     dp.callback_query.register(dev_att_create_wave_handler, lambda c: c.data == "dev_att_create_wave")
     dp.callback_query.register(dev_att_create_wave_confirmed_handler, lambda c: c.data == "dev_att_create_wave_confirmed")
+    dp.callback_query.register(dev_att_target_type_handler, lambda c: c.data and c.data.startswith("dev_att_tgt:"))
     dp.message.register(att_process_wave_title, AttestationStates.create_wave_title)
 
-    # Вибір магазинів
+    # Вибір магазинів (staff)
     dp.callback_query.register(dev_att_toggle_shop_handler, lambda c: c.data and c.data.startswith("dev_att_tgl_sh:"))
     dp.callback_query.register(dev_att_select_all_shops_handler, lambda c: c.data == "dev_att_sh_all")
     dp.callback_query.register(dev_att_clear_shops_handler, lambda c: c.data == "dev_att_sh_clear")
     dp.callback_query.register(dev_att_shops_page_handler, lambda c: c.data and c.data.startswith("dev_att_sh_p:"))
     dp.callback_query.register(dev_att_shops_done_handler, lambda c: c.data == "dev_att_sh_done")
 
+    # Вибір керівників (managers)
+    dp.callback_query.register(dev_att_toggle_manager_handler, lambda c: c.data and c.data.startswith("dev_att_tgl_mgr:"))
+    dp.callback_query.register(dev_att_select_all_managers_handler, lambda c: c.data == "dev_att_mgr_all")
+    dp.callback_query.register(dev_att_clear_managers_handler, lambda c: c.data == "dev_att_mgr_clear")
+    dp.callback_query.register(dev_att_managers_page_handler, lambda c: c.data and c.data.startswith("dev_att_mgr_p:"))
+    dp.callback_query.register(dev_att_managers_done_handler, lambda c: c.data == "dev_att_mgr_done")
+
     # Параметри тесту
     dp.callback_query.register(dev_att_duration_handler, lambda c: c.data and c.data.startswith("dev_att_dur:"))
     dp.callback_query.register(dev_att_passing_handler, lambda c: c.data and c.data.startswith("dev_att_pass:"))
-    dp.callback_query.register(dev_att_deadline_handler, lambda c: c.data and c.data.startswith("dev_att_dead:"))
     dp.callback_query.register(dev_att_confirm_launch_handler, lambda c: c.data == "dev_att_confirm_launch")
 
     # Моніторинг та звіти
     dp.callback_query.register(dev_att_active_wave_handler, lambda c: c.data and c.data.startswith("dev_att_active_wave"))
+    dp.callback_query.register(dev_att_add_shop_menu_handler, lambda c: c.data and c.data.startswith("dev_att_add_sh_menu:"))
+    dp.callback_query.register(dev_att_add_shop_confirm_handler, lambda c: c.data and c.data.startswith("dev_att_add_sh_confirm:"))
     dp.callback_query.register(dev_att_shop_details_handler, lambda c: c.data and c.data.startswith("dev_att_sh_dt:"))
+    dp.callback_query.register(dev_att_stop_shop_handler, lambda c: c.data and c.data.startswith("dev_att_stop_sh:"))
+    dp.callback_query.register(dev_att_resume_shop_handler, lambda c: c.data and c.data.startswith("dev_att_resume_sh:"))
     dp.callback_query.register(dev_att_grant_retake_handler, lambda c: c.data and c.data.startswith("dev_att_rtk:"))
     dp.callback_query.register(dev_att_export_xlsx_handler, lambda c: c.data and c.data.startswith("dev_att_export_xlsx:"))
     dp.callback_query.register(dev_att_close_wave_handler, lambda c: c.data and c.data.startswith("dev_att_close:"))
     dp.callback_query.register(dev_att_history_handler, lambda c: c.data == "dev_att_history")
+
+    # Інтерактивне тестування для співробітників
+    dp.callback_query.register(att_start_test_handler, lambda c: c.data in ("att_start_test", "attestation_start"))
+    dp.callback_query.register(att_ans_handler, lambda c: c.data and c.data.startswith("att_ans:"))
+    dp.callback_query.register(att_nav_handler, lambda c: c.data and c.data.startswith("att_nav:"))

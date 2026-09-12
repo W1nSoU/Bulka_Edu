@@ -3,15 +3,12 @@ import asyncio
 import os
 import io
 import json
-import hmac
-import hashlib
-import urllib.parse
 from datetime import datetime, timedelta
 import pytz
 
 import aiosqlite
 
-from bot.config import TIMEZONE, API_TOKEN
+from bot.config import TIMEZONE
 from database.attestation import (
     init_attestation_db,
     save_questions_for_role,
@@ -24,18 +21,26 @@ from database.attestation import (
     close_wave,
     add_participants_batch,
     get_wave_participants,
-    start_user_attempt,
-    submit_user_attempt,
     allow_user_retake,
     get_wave_statistics,
     get_wave_shop_stats,
-    get_shop_members_details
+    get_shop_members_details,
+    add_shop_to_active_wave,
+    close_shop_in_active_wave,
+    is_shop_active_in_wave,
+    get_wave_shops_status,
+    start_inline_attempt,
+    get_inline_attempt_card_data,
+    save_inline_answer,
+    navigate_inline_question,
+    finish_inline_attempt
 )
 from bot.services.attestation_excel import (
     generate_attestation_template,
     parse_attestation_excel,
     generate_attestation_results_xlsx
 )
+from bot.menus.attestation import _collect_eligible_participants
 
 
 TEST_DB = "test_attestation.db"
@@ -96,131 +101,211 @@ class TestAttestationFlow(unittest.IsolatedAsyncioTestCase):
         parsed_data, warnings = parse_attestation_excel(file_bytes, roles)
         self.assertIn("Керівник", parsed_data)
         self.assertIn("ВВ Пекар", parsed_data)
-        # In template each sheet has 1 sample row
         self.assertEqual(len(parsed_data["Керівник"]), 1)
         self.assertEqual(parsed_data["Керівник"][0]["correct_option"], 2)
 
-    async def test_wave_lifecycle_and_attempts(self):
+    async def test_inline_attestation_flow(self):
+        """Перевіряє повний цикл нативної інлайн-атестації: старт, збереження відповідей, навігація, фініш."""
         tz = pytz.timezone(TIMEZONE)
-        deadline = (datetime.now(tz) + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        deadline = (datetime.now(tz) + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
 
-        # 1. Create wave
+        # 1. Створюємо хвилю для працівників
         wave_id = await create_wave(
-            title="Тестова осіння атестація",
-            created_by=9999,
+            title="Осіння атестація 2026",
+            created_by=1111,
             duration_minutes=20,
             passing_score_pct=80,
             deadline_date=deadline,
-            shops=["b-12", "b-15"],
+            shops=["b-12"],
+            target_type="staff",
             db_path=TEST_DB
         )
-        self.assertGreater(wave_id, 0)
-
-        # 2. Activate wave
         await activate_wave(wave_id, db_path=TEST_DB)
-        active = await get_active_wave(db_path=TEST_DB)
-        self.assertIsNotNone(active)
-        self.assertEqual(active["id"], wave_id)
-        self.assertIn("b-12", active["shops"])
 
-        # 3. Add questions
-        await save_questions_for_role("Касир", [
-            {"question_text": "Q1", "option_1": "A", "option_2": "B", "correct_option": 1, "points": 1},
-            {"question_text": "Q2", "option_1": "A", "option_2": "B", "correct_option": 2, "points": 1}
-        ], db_path=TEST_DB)
+        # 2. Додаємо банк запитань
+        questions = [
+            {
+                "question_text": "Питання 1: Як налаштувати кавомашину?",
+                "option_1": "Помити холдер",
+                "option_2": "Перевірити тиск та помол",
+                "option_3": "Вимкнути живлення",
+                "option_4": "Залити холодну воду",
+                "correct_option": 2,
+                "points": 1
+            },
+            {
+                "question_text": "Питання 2: Термін придатності свіжого хліба?",
+                "option_1": "24 години",
+                "option_2": "48 годин",
+                "option_3": "72 години",
+                "option_4": "12 годин",
+                "correct_option": 1,
+                "points": 2
+            }
+        ]
+        await save_questions_for_role("Бариста", questions, db_path=TEST_DB)
 
-        # 4. Add participants
-        await add_participants_batch(wave_id, [
-            {"user_id": 101, "full_name": "Іван Касир", "role_name": "Касир", "shop_name": "b-12", "is_manager": 0},
-            {"user_id": 102, "full_name": "Марія Менеджер", "role_name": "Керівник", "shop_name": "b-12", "is_manager": 1}
-        ], db_path=TEST_DB)
+        # 3. Реєструємо учасника
+        await add_participants_batch(wave_id, [{
+            "user_id": 555,
+            "full_name": "Олена Бариста",
+            "role_name": "Бариста",
+            "shop_name": "b-12",
+            "is_manager": 0
+        }], db_path=TEST_DB)
 
-        participants = await get_wave_participants(wave_id, db_path=TEST_DB)
-        self.assertEqual(len(participants), 2)
-
-        # 5. Start attempt for user 101
-        attempt = await start_user_attempt(wave_id, 101, "Касир", "b-12", db_path=TEST_DB)
+        # 4. Запускаємо спробу через інлайн
+        attempt = await start_inline_attempt(
+            wave_id=wave_id,
+            user_id=555,
+            role_name="Бариста",
+            shop_name="b-12",
+            duration_minutes=20,
+            db_path=TEST_DB
+        )
         self.assertEqual(attempt["status"], "in_progress")
+        self.assertEqual(attempt["current_question_index"], 0)
+        self.assertIsNotNone(attempt["questions_order_json"])
+        self.assertIsNotNone(attempt["options_order_json"])
+
         attempt_id = attempt["id"]
 
-        # Retrieve all questions to get their IDs
-        qs = await get_questions_for_role("Касир", db_path=TEST_DB)
-        q1_id = str(qs[0]["id"])
-        q2_id = str(qs[1]["id"])
+        # 5. Отримуємо дані першого питання для картки
+        card1 = await get_inline_attempt_card_data(attempt_id, db_path=TEST_DB)
+        self.assertFalse(card1["is_finished"])
+        self.assertEqual(card1["current_q_num"], 1)
+        self.assertEqual(card1["total_questions"], 2)
+        self.assertFalse(card1["has_previous"])
+        self.assertGreater(card1["remaining_seconds"], 0)
+        self.assertEqual(len(card1["options"]), 4)
 
-        # 6. Submit correct answers (2 out of 2 = 100% -> passed)
-        answers = {q1_id: 1, q2_id: 2}
-        result = await submit_user_attempt(attempt_id, answers, db_path=TEST_DB)
-        self.assertEqual(result["status"], "passed")
-        self.assertEqual(result["score"], 2)
-        self.assertEqual(result["max_score"], 2)
-        self.assertEqual(result["score_pct"], 100.0)
+        # Перевіряємо, що збережений порядок варіантів відповідає картці
+        opt_order = json.loads(attempt["options_order_json"])
+        q1_id = card1["question_id"]
+        expected_seq = opt_order[str(q1_id)]
+        actual_seq = [opt["orig_num"] for opt in card1["options"]]
+        self.assertEqual(expected_seq, actual_seq)
 
-        # 7. Check stats
-        stats = await get_wave_statistics(wave_id, db_path=TEST_DB)
-        self.assertEqual(stats["total_participants"], 2)
-        self.assertEqual(stats["completed_count"], 1)
-        self.assertEqual(stats["passed_count"], 1)
-        self.assertEqual(stats["failed_count"], 0)
+        # 6. Даємо відповідь на питання 1
+        # Зберігаємо правильну відповідь
+        # Якщо current_q_id == q1, правильна відповідь 2; якщо q2, правильна відповідь 1
+        q_rows = await get_questions_for_role("Бариста", db_path=TEST_DB)
+        correct_for_q1 = next(q["correct_option"] for q in q_rows if q["id"] == q1_id)
 
-        # 8. Test retake mechanism
-        attempt_again = await start_user_attempt(wave_id, 101, "Касир", "b-12", db_path=TEST_DB)
-        self.assertEqual(attempt_again["status"], "passed")
+        updated_attempt, is_fin = await save_inline_answer(attempt_id, q1_id, correct_for_q1, db_path=TEST_DB)
+        self.assertFalse(is_fin)
+        self.assertEqual(updated_attempt["current_question_index"], 1)
 
-        # Admin grants retake
-        retake_ok = await allow_user_retake(wave_id, 101, admin_id=9999, db_path=TEST_DB)
-        self.assertTrue(retake_ok)
+        # 7. Тестуємо навігацію НАЗАД [ ⬅️ Назад ]
+        nav_attempt, is_fin_nav = await navigate_inline_question(attempt_id, delta=-1, db_path=TEST_DB)
+        self.assertFalse(is_fin_nav)
+        self.assertEqual(nav_attempt["current_question_index"], 0)
 
-        # User 101 starts now -> new in_progress attempt created!
-        new_attempt = await start_user_attempt(wave_id, 101, "Касир", "b-12", db_path=TEST_DB)
-        self.assertNotEqual(new_attempt["id"], attempt_id)
-        self.assertEqual(new_attempt["status"], "in_progress")
+        card_back = await get_inline_attempt_card_data(attempt_id, db_path=TEST_DB)
+        self.assertEqual(card_back["current_q_num"], 1)
+        # Порядок варіантів має бути ідентичним першому показу!
+        self.assertEqual([opt["orig_num"] for opt in card_back["options"]], expected_seq)
+        # Обраний варіант повинен бути позначений як is_selected = True
+        selected_opt = next(opt for opt in card_back["options"] if opt["orig_num"] == correct_for_q1)
+        self.assertTrue(selected_opt["is_selected"])
+        self.assertTrue(card_back["has_next"])
 
-        # Submit failed answers (0 out of 2 = 0% -> failed)
-        fail_res = await submit_user_attempt(new_attempt["id"], {q1_id: 2, q2_id: 1}, db_path=TEST_DB)
-        self.assertEqual(fail_res["status"], "failed")
-        self.assertEqual(fail_res["score"], 0)
+        # 8. Переходимо ДАЛІ [ Далі ➡️ ]
+        await navigate_inline_question(attempt_id, delta=1, db_path=TEST_DB)
+        card2 = await get_inline_attempt_card_data(attempt_id, db_path=TEST_DB)
+        self.assertEqual(card2["current_q_num"], 2)
+        self.assertTrue(card2["has_previous"])
 
-        # 9. Close wave
-        await close_wave(wave_id, db_path=TEST_DB)
-        active_after_close = await get_active_wave(db_path=TEST_DB)
-        self.assertIsNone(active_after_close)
+        # 9. Відповідаємо на друге (останнє) питання
+        q2_id = card2["question_id"]
+        correct_for_q2 = next(q["correct_option"] for q in q_rows if q["id"] == q2_id)
 
-    async def test_manager_participant_collection(self):
-        from bot.menus.attestation import _collect_eligible_participants
-        # Test with shops that have managers in database
-        shops = ['B-19 вул. Героїв Маріуполя, 62', 'B-31 вул. Юрія Руфа, 5', 'B-04 вул. Проскурівська, 15']
-        participants = await _collect_eligible_participants(shops)
-        
-        # Managers must be collected
-        manager_uids = [p["user_id"] for p in participants if p["is_manager"] == 1]
-        self.assertIn(1195097288, manager_uids) # Зубенко Михал Петрович
-        self.assertIn(6867721037, manager_uids) # цв цв цв
-        self.assertIn(990006, manager_uids)     # Максим Шевченко Андрійович
+        final_attempt, is_fin2 = await save_inline_answer(attempt_id, q2_id, correct_for_q2, db_path=TEST_DB)
+        self.assertTrue(is_fin2)
+        self.assertEqual(final_attempt["status"], "passed")
+        self.assertEqual(final_attempt["score"], 3) # 1 + 2 бали
+        self.assertEqual(final_attempt["max_score"], 3)
+        self.assertEqual(final_attempt["score_pct"], 100.0)
 
-        # Check manager role
-        for p in participants:
-            if p["is_manager"] == 1:
-                self.assertEqual(p["role_name"], "Керівник")
-                self.assertIsNotNone(p["shop_name"])
+        # Картка після завершення повертає is_finished = True
+        final_card = await get_inline_attempt_card_data(attempt_id, db_path=TEST_DB)
+        self.assertTrue(final_card["is_finished"])
+        self.assertEqual(final_card["attempt"]["status"], "passed")
 
-    async def test_one_day_attestation_deadline(self):
+    async def test_active_wave_shop_management(self):
+        """Перевіряє динамічне підключення нового магазину та зупинку/відновлення магазину."""
         tz = pytz.timezone(TIMEZONE)
-        now = datetime.now(tz)
-        deadline_dt = now + timedelta(days=1)
-        deadline_str = deadline_dt.strftime("%Y-%m-%d 23:59:59")
-        
+        deadline = (datetime.now(tz) + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+
         wave_id = await create_wave(
-            title="Одноденна атестація",
-            created_by=111,
-            duration_minutes=20,
-            passing_score_pct=80,
-            deadline_date=deadline_str,
-            shops=["B-19 вул. Героїв Маріуполя, 62"],
+            title="Динамічна атестація",
+            created_by=222,
+            duration_minutes=15,
+            passing_score_pct=75,
+            deadline_date=deadline,
+            shops=["b-01"],
+            target_type="staff",
             db_path=TEST_DB
         )
-        wave = await get_wave_by_id(wave_id, db_path=TEST_DB)
-        self.assertEqual(wave["deadline_date"], deadline_str)
+        await activate_wave(wave_id, db_path=TEST_DB)
+
+        # 1. Початковий стан
+        self.assertTrue(await is_shop_active_in_wave(wave_id, "b-01", db_path=TEST_DB))
+        self.assertFalse(await is_shop_active_in_wave(wave_id, "b-02", db_path=TEST_DB))
+
+        # 2. Адміністратор додає ще один магазин
+        added = await add_shop_to_active_wave(wave_id, "b-02", db_path=TEST_DB)
+        self.assertTrue(added)
+        self.assertTrue(await is_shop_active_in_wave(wave_id, "b-02", db_path=TEST_DB))
+
+        # 3. Адміністратор зупиняє проходження для b-01
+        closed = await close_shop_in_active_wave(wave_id, "b-01", db_path=TEST_DB)
+        self.assertTrue(closed)
+        self.assertFalse(await is_shop_active_in_wave(wave_id, "b-01", db_path=TEST_DB))
+        self.assertTrue(await is_shop_active_in_wave(wave_id, "b-02", db_path=TEST_DB))
+
+        # 4. Перевіряємо статуси магазинів
+        statuses = await get_wave_shops_status(wave_id, db_path=TEST_DB)
+        stat_map = {s["shop_name"]: s["status"] for s in statuses}
+        self.assertEqual(stat_map["b-01"], "closed")
+        self.assertEqual(stat_map["b-02"], "active")
+
+        # 5. Адміністратор відновлює b-01
+        resumed = await add_shop_to_active_wave(wave_id, "b-01", db_path=TEST_DB)
+        self.assertTrue(resumed)
+        self.assertTrue(await is_shop_active_in_wave(wave_id, "b-01", db_path=TEST_DB))
+
+    async def test_target_type_staff_vs_managers(self):
+        """Перевіряє розділення цільових категорій атестації: працівники проти керівників."""
+        tz = pytz.timezone(TIMEZONE)
+        deadline = (datetime.now(tz) + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+
+        # 1. Хвиля для керівників
+        wave_mgr = await create_wave(
+            title="Атестація Керівників 2026",
+            created_by=111,
+            duration_minutes=30,
+            passing_score_pct=85,
+            deadline_date=deadline,
+            shops=[],
+            target_type="managers",
+            db_path=TEST_DB
+        )
+        wave_obj = await get_wave_by_id(wave_mgr, db_path=TEST_DB)
+        self.assertEqual(wave_obj["target_type"], "managers")
+
+        # Збір учасників для керівників за user_id
+        participants_mgr = await _collect_eligible_participants([1195097288, 6867721037], target_type="managers")
+        self.assertGreaterEqual(len(participants_mgr), 1)
+        for p in participants_mgr:
+            self.assertEqual(p["is_manager"], 1)
+            self.assertEqual(p["role_name"], "Керівник")
+
+        # Збір учасників для працівників пекарні (не повинні містити керівників)
+        participants_staff = await _collect_eligible_participants(["B-19 вул. Героїв Маріуполя, 62"], target_type="staff")
+        for p in participants_staff:
+            self.assertEqual(p["is_manager"], 0)
+            self.assertNotEqual(p["role_name"], "Керівник")
 
 
 if __name__ == "__main__":

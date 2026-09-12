@@ -24,7 +24,7 @@ def get_attestation_action_button(text: str = "🚀 Розпочати атес�
     """
     Повертає нативну інлайн-кнопку бота для запуску тестування.
     """
-    return InlineKeyboardButton(text=text, callback_data="attestation_start")
+    return InlineKeyboardButton(text=text, callback_data="att_start_test")
 
 
 async def launch_attestation_broadcast(bot: Bot, wave_id: int) -> None:
