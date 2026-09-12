@@ -36,7 +36,6 @@ from bot.services.attestation_excel import (
     parse_attestation_excel,
     generate_attestation_results_xlsx
 )
-from web_server import validate_telegram_init_data
 
 
 TEST_DB = "test_attestation.db"
@@ -222,39 +221,6 @@ class TestAttestationFlow(unittest.IsolatedAsyncioTestCase):
         )
         wave = await get_wave_by_id(wave_id, db_path=TEST_DB)
         self.assertEqual(wave["deadline_date"], deadline_str)
-
-
-class TestTelegramSecurity(unittest.TestCase):
-
-    def test_telegram_hmac_validation(self):
-        bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
-        user_json = json.dumps({"id": 885061584, "first_name": "Daniil", "username": "danil"})
-
-        # Prepare data pairs
-        auth_date = "1726050000"
-        query_id = "AAHdF6IQAAAAAN0XohDhrOrc"
-
-        pairs = [
-            f"auth_date={auth_date}",
-            f"query_id={query_id}",
-            f"user={user_json}"
-        ]
-        pairs.sort()
-        data_check_string = "\n".join(pairs)
-
-        secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
-        calc_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
-
-        init_data_valid = f"query_id={urllib.parse.quote(query_id)}&user={urllib.parse.quote(user_json)}&auth_date={auth_date}&hash={calc_hash}"
-
-        validated = validate_telegram_init_data(init_data_valid, bot_token=bot_token)
-        self.assertIsNotNone(validated)
-        self.assertEqual(validated["id"], 885061584)
-        self.assertEqual(validated["username"], "danil")
-
-        # Test invalid hash
-        init_data_invalid = f"query_id={urllib.parse.quote(query_id)}&user={urllib.parse.quote(user_json)}&auth_date={auth_date}&hash=invalidhash123"
-        self.assertIsNone(validate_telegram_init_data(init_data_invalid, bot_token=bot_token))
 
 
 if __name__ == "__main__":

@@ -5,9 +5,9 @@ from datetime import datetime, timedelta
 from typing import Optional
 import pytz
 from aiogram import Bot
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from bot.config import TIMEZONE, WEB_APP_URL
+from bot.config import TIMEZONE
 from database.attestation import (
     get_active_wave,
     get_wave_by_id,
@@ -20,21 +20,11 @@ import aiosqlite
 logger = logging.getLogger(__name__)
 
 
-def get_attestation_webapp_button(text: str = "🚀 Розпочати атестацію", user_id: Optional[int] = None) -> InlineKeyboardButton:
+def get_attestation_action_button(text: str = "🚀 Розпочати атестацію", user_id: Optional[int] = None) -> InlineKeyboardButton:
     """
-    Повертає безпечну інлайн-кнопку для переходу в атестацію:
-    - Якщо WEB_APP_URL є HTTPS — відкриває як Telegram Mini App.
-    - Якщо HTTP (наприклад, локальна розробка) — відкриває як звичайне посилання,
-      оскільки Telegram API суворо забороняє HTTP у web_app кнопках.
+    Повертає нативну інлайн-кнопку бота для запуску тестування.
     """
-    url = (WEB_APP_URL or "").strip()
-    if url.startswith("https://"):
-        return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=url))
-    else:
-        if user_id:
-            sep = "&" if "?" in url else "?"
-            url = f"{url}{sep}debug_user_id={user_id}"
-        return InlineKeyboardButton(text=text, url=url)
+    return InlineKeyboardButton(text=text, callback_data="attestation_start")
 
 
 async def launch_attestation_broadcast(bot: Bot, wave_id: int) -> None:
@@ -84,7 +74,7 @@ async def launch_attestation_broadcast(bot: Bot, wave_id: int) -> None:
 
             # Безпечна інлайн-кнопка (HTTPS -> Mini App, HTTP -> browser fallback)
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [get_attestation_webapp_button("🚀 Розпочати атестацію", user_id=user_id)]
+                [get_attestation_action_button("🚀 Розпочати атестацію", user_id=user_id)]
             ])
 
             try:
@@ -168,7 +158,7 @@ async def attestation_reminder_worker(bot: Bot) -> None:
 
                             if should_remind:
                                 kb = InlineKeyboardMarkup(inline_keyboard=[
-                                    [get_attestation_webapp_button("🚀 Пройти атестацію", user_id=user_id)]
+                                    [get_attestation_action_button("🚀 Пройти атестацію", user_id=user_id)]
                                 ])
                                 try:
                                     await bot.send_message(chat_id=user_id, text=reminder_text, parse_mode="HTML", reply_markup=kb)

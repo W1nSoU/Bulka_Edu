@@ -23,7 +23,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler # New import
 from bot.services.survey_broadcaster import survey_reminder_worker
 from database.attestation import init_attestation_db
 from bot.services.attestation_worker import attestation_reminder_worker
-from web_server import run_web_server_async
 
 
 
@@ -152,11 +151,9 @@ async def start_bot():
     asyncio.create_task(survey_reminder_worker(bot))
     print_status("📝", "Фоновий воркер опитувань та нагадувань запущено", indent=5)
 
-    # Запускаємо фоновий воркер атестації та веб-сервер Mini App
+    # Запускаємо фоновий воркер атестації
     asyncio.create_task(attestation_reminder_worker(bot))
     print_status("🎓", "Фоновий воркер атестації запущено", indent=5)
-    asyncio.create_task(run_web_server_async(bot))
-    print_status("🌐", "FastAPI веб-сервер Mini App запущено", indent=5)
     
     # Логуємо запущені задачі
     logger.info(f"Scheduler started with {len(scheduler.get_jobs())} jobs")

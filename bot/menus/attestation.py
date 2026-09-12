@@ -13,13 +13,12 @@ from aiogram.types import (
     Message,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    BufferedInputFile,
-    WebAppInfo
+    BufferedInputFile
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from bot.config import TIMEZONE, WEB_APP_URL
+from bot.config import TIMEZONE
 from bot.constants import AVAILABLE_SHOPS
 from database.attestation import (
     get_active_wave,
@@ -51,7 +50,7 @@ from bot.services.attestation_excel import (
 )
 from bot.services.attestation_worker import (
     launch_attestation_broadcast,
-    get_attestation_webapp_button
+    get_attestation_action_button
 )
 
 logger = logging.getLogger(__name__)
@@ -792,7 +791,7 @@ async def dev_att_grant_retake_handler(callback: CallbackQuery, bot: Bot):
         # Надсилаємо повідомлення співробітнику в бот
         try:
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [get_attestation_webapp_button("🚀 Пройти атестацію повторно", user_id=user_id)]
+                [get_attestation_action_button("🚀 Пройти атестацію повторно", user_id=user_id)]
             ])
             await bot.send_message(
                 chat_id=user_id,

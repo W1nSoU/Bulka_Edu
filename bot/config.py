@@ -56,16 +56,10 @@ def validate_config():
     return True
 
 
-# ==================== Mini App / Web Server settings ====================
-WEB_SERVER_HOST = os.getenv("WEB_SERVER_HOST", "0.0.0.0")
-WEB_SERVER_PORT = int(os.getenv("WEB_SERVER_PORT", "8080"))
-WEB_APP_URL = os.getenv("WEB_APP_URL", "http://localhost:8080/attestation")
-
 __all__ = [
     "API_TOKEN", "DAYS_TOTAL", "TIMEZONE", "MAIN_DEVELOPER_ID", "GROQ_API_KEY", "OPENAI_API_KEY",
     "TOKEN_EXPIRY_HOURS", "TOKEN_CLEANUP_INTERVAL_HOURS",
     "INACTIVE_DAYS_THRESHOLD", "AUTO_REMINDER_INTERVAL_HOURS",
     "DEBUG", "LOG_TO_FILE", "LOG_FILE_PATH", "DEV_CHAT_ID",
-    "WEB_SERVER_HOST", "WEB_SERVER_PORT", "WEB_APP_URL",
     "validate_config",
 ]
