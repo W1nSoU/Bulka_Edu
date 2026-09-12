@@ -389,6 +389,132 @@ class TestAttestationFlow(unittest.IsolatedAsyncioTestCase):
         q_counts = await get_questions_count_by_role(db_path=TEST_DB)
         self.assertLess(q_counts.get("ВВ Пекар", 0), wave_obj["questions_count"])
 
+    async def test_manager_filtering_logic(self):
+        from bot.menus.attestation import _is_actual_store_manager, _get_manager_shop_name
+        from bot.config import MAIN_DEVELOPER_ID
+
+        # Перевірка дійсних керівників
+        self.assertTrue(_is_actual_store_manager({"uid": 999, "process": "Керівник", "status": "active"}))
+        self.assertTrue(_is_actual_store_manager({"uid": 998, "process": "Керівник Стажер", "status": "active"}))
+        self.assertTrue(_is_actual_store_manager({"uid": 997, "process": "Керівник", "status": None}))
+
+        # Перевірка виключення не-керівників
+        self.assertFalse(_is_actual_store_manager({"uid": 999, "process": "Developer", "status": "active"}))
+        self.assertFalse(_is_actual_store_manager({"uid": 999, "process": "Адміністратор", "status": "active"}))
+        self.assertFalse(_is_actual_store_manager({"uid": 999, "process": "Наглядач", "status": "active"}))
+        self.assertFalse(_is_actual_store_manager({"uid": 999, "process": "Територіал", "status": "active"}))
+        self.assertFalse(_is_actual_store_manager({"uid": 999, "process": "Керівник", "territorial_type": "Головний", "status": "active"}))
+        self.assertFalse(_is_actual_store_manager({"uid": 999, "process": "Керівник", "status": "fired"}))
+        if MAIN_DEVELOPER_ID > 0:
+            self.assertFalse(_is_actual_store_manager({"uid": MAIN_DEVELOPER_ID, "process": "Керівник", "status": "active"}))
+
+        # Перевірка вилучення назви магазину
+        self.assertEqual(_get_manager_shop_name({"shops": json.dumps(["Пекарня Хрещатик"])}), "Пекарня Хрещатик")
+        self.assertEqual(_get_manager_shop_name({"shops": ["Пекарня Поділ"]}), "Пекарня Поділ")
+        self.assertEqual(_get_manager_shop_name({"city": "Львів"}), "м. Львів")
+        self.assertEqual(_get_manager_shop_name({}), "Не вказано")
+
+    async def test_manager_wave_excel_export_detailed_sheets(self):
+        import openpyxl
+
+        # 1. Створюємо банк питань для ролі "Керівник"
+        mgr_questions = [
+            {
+                "question_text": "Як оформлюється графік змін працівників?",
+                "option_1": "Усно",
+                "option_2": "В системі до 25 числа",
+                "option_3": "За бажанням персоналу",
+                "option_4": "Після закінчення місяця",
+                "correct_option": 2,
+                "points": 1,
+                "explanation": "Графік затверджується заздалегідь до 25 числа."
+            },
+            {
+                "question_text": "Що робити при нестачі товару при інвентаризації?",
+                "option_1": "Ігнорувати",
+                "option_2": "Скласти акт розбіжностей",
+                "option_3": "Списати на інший магазин",
+                "option_4": "Приховати",
+                "correct_option": 2,
+                "points": 1,
+                "explanation": "Складається офіційний акт розбіжностей."
+            }
+        ]
+        await save_questions_for_role("Керівник", mgr_questions, db_path=TEST_DB)
+
+        # 2. Створюємо хвилю атестації для керівників
+        wave_id = await create_wave(
+            title="Атестація керуючих вересень 2026",
+            duration_minutes=20,
+            passing_score_pct=75,
+            deadline_date="2026-09-30 23:59:59",
+            shops=["Магазин Центр"],
+            created_by=1,
+            target_type="managers",
+            questions_count=2,
+            db_path=TEST_DB
+        )
+        await activate_wave(wave_id, db_path=TEST_DB)
+
+        # 3. Додаємо керівника до учасників
+        await add_participants_batch(wave_id, [{
+            "user_id": 501,
+            "full_name": "Коваленко Олена",
+            "role_name": "Керівник",
+            "shop_name": "Магазин Центр",
+            "is_manager": 1
+        }], db_path=TEST_DB)
+
+        # 4. Проходимо тестування керівником
+        attempt = await start_inline_attempt(
+            wave_id=wave_id,
+            user_id=501,
+            role_name="Керівник",
+            shop_name="Магазин Центр",
+            duration_minutes=20,
+            db_path=TEST_DB
+        )
+        q_order = json.loads(attempt["questions_order_json"])
+        self.assertEqual(len(q_order), 2)
+
+        # Керівник відповідає: на перше питання правильно (опція 2), на друге помилково (опція 1)
+        await save_inline_answer(attempt["id"], q_order[0], 2, db_path=TEST_DB)
+        await save_inline_answer(attempt["id"], q_order[1], 1, db_path=TEST_DB)
+        finished = await finish_inline_attempt(attempt["id"], db_path=TEST_DB)
+        self.assertEqual(finished["status"], "failed") # 1 бал з 2 = 50% < 75%
+
+        # 5. Генеруємо підсумковий звіт XLSX
+        excel_io = await generate_attestation_results_xlsx(wave_id, db_path=TEST_DB)
+        wb = openpyxl.load_workbook(excel_io)
+
+        # Перевіряємо наявність аркушів
+        self.assertIn("Зведений рейтинг керівників", wb.sheetnames)
+        self.assertIn("Коваленко Олена", wb.sheetnames)
+
+        # Перевіряємо зведений аркуш
+        ws_sum = wb["Зведений рейтинг керівників"]
+        self.assertIn("КОРПОРАТИВНА АТЕСТАЦІЯ BULKA: АТЕСТАЦІЯ КЕРУЮЧИХ ВЕРЕСЕНЬ 2026 (КЕРІВНИКИ)", ws_sum["A1"].value)
+        self.assertEqual(ws_sum["B6"].value, "Коваленко Олена")
+        self.assertEqual(ws_sum["C6"].value, "Магазин Центр")
+        self.assertEqual(ws_sum["D6"].value, 1)
+        self.assertEqual(ws_sum["E6"].value, 2)
+        self.assertEqual(ws_sum["G6"].value, "❌ Не складено")
+
+        # Перевіряємо детальний аркуш керівника
+        ws_mgr = wb["Коваленко Олена"]
+        self.assertIn("РЕЗУЛЬТАТИ АТЕСТАЦІЇ: КОВАЛЕНКО ОЛЕНА", ws_mgr["A1"].value)
+        self.assertIn("Посада: Керівник", ws_mgr["A2"].value)
+        self.assertIn("Набрано балів: 1 з 2", ws_mgr["A3"].value)
+
+        # Рядок першого питання (правильна відповідь)
+        self.assertEqual(ws_mgr["E6"].value, "✅ Вірно")
+        self.assertEqual(ws_mgr["F6"].value, 1)
+
+        # Рядок другого питання (помилкова відповідь)
+        self.assertEqual(ws_mgr["E7"].value, "❌ Помилка")
+        self.assertEqual(ws_mgr["F7"].value, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+

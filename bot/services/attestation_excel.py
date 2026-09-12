@@ -1,5 +1,6 @@
 from __future__ import annotations
 import io
+import json
 import re
 from datetime import datetime
 from typing import Dict, Any, List, Tuple, Optional
@@ -8,11 +9,14 @@ import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
+from database import DB_PATH
 from database.attestation import (
     get_wave_by_id,
     get_wave_shop_stats,
     get_shop_members_details,
-    get_wave_statistics
+    get_wave_statistics,
+    get_wave_managers_details,
+    get_questions_by_ids
 )
 
 
@@ -235,13 +239,311 @@ def parse_attestation_excel(file_bytes: bytes, valid_roles: List[str]) -> Tuple[
     return result, warnings
 
 
-async def generate_attestation_results_xlsx(wave_id: int) -> io.BytesIO:
+async def _generate_managers_attestation_results_xlsx(
+    wb: openpyxl.Workbook,
+    wave: Dict[str, Any],
+    wave_id: int,
+    overall_stats: Dict[str, Any],
+    db_path: str = DB_PATH
+):
+    """
+    Генерує спеціальний звіт для атестації керівників:
+    - Аркуш 1: «Зведений рейтинг керівників»
+    - Аркуші 2..N: Детальний аудит запитань та відповідей по кожному керівнику
+    """
+    title = wave.get("title", f"Атестація #{wave_id}")
+    passing_pct = wave.get("passing_score_pct", 80)
+    deadline = wave.get("deadline_date", "")
+
+    mgrs = await get_wave_managers_details(wave_id, db_path=db_path)
+    existing_titles: set[str] = set()
+
+    # -------------------------------------------------------------
+    # АРКУШ 1: Зведений рейтинг керівників
+    # -------------------------------------------------------------
+    ws_summary = wb.create_sheet(title="Зведений рейтинг керівників")
+    existing_titles.add("зведений рейтинг керівників")
+    ws_summary.views.sheetView[0].showGridLines = True
+
+    # Заголовок
+    ws_summary.merge_cells("A1:H1")
+    top_cell = ws_summary["A1"]
+    top_cell.value = f"🥐 КОРПОРАТИВНА АТЕСТАЦІЯ BULKA: {title.upper()} (КЕРІВНИКИ)"
+    top_cell.font = FONT_TITLE
+    top_cell.fill = HEADER_FILL_GOLD
+    top_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws_summary.row_dimensions[1].height = 34
+
+    # Інфо-блок
+    info_rows = [
+        f"Дедлайн здачі: {deadline} | Прохідний поріг: {passing_pct}% | Всього зареєстровано: {overall_stats['total_participants']} ос.",
+        f"Завершили тест: {overall_stats['completed_count']} ос. | Склали успішно: {overall_stats['passed_count']} ос. | Середній бал: {overall_stats['avg_score']}%"
+    ]
+    for idx, info_text in enumerate(info_rows, 2):
+        ws_summary.merge_cells(f"A{idx}:H{idx}")
+        cell = ws_summary[f"A{idx}"]
+        cell.value = info_text
+        cell.font = FONT_BOLD
+        cell.fill = SUBHEADER_FILL
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws_summary.row_dimensions[idx].height = 20
+
+    # Шапка таблиці рейтингу
+    summary_headers = [
+        "№",
+        "ПІБ керівника",
+        "Магазин",
+        "Набрано балів",
+        "Макс. балів",
+        "% успішності",
+        "Вердикт",
+        "Дата здачі"
+    ]
+    ws_summary.row_dimensions[5].height = 26
+    for col_idx, h in enumerate(summary_headers, 1):
+        c = ws_summary.cell(row=5, column=col_idx, value=h)
+        c.font = FONT_HEADER
+        c.fill = HEADER_FILL_DARK
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = BORDER_THIN
+
+    # Сортування керівників за результатом (відсоток, бали)
+    sorted_mgrs = sorted(mgrs, key=lambda m: (m.get("score_pct") or 0.0, m.get("score") or 0), reverse=True)
+
+    curr_row = 6
+    for idx, m in enumerate(sorted_mgrs, 1):
+        ws_summary.row_dimensions[curr_row].height = 22
+        st = m.get("attempt_status")
+        if st == "passed":
+            verdict = "✅ Складено"
+        elif st == "failed":
+            verdict = "❌ Не складено"
+        elif st == "timeout":
+            verdict = "⏱ Час вичерпано"
+        elif st == "in_progress":
+            verdict = "⏳ В процесі"
+        else:
+            verdict = "💤 Не розпочато"
+
+        score = m.get("score") if m.get("score") is not None else "-"
+        max_score = m.get("max_score") if m.get("max_score") is not None else "-"
+        score_pct = f"{m.get('score_pct')}%" if m.get("score_pct") is not None else "-"
+
+        fin_at = m.get("finished_at") or "-"
+        if fin_at != "-":
+            try:
+                dt = datetime.strptime(fin_at, "%Y-%m-%d %H:%M:%S")
+                fin_at = dt.strftime("%d.%m.%Y %H:%M")
+            except Exception:
+                pass
+
+        row_vals = [
+            idx,
+            m.get("full_name") or "Не вказано",
+            m.get("shop_name") or "Не вказано",
+            score,
+            max_score,
+            score_pct,
+            verdict,
+            fin_at
+        ]
+        for col_idx, val in enumerate(row_vals, 1):
+            cell = ws_summary.cell(row=curr_row, column=col_idx, value=val)
+            cell.font = FONT_DATA
+            cell.border = BORDER_THIN
+            if col_idx in (1, 4, 5, 6, 7, 8):
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+
+            if col_idx == 7:
+                if st == "passed":
+                    cell.fill = PASS_FILL
+                    cell.font = FONT_PASS
+                elif st in ("failed", "timeout"):
+                    cell.fill = FAIL_FILL
+                    cell.font = FONT_FAIL
+
+        curr_row += 1
+
+    s_widths = [6, 28, 22, 16, 16, 16, 18, 20]
+    for c_idx, w in enumerate(s_widths, 1):
+        ws_summary.column_dimensions[get_column_letter(c_idx)].width = w
+
+    # -------------------------------------------------------------
+    # АРКУШІ 2..N: Детальний аудит питань і відповідей по кожному керівнику
+    # -------------------------------------------------------------
+    for m in sorted_mgrs:
+        full_name = m.get("full_name") or f"Керівник_{m['user_id']}"
+        sheet_title = _sanitize_sheet_title(full_name, existing_titles)
+        ws_mgr = wb.create_sheet(title=sheet_title)
+        ws_mgr.views.sheetView[0].showGridLines = True
+
+        shop_name = m.get("shop_name") or "Не вказано"
+        st = m.get("attempt_status")
+        if st == "passed":
+            verdict = "✅ Складено"
+        elif st == "failed":
+            verdict = "❌ Не складено"
+        elif st == "timeout":
+            verdict = "⏱ Час вичерпано"
+        elif st == "in_progress":
+            verdict = "⏳ В процесі"
+        else:
+            verdict = "💤 Не розпочато"
+
+        score = m.get("score") if m.get("score") is not None else "-"
+        max_score = m.get("max_score") if m.get("max_score") is not None else "-"
+        score_pct = f"{m.get('score_pct')}%" if m.get("score_pct") is not None else "-"
+
+        fin_at = m.get("finished_at") or "-"
+        if fin_at != "-":
+            try:
+                dt = datetime.strptime(fin_at, "%Y-%m-%d %H:%M:%S")
+                fin_at = dt.strftime("%d.%m.%Y %H:%M")
+            except Exception:
+                pass
+
+        # Заголовок аркуша
+        ws_mgr.merge_cells("A1:G1")
+        h_cell = ws_mgr["A1"]
+        h_cell.value = f"👔 РЕЗУЛЬТАТИ АТЕСТАЦІЇ: {full_name.upper()} ({shop_name})"
+        h_cell.font = FONT_TITLE
+        h_cell.fill = HEADER_FILL_GOLD
+        h_cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws_mgr.row_dimensions[1].height = 32
+
+        # Інфо рядки
+        ws_mgr.merge_cells("A2:G2")
+        cell_i1 = ws_mgr["A2"]
+        cell_i1.value = f"Магазин: {shop_name} | Посада: Керівник | Статус: {verdict}"
+        cell_i1.font = FONT_BOLD
+        cell_i1.fill = SUBHEADER_FILL
+        cell_i1.alignment = Alignment(horizontal="center", vertical="center")
+        ws_mgr.row_dimensions[2].height = 20
+
+        ws_mgr.merge_cells("A3:G3")
+        cell_i2 = ws_mgr["A3"]
+        cell_i2.value = f"Набрано балів: {score} з {max_score} ({score_pct}) | Час здачі: {fin_at}"
+        cell_i2.font = FONT_BOLD
+        cell_i2.fill = SUBHEADER_FILL
+        cell_i2.alignment = Alignment(horizontal="center", vertical="center")
+        ws_mgr.row_dimensions[3].height = 20
+
+        # Шапка питань
+        q_headers = [
+            "№",
+            "Запитання",
+            "Відповідь керівника",
+            "Правильна відповідь",
+            "Вердикт",
+            "Бали",
+            "Пояснення"
+        ]
+        ws_mgr.row_dimensions[5].height = 24
+        for col_idx, qh in enumerate(q_headers, 1):
+            c = ws_mgr.cell(row=5, column=col_idx, value=qh)
+            c.font = FONT_HEADER
+            c.fill = HEADER_FILL_DARK
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = BORDER_THIN
+
+        # Парсимо питання та відповіді
+        q_ids = []
+        if m.get("questions_order_json"):
+            try:
+                q_ids = json.loads(m["questions_order_json"])
+            except Exception:
+                q_ids = []
+
+        ans_map = {}
+        if m.get("answers_json"):
+            try:
+                ans_map = json.loads(m["answers_json"])
+            except Exception:
+                ans_map = {}
+
+        if not q_ids:
+            ws_mgr.row_dimensions[6].height = 24
+            ws_mgr.merge_cells("A6:G6")
+            empty_c = ws_mgr["A6"]
+            empty_c.value = "Керівник ще не проходив тестування або відповіді відсутні."
+            empty_c.font = FONT_DATA
+            empty_c.alignment = Alignment(horizontal="center", vertical="center")
+            empty_c.border = BORDER_THIN
+        else:
+            q_dict = await get_questions_by_ids(q_ids, db_path=db_path)
+            q_row = 6
+            for q_idx, q_id in enumerate(q_ids, 1):
+                ws_mgr.row_dimensions[q_row].height = 24
+                q = q_dict.get(q_id, {})
+                q_text = q.get("question_text") or f"Питання #{q_id}"
+
+                user_opt = ans_map.get(str(q_id))
+                if user_opt is None:
+                    user_opt = ans_map.get(q_id)
+
+                corr_opt = q.get("correct_option")
+                corr_ans = q.get(f"option_{corr_opt}") if corr_opt else "-"
+
+                if user_opt is not None:
+                    try:
+                        user_opt_int = int(user_opt)
+                        user_ans = q.get(f"option_{user_opt_int}") or f"Варіант {user_opt_int}"
+                        is_correct = (user_opt_int == corr_opt)
+                    except Exception:
+                        user_ans = str(user_opt)
+                        is_correct = False
+                    verdict_q = "✅ Вірно" if is_correct else "❌ Помилка"
+                    pts = q.get("points", 1) if is_correct else 0
+                else:
+                    user_ans = "Немає відповіді"
+                    is_correct = False
+                    verdict_q = "⏱ Без відповіді"
+                    pts = 0
+
+                expl = q.get("explanation") or "-"
+
+                row_q_vals = [
+                    q_idx,
+                    q_text,
+                    user_ans,
+                    corr_ans,
+                    verdict_q,
+                    pts,
+                    expl
+                ]
+                for c_idx, val in enumerate(row_q_vals, 1):
+                    cell = ws_mgr.cell(row=q_row, column=c_idx, value=val)
+                    cell.font = FONT_DATA
+                    cell.border = BORDER_THIN
+                    if c_idx in (1, 5, 6):
+                        cell.alignment = Alignment(horizontal="center", vertical="center")
+                    else:
+                        cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+                    if c_idx == 5:
+                        if is_correct:
+                            cell.fill = PASS_FILL
+                            cell.font = FONT_PASS
+                        else:
+                            cell.fill = FAIL_FILL
+                            cell.font = FONT_FAIL
+
+                q_row += 1
+
+        mgr_widths = [6, 40, 30, 30, 16, 10, 35]
+        for c_idx, w in enumerate(mgr_widths, 1):
+            ws_mgr.column_dimensions[get_column_letter(c_idx)].width = w
+
+
+async def generate_attestation_results_xlsx(wave_id: int, db_path: str = DB_PATH) -> io.BytesIO:
     """
     Генерує підсумковий звіт результатів атестаційної хвилі:
-    - Аркуш 1: «Зведений рейтинг магазинів»
-    - Аркуші 2..N: Детальні результати по кожному магазину
+    - Для працівників: «Зведений рейтинг магазинів» + деталізація по магазинах
+    - Для керівників: «Зведений рейтинг керівників» + детальні аркуші по кожному керівнику
     """
-    wave = await get_wave_by_id(wave_id)
+    wave = await get_wave_by_id(wave_id, db_path=db_path)
     if not wave:
         raise ValueError(f"Хвилю атестації {wave_id} не знайдено.")
 
@@ -249,12 +551,19 @@ async def generate_attestation_results_xlsx(wave_id: int) -> io.BytesIO:
     passing_pct = wave.get("passing_score_pct", 80)
     deadline = wave.get("deadline_date", "")
 
-    shop_stats = await get_wave_shop_stats(wave_id)
-    overall_stats = await get_wave_statistics(wave_id)
+    overall_stats = await get_wave_statistics(wave_id, db_path=db_path)
 
     wb = openpyxl.Workbook()
-    wb.remove(wb.active) # прибираємо дефолтний
+    wb.remove(wb.active)  # прибираємо дефолтний
 
+    if wave.get("target_type") == "managers":
+        await _generate_managers_attestation_results_xlsx(wb, wave, wave_id, overall_stats, db_path=db_path)
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return output
+
+    shop_stats = await get_wave_shop_stats(wave_id, db_path=db_path)
     existing_titles: set[str] = set()
 
     # -------------------------------------------------------------
@@ -388,7 +697,7 @@ async def generate_attestation_results_xlsx(wave_id: int) -> io.BytesIO:
             c.alignment = Alignment(horizontal="center", vertical="center")
             c.border = BORDER_THIN
 
-        members = await get_shop_members_details(wave_id, shop_name)
+        members = await get_shop_members_details(wave_id, shop_name, db_path=db_path)
         m_row = 4
         for m_idx, m in enumerate(members, 1):
             ws_shop.row_dimensions[m_row].height = 20

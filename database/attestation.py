@@ -1152,3 +1152,47 @@ async def get_shop_members_details(wave_id: int, shop_name: str, db_path: str = 
         ''', (wave_id, wave_id, shop_name)) as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+
+async def get_wave_managers_details(wave_id: int, db_path: str = DB_PATH) -> List[Dict[str, Any]]:
+    """
+    Повертає деталізований список усіх керівників хвилі з їхніми останніми результатами атестації.
+    """
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('''
+        SELECT p.user_id, p.full_name, p.role_name, p.shop_name, p.is_manager,
+               a.id AS attempt_id, a.status AS attempt_status, a.score, a.max_score, a.score_pct,
+               a.finished_at, a.started_at, a.duration_seconds, a.can_retake,
+               a.questions_order_json, a.answers_json
+        FROM attestation_participants p
+        LEFT JOIN (
+            SELECT * FROM attestation_attempts
+            WHERE wave_id = ?
+            GROUP BY user_id
+            HAVING id = MAX(id)
+        ) a ON p.user_id = a.user_id
+        WHERE p.wave_id = ?
+        ORDER BY p.full_name ASC
+        ''', (wave_id, wave_id)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+
+async def get_questions_by_ids(q_ids: List[int], db_path: str = DB_PATH) -> Dict[int, Dict[str, Any]]:
+    """
+    Повертає мапу {q_id: question_dict} для переданого списку ID запитань.
+    """
+    if not q_ids:
+        return {}
+    unique_ids = list(set(q_ids))
+    placeholders = ",".join("?" for _ in unique_ids)
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT * FROM attestation_questions WHERE id IN ({placeholders})",
+            tuple(unique_ids)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return {r["id"]: dict(r) for r in rows}
+

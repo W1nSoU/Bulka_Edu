@@ -19,7 +19,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from bot.config import TIMEZONE
+from bot.config import TIMEZONE, MAIN_DEVELOPER_ID
 from bot.constants import AVAILABLE_SHOPS
 from database.attestation import (
     get_active_wave,
@@ -35,6 +35,7 @@ from database.attestation import (
     get_wave_statistics,
     get_wave_shop_stats,
     get_shop_members_details,
+    get_wave_managers_details,
     allow_user_retake,
     add_participants_batch,
     get_wave_participants,
@@ -621,9 +622,40 @@ async def dev_att_shops_done_handler(callback: CallbackQuery, state: FSMContext)
 # Вибір керівників (для Managers)
 # -------------------------------------------------------------
 
+def _is_actual_store_manager(m: Dict[str, Any]) -> bool:
+    """Перевіряє, чи є користувач саме керуючим/керівником магазину (не адмін, не територіал, не наглядач)."""
+    if m.get("status") == "fired":
+        return False
+    proc = m.get("process")
+    if proc not in ("Керівник", "Керівник Стажер"):
+        return False
+    if m.get("territorial_type"):
+        return False
+    uid = int(m.get("uid") or m.get("user_id") or 0)
+    if uid == MAIN_DEVELOPER_ID:
+        return False
+    return True
+
+
+def _get_manager_shop_name(m: Dict[str, Any]) -> str:
+    """Повертає назву магазину керівника."""
+    shops = m.get("shops")
+    if isinstance(shops, str):
+        try:
+            shops = json.loads(shops)
+        except Exception:
+            shops = [shops]
+    if isinstance(shops, list) and shops:
+        return str(shops[0]).strip()
+    city = m.get("city")
+    if city:
+        return f"м. {city}"
+    return "Не вказано"
+
+
 async def _get_active_managers_list() -> List[Dict[str, Any]]:
     managers = await get_all_managers()
-    active_mgrs = [m for m in managers if m.get("status") != "fired"]
+    active_mgrs = [m for m in managers if _is_actual_store_manager(m)]
     return sorted(active_mgrs, key=lambda m: m.get("name") or m.get("full_name") or "")
 
 
@@ -653,7 +685,8 @@ async def _render_managers_picker(message_or_cb, state: FSMContext, page: int = 
         is_sel = uid in selected_mgr_ids
         mark = "✅ " if is_sel else "⬜️ "
         name = m.get("full_name") or m.get("name") or "Керівник"
-        btn_text = f"{mark}{name[:24]}"
+        shop_name = _get_manager_shop_name(m)
+        btn_text = f"{mark}{name[:16]} ({shop_name[:12]})"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_att_tgl_mgr:{global_idx}")])
 
     nav_row = []
@@ -868,7 +901,7 @@ async def _collect_eligible_participants(
         target_uids = set(int(t) for t in targets) if targets else set()
 
         for m in managers:
-            if m.get("status") == "fired":
+            if not _is_actual_store_manager(m):
                 continue
             m_uid = int(m.get("uid") or m.get("user_id") or 0)
             if not m_uid or (target_uids and m_uid not in target_uids):
@@ -877,15 +910,7 @@ async def _collect_eligible_participants(
                 continue
 
             seen_uids.add(m_uid)
-            m_shops = m.get("shops", [])
-            if isinstance(m_shops, str):
-                try:
-                    m_shops = json.loads(m_shops)
-                except Exception:
-                    m_shops = [m_shops]
-            elif not isinstance(m_shops, list):
-                m_shops = []
-            primary_shop = m_shops[0] if m_shops else "Керівництво"
+            primary_shop = _get_manager_shop_name(m)
 
             participants.append({
                 "user_id": m_uid,
@@ -1009,6 +1034,7 @@ async def dev_att_active_wave_handler(callback: CallbackQuery):
 
     parts = callback.data.split(":")
     wave_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+    page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
 
     if wave_id:
         wave = await get_wave_by_id(wave_id)
@@ -1021,11 +1047,10 @@ async def dev_att_active_wave_handler(callback: CallbackQuery):
 
     wave_id = wave["id"]
     stats = await get_wave_statistics(wave_id)
-    shop_statuses = await get_wave_shops_status(wave_id)
-    status_map = {s["shop_name"]: s["status"] for s in shop_statuses}
 
     pct_done = round((stats["completed_count"] / stats["total_participants"] * 100), 1) if stats["total_participants"] > 0 else 0.0
-    tgt_desc = "👥 Працівники" if wave.get("target_type") == "staff" else "👔 Керівники"
+    is_mgr_wave = wave.get("target_type") == "managers"
+    tgt_desc = "👔 Керівники" if is_mgr_wave else "👥 Працівники"
 
     text = (
         f"📊 <b>Результати атестації: {wave['title']}</b>\n"
@@ -1038,23 +1063,71 @@ async def dev_att_active_wave_handler(callback: CallbackQuery):
         f"• ✅ Склали успішно: <b>{stats['passed_count']}</b>\n"
         f"• ❌ Не склали: <b>{stats['failed_count']}</b>\n"
         f"• ⭐️ Середній бал: <b>{stats['avg_score']}%</b>\n\n"
-        f"🏪 <b>Магазини хвилі (натисніть для деталей):</b>"
     )
 
     buttons = []
-    shop_stats = await get_wave_shop_stats(wave_id)
-    for s in shop_stats:
-        sh_id = s.get("shop_id", 0)
-        sh_name = s["shop_name"]
-        is_active = status_map.get(sh_name, "active") == "active"
-        icon = "🟢" if is_active else "🔴"
-        status_suffix = "" if is_active else " (Зупинено)"
-        label = f"{icon} {sh_name[:20]}{status_suffix} ({s['completed']}/{s['total_participants']} — {s['avg_score_pct']}%)"
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"dev_att_sh_dt:{sh_id}")])
 
-    # Кнопка підключення ще одного магазину для активних staff хвиль
-    if wave.get("status") == "active" and wave.get("target_type") == "staff":
-        buttons.append([InlineKeyboardButton(text="➕ Запустити ще магазин", callback_data=f"dev_att_add_sh_menu:{wave_id}")])
+    if is_mgr_wave:
+        text += "👔 <b>Керівники хвилі (натисніть для деталей):</b>"
+        mgrs = await get_wave_managers_details(wave_id)
+        PER_PAGE = 6
+        total_pages = max(1, (len(mgrs) + PER_PAGE - 1) // PER_PAGE)
+        page = max(1, min(page, total_pages))
+        start_idx = (page - 1) * PER_PAGE
+        page_mgrs = mgrs[start_idx:start_idx + PER_PAGE]
+
+        for m in page_mgrs:
+            st = m.get("attempt_status")
+            pct = m.get("score_pct")
+            score = m.get("score")
+            max_s = m.get("max_score")
+            if st == "passed":
+                icon = "🟢"
+                res_str = f"{pct}% ({score}/{max_s} б.)"
+            elif st == "failed":
+                icon = "🔴"
+                res_str = f"{pct}% ({score}/{max_s} б.)"
+            elif st == "timeout":
+                icon = "⏱"
+                res_str = f"Час вичерпано ({pct}%)"
+            elif st == "in_progress":
+                icon = "⏳"
+                res_str = "В процесі"
+            else:
+                icon = "💤"
+                res_str = "Не розпочав"
+
+            name = m.get("full_name") or "Керівник"
+            shop = m.get("shop_name") or "Магазин"
+            btn_label = f"{icon} {name[:16]} ({shop[:12]}) — {res_str}"
+            buttons.append([InlineKeyboardButton(text=btn_label, callback_data=f"dev_att_mgr_dt:{wave_id}:{m['user_id']}")])
+
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_att_active_wave:{wave_id}:{page - 1}"))
+        if total_pages > 1:
+            nav_row.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_att_active_wave:{wave_id}:{page + 1}"))
+        if nav_row:
+            buttons.append(nav_row)
+
+    else:
+        text += "🏪 <b>Магазини хвилі (натисніть для деталей):</b>"
+        shop_statuses = await get_wave_shops_status(wave_id)
+        status_map = {s["shop_name"]: s["status"] for s in shop_statuses}
+        shop_stats = await get_wave_shop_stats(wave_id)
+        for s in shop_stats:
+            sh_id = s.get("shop_id", 0)
+            sh_name = s["shop_name"]
+            is_active = status_map.get(sh_name, "active") == "active"
+            icon = "🟢" if is_active else "🔴"
+            status_suffix = "" if is_active else " (Зупинено)"
+            label = f"{icon} {sh_name[:20]}{status_suffix} ({s['completed']}/{s['total_participants']} — {s['avg_score_pct']}%)"
+            buttons.append([InlineKeyboardButton(text=label, callback_data=f"dev_att_sh_dt:{sh_id}")])
+
+        if wave.get("status") == "active":
+            buttons.append([InlineKeyboardButton(text="➕ Запустити ще магазин", callback_data=f"dev_att_add_sh_menu:{wave_id}")])
 
     buttons.append([InlineKeyboardButton(text="📊 Вивантажити звіт XLSX", callback_data=f"dev_att_export_xlsx:{wave_id}")])
     if wave.get("status") == "active":
@@ -1063,6 +1136,114 @@ async def dev_att_active_wave_handler(callback: CallbackQuery):
 
     await _safe_edit_or_answer(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
+
+
+async def dev_att_manager_details_handler(callback: CallbackQuery):
+    if not await _check_admin(callback):
+        return
+
+    parts = callback.data.split(":")
+    wave_id = int(parts[1])
+    user_id = int(parts[2])
+
+    wave = await get_wave_by_id(wave_id)
+    if not wave:
+        await callback.answer("Хвилю не знайдено", show_alert=True)
+        return
+
+    mgrs = await get_wave_managers_details(wave_id)
+    m = next((mgr for mgr in mgrs if mgr["user_id"] == user_id), None)
+    if not m:
+        await callback.answer("Дані керівника не знайдено", show_alert=True)
+        return
+
+    name = m.get("full_name") or "Керівник"
+    shop = m.get("shop_name") or "Магазин"
+    status = m.get("attempt_status")
+
+    if status == "passed":
+        st_badge = "✅ Складено успішно"
+    elif status == "failed":
+        st_badge = "❌ Не складено"
+    elif status == "timeout":
+        st_badge = "⏱ Час вичерпано"
+    elif status == "in_progress":
+        st_badge = "⏳ Проходить тест зараз"
+    else:
+        st_badge = "💤 Ще не розпочав"
+
+    score_text = f"{m.get('score', 0)} / {m.get('max_score', 0)} б. ({m.get('score_pct', 0.0)}%)" if status else "—"
+    
+    dur_sec = m.get("duration_seconds", 0)
+    dur_text = f"{dur_sec // 60:02d}:{dur_sec % 60:02d} хв" if dur_sec else "—"
+
+    fin_at = m.get("finished_at") or "—"
+    if fin_at != "—":
+        try:
+            dt = datetime.strptime(fin_at, "%Y-%m-%d %H:%M:%S")
+            fin_at = dt.strftime("%d.%m.%Y %H:%M")
+        except Exception:
+            pass
+
+    text = (
+        f"👔 <b>Успішність керівника</b>\n\n"
+        f"👤 <b>ПІБ:</b> {name}\n"
+        f"🏪 <b>Магазин:</b> {shop}\n"
+        f"📌 <b>Хвиля:</b> {wave['title']}\n"
+        f"🎯 <b>Прохідний бал:</b> {wave['passing_score_pct']}%\n\n"
+        f"📊 <b>Статус:</b> {st_badge}\n"
+        f"⭐️ <b>Результат:</b> {score_text}\n"
+        f"⏱ <b>Витрачений час:</b> {dur_text}\n"
+        f"📅 <b>Дата завершення:</b> {fin_at}\n"
+    )
+
+    buttons = []
+    if status in ("failed", "timeout"):
+        can_retake = m.get("can_retake", 0)
+        if can_retake == 1:
+            text += "\n<i>(Дозвіл на перездачу вже надано)</i>\n"
+        else:
+            buttons.append([InlineKeyboardButton(
+                text="🔄 Надати дозвіл на перездачу",
+                callback_data=f"dev_att_rtk_mgr:{wave_id}:{user_id}"
+            )])
+
+    buttons.append([InlineKeyboardButton(text="🔙 До списку керівників", callback_data=f"dev_att_active_wave:{wave_id}")])
+
+    await _safe_edit_or_answer(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_att_grant_retake_mgr_handler(callback: CallbackQuery, bot: Bot):
+    if not await _check_admin(callback):
+        return
+
+    parts = callback.data.split(":")
+    wave_id = int(parts[1])
+    user_id = int(parts[2])
+
+    success = await allow_user_retake(wave_id, user_id, callback.from_user.id)
+    if success:
+        await callback.answer("✅ Дозвіл на перездачу надано!", show_alert=True)
+        try:
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [get_attestation_action_button("🚀 Пройти атестацію повторно", user_id=user_id)]
+            ])
+            await bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "🔄 <b>Вам надано дозвіл на повторне складання атестації!</b>\n\n"
+                    "Керівництво погодило додаткову спробу. Ви можете розпочати проходження тесту заново. Успіхів! 🥐"
+                ),
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+        except Exception as e:
+            logger.warning(f"Не вдалося сповістити керівника {user_id} про перездачу: {e}")
+    else:
+        await callback.answer("Не вдалося надати перездачу або вже дозволено.", show_alert=True)
+
+    await dev_att_manager_details_handler(callback)
 
 
 # -------------------------------------------------------------
@@ -1669,9 +1850,11 @@ def register_attestation_handlers(dp: Dispatcher):
     dp.callback_query.register(dev_att_add_shop_confirm_handler, lambda c: c.data and (c.data.startswith("dev_att_add_sh_cf:") or c.data.startswith("dev_att_add_sh_confirm:")))
     dp.callback_query.register(lambda c: c.answer(), lambda c: c.data == "noop")
     dp.callback_query.register(dev_att_shop_details_handler, lambda c: c.data and c.data.startswith("dev_att_sh_dt:"))
+    dp.callback_query.register(dev_att_manager_details_handler, lambda c: c.data and c.data.startswith("dev_att_mgr_dt:"))
     dp.callback_query.register(dev_att_stop_shop_handler, lambda c: c.data and c.data.startswith("dev_att_stop_sh:"))
     dp.callback_query.register(dev_att_resume_shop_handler, lambda c: c.data and c.data.startswith("dev_att_resume_sh:"))
     dp.callback_query.register(dev_att_grant_retake_handler, lambda c: c.data and c.data.startswith("dev_att_rtk:"))
+    dp.callback_query.register(dev_att_grant_retake_mgr_handler, lambda c: c.data and c.data.startswith("dev_att_rtk_mgr:"))
     dp.callback_query.register(dev_att_export_xlsx_handler, lambda c: c.data and c.data.startswith("dev_att_export_xlsx:"))
     dp.callback_query.register(dev_att_close_wave_handler, lambda c: c.data and c.data.startswith("dev_att_close:"))
     dp.callback_query.register(dev_att_history_handler, lambda c: c.data == "dev_att_history")
