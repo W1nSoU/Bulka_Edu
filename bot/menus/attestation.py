@@ -183,7 +183,7 @@ async def dev_attestation_menu_handler(callback: CallbackQuery, state: Optional[
 
     text = "🎓 <b>Корпоративна піврічна атестація BULKA</b>\n\n"
     if active_wave:
-        tgt_badge = "🥐 Працівники пекарень" if active_wave.get("target_type") == "staff" else "👔 Керівники"
+        tgt_badge = "👥 Працівники" if active_wave.get("target_type") == "staff" else "👔 Керівники"
         text += (
             f"🟢 <b>Активна хвиля:</b> <b>{active_wave['title']}</b>\n"
             f"🎯 <b>Цільова група:</b> {tgt_badge}\n"
@@ -376,13 +376,13 @@ async def _start_create_wave_flow(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(AttestationStates.create_wave_target_type)
     text = (
-        "➕ <b>Створення нової хвилі атестації</b> [Крок 1/4]\n\n"
+        "➕ <b>Створення нової хвилі атестації</b> [Крок 1/5]\n\n"
         "Оберіть <b>цільову категорію учасників</b> для цієї атестації:\n\n"
-        "• <b>Працівники пекарень</b> — атестація персоналу за обраними пекарнями.\n"
-        "• <b>Керівники</b> — окрема управлінська атестація керуючих пекарень."
+        "• <b>Працівники</b> — атестація персоналу за обраними магазинами.\n"
+        "• <b>Керівники</b> — окрема управлінська атестація керуючих магазинів."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🥐 Працівники пекарень", callback_data="dev_att_tgt:staff")],
+        [InlineKeyboardButton(text="👥 Працівники", callback_data="dev_att_tgt:staff")],
         [InlineKeyboardButton(text="👔 Керівники", callback_data="dev_att_tgt:managers")],
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
     ])
@@ -398,7 +398,7 @@ async def dev_att_target_type_handler(callback: CallbackQuery, state: FSMContext
     await state.update_data(target_type=target_type)
     await state.set_state(AttestationStates.create_wave_title)
 
-    tgt_label = "Працівники пекарень" if target_type == "staff" else "Керівники"
+    tgt_label = "Працівники" if target_type == "staff" else "Керівники"
     text = (
         f"➕ <b>Створення нової хвилі атестації ({tgt_label})</b> [Крок 2/5]\n\n"
         "Введіть назву хвилі атестації:\n"
@@ -429,7 +429,7 @@ async def _render_q_count_picker(message_or_cb: Any, state: FSMContext):
     data = await state.get_data()
     title = data.get("wave_title", "")
     target_type = data.get("target_type", "staff")
-    tgt_label = "Працівники пекарень" if target_type == "staff" else "Керівники"
+    tgt_label = "Працівники" if target_type == "staff" else "Керівники"
 
     text = (
         f"➕ <b>Створення нової хвилі атестації ({tgt_label})</b> [Крок 3/5]\n\n"
@@ -531,10 +531,10 @@ async def _render_shops_picker(message_or_cb, state: FSMContext, page: int = 1):
     page_shops = all_shops[start_idx:start_idx + per_page]
 
     text = (
-        f"🏪 <b>Вибір магазинів для атестації</b> [Крок 2/4]\n"
+        f"🏪 <b>Вибір магазинів для атестації</b> [Крок 4/5]\n"
         f"Хвиля: <b>{data.get('wave_title')}</b>\n\n"
         f"Обрано магазинів: <b>{len(selected_shops)}</b> з {len(all_shops)}\n\n"
-        f"<i>Натискайте на кнопки пекарень, щоб додати або зняти позначку:</i>"
+        f"<i>Натискайте на кнопки магазинів, щоб додати або зняти позначку:</i>"
     )
 
     buttons = []
@@ -640,7 +640,7 @@ async def _render_managers_picker(message_or_cb, state: FSMContext, page: int = 
     page_mgrs = all_mgrs[start_idx:start_idx + per_page]
 
     text = (
-        f"👔 <b>Вибір керівників для атестації</b>\n"
+        f"👔 <b>Вибір керівників для атестації</b> [Крок 4/5]\n"
         f"Хвиля: <b>{data.get('wave_title')}</b>\n\n"
         f"Обрано керівників: <b>{len(selected_mgr_ids)}</b> з {len(all_mgrs)}\n\n"
         f"<i>Натискайте на керівників для вибору:</i>"
@@ -737,7 +737,7 @@ async def dev_att_managers_done_handler(callback: CallbackQuery, state: FSMConte
 async def _prompt_duration_step(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AttestationStates.create_wave_duration)
     text = (
-        "⏱ <b>Тривалість тестування</b> [Крок 3/4]\n\n"
+        "⏱ <b>Тривалість тестування</b> [Крок 5/5]\n\n"
         "Скільки хвилин надається на проходження атестації з моменту натискання кнопки старту?\n"
         "<i>(Таймер рахується на сервері)</i>"
     )
@@ -762,7 +762,7 @@ async def dev_att_duration_handler(callback: CallbackQuery, state: FSMContext):
 
     await state.set_state(AttestationStates.create_wave_passing)
     text = (
-        "🎯 <b>Прохідний бал атестації</b> [Крок 4/4]\n\n"
+        "🎯 <b>Прохідний бал атестації</b> [Крок 5/5]\n\n"
         "Який відсоток правильних відповідей необхідний для успішного зарахування?"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -805,7 +805,7 @@ async def dev_att_passing_handler(callback: CallbackQuery, state: FSMContext):
     else:
         shops = data.get("selected_shops", [])
         participants_to_register = await _collect_eligible_participants(shops, target_type="staff")
-        tgt_text = f"🏪 <b>Обрано пекарень:</b> {len(shops)}\n"
+        tgt_text = f"🏪 <b>Обрано магазинів:</b> {len(shops)}\n"
 
     # Перевірка наявності питань у банку для всіх посад учасників
     needed_roles = set(p["role_name"] for p in participants_to_register)
@@ -981,11 +981,11 @@ async def dev_att_confirm_launch_handler(callback: CallbackQuery, state: FSMCont
     asyncio.create_task(launch_attestation_broadcast(bot_instance, wave_id))
 
     await state.clear()
-    tgt_desc = "Працівники пекарень" if target_type == "staff" else "Керівники"
+    tgt_desc = "Працівники" if target_type == "staff" else "Керівники"
     await callback.message.answer(
         f"🎉 <b>Хвилю атестації «{title}» успішно запущено!</b>\n\n"
         f"🎯 Цільова група: <b>{tgt_desc}</b>\n"
-        f"🏪 Пекарень: <b>{len(shops)}</b>\n"
+        f"🏪 Магазинів: <b>{len(shops)}</b>\n"
         f"👥 Зареєстровано учасників: <b>{len(participants)}</b>\n"
         f"🔢 Питань у тесті: <b>{q_count}</b>\n"
         f"⏱ Час на спробу: <b>{dur} хв</b>\n"
@@ -1025,7 +1025,7 @@ async def dev_att_active_wave_handler(callback: CallbackQuery):
     status_map = {s["shop_name"]: s["status"] for s in shop_statuses}
 
     pct_done = round((stats["completed_count"] / stats["total_participants"] * 100), 1) if stats["total_participants"] > 0 else 0.0
-    tgt_desc = "🥐 Працівники пекарень" if wave.get("target_type") == "staff" else "👔 Керівники"
+    tgt_desc = "👥 Працівники" if wave.get("target_type") == "staff" else "👔 Керівники"
 
     text = (
         f"📊 <b>Результати атестації: {wave['title']}</b>\n"
@@ -1038,7 +1038,7 @@ async def dev_att_active_wave_handler(callback: CallbackQuery):
         f"• ✅ Склали успішно: <b>{stats['passed_count']}</b>\n"
         f"• ❌ Не склали: <b>{stats['failed_count']}</b>\n"
         f"• ⭐️ Середній бал: <b>{stats['avg_score']}%</b>\n\n"
-        f"🏪 <b>Пекарні хвилі (натисніть для деталей):</b>"
+        f"🏪 <b>Магазини хвилі (натисніть для деталей):</b>"
     )
 
     buttons = []
@@ -1099,7 +1099,7 @@ async def dev_att_add_shop_menu_handler(callback: CallbackQuery):
     text = (
         f"➕ <b>Підключити магазин до активної атестації</b>\n"
         f"Хвиля: <b>{wave['title']}</b>\n\n"
-        f"Оберіть пекарню для відкриття тестування та відправки запрошень працівникам:"
+        f"Оберіть магазин для відкриття тестування та відправки запрошень працівникам:"
     )
 
     buttons = []
@@ -1136,7 +1136,7 @@ async def dev_att_add_shop_confirm_handler(callback: CallbackQuery, bot: Bot):
         return
     shop_name = all_shops[shop_idx]
 
-    await callback.answer("⏳ Підключення пекарні...")
+    await callback.answer("⏳ Підключення магазину...")
 
     # Додаємо магазин у БД
     await add_shop_to_active_wave(wave_id, shop_name)
@@ -1182,10 +1182,10 @@ async def dev_att_shop_details_handler(callback: CallbackQuery):
 
     status_badge = "🟢 Активний (тест відкритий)" if is_active else "🔴 Зупинено (тест заблоковано)"
     text = (
-        f"🏪 <b>Пекарня: {shop_name}</b>\n"
+        f"🏪 <b>Магазин: {shop_name}</b>\n"
         f"Хвиля: <i>{wave['title'] if wave else ''}</i>\n"
         f"Статус тестування: <b>{status_badge}</b>\n\n"
-        f"👥 <b>Працівники пекарні:</b>\n"
+        f"👥 <b>Працівники магазину:</b>\n"
     )
 
     buttons = []
@@ -1576,19 +1576,19 @@ async def _render_inline_finish_card(callback: CallbackQuery, attempt: Dict[str,
             "🎉 <b>Вітаємо! Атестацію успішно складено!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 <b>Співробітник:</b> {full_name}\n"
-            f"🏪 <b>Пекарня:</b> {attempt.get('shop_name')}\n"
+            f"🏪 <b>Магазин:</b> {attempt.get('shop_name')}\n"
             f"👔 <b>Посада:</b> {attempt.get('role_name')}\n\n"
             f"📊 <b>Ваш результат:</b> {score} з {max_score} б. (<b>{score_pct}%</b>)\n"
             f"🎯 <b>Прохідний поріг:</b> {pass_pct}%\n"
             f"⏱ <b>Витрачено часу:</b> {mins} хв {secs} с\n\n"
-            "<i>Твій результат успішно зараховано до рейтингу пекарні! Дякуємо за професіоналізм! 🥐</i>"
+            "<i>Твій результат успішно зараховано до рейтингу магазину! Дякуємо за професіоналізм! 🥐</i>"
         )
     elif status == "timeout":
         text = (
             "⏱ <b>Час на проходження атестації вичерпано!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 <b>Співробітник:</b> {full_name}\n"
-            f"🏪 <b>Пекарня:</b> {attempt.get('shop_name')}\n"
+            f"🏪 <b>Магазин:</b> {attempt.get('shop_name')}\n"
             f"👔 <b>Посада:</b> {attempt.get('role_name')}\n\n"
             f"📊 <b>Зарахований результат:</b> {score} з {max_score} б. (<b>{score_pct}%</b>)\n"
             f"🎯 <b>Прохідний поріг:</b> {pass_pct}%\n\n"
@@ -1599,7 +1599,7 @@ async def _render_inline_finish_card(callback: CallbackQuery, attempt: Dict[str,
             "⏳ <b>Атестацію не складено</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 <b>Співробітник:</b> {full_name}\n"
-            f"🏪 <b>Пекарня:</b> {attempt.get('shop_name')}\n"
+            f"🏪 <b>Магазин:</b> {attempt.get('shop_name')}\n"
             f"👔 <b>Посада:</b> {attempt.get('role_name')}\n\n"
             f"📊 <b>Ваш результат:</b> {score} з {max_score} б. (<b>{score_pct}%</b>)\n"
             f"🎯 <b>Прохідний поріг:</b> {pass_pct}%\n"
