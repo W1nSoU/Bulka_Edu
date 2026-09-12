@@ -144,7 +144,10 @@ class BotLogger:
                 parse_mode="HTML"
             )
         except Exception as e:
-            self.logger.error(f"Failed to send Telegram alert: {e}")
+            if "chat not found" in str(e).lower():
+                self.logger.debug(f"Telegram alert chat not found: {e}")
+            else:
+                self.logger.error(f"Failed to send Telegram alert: {e}")
     
     def exception(self, message: str, send_alert: bool = True):
         """Логує exception з traceback. Надсилає стисле повідомлення."""

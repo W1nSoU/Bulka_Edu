@@ -72,6 +72,7 @@ class AttestationStates(StatesGroup):
     waiting_excel_file = State()
     create_wave_target_type = State()
     create_wave_title = State()
+    create_wave_q_count = State()
     create_wave_shops = State()
     create_wave_managers = State()
     create_wave_duration = State()
@@ -233,7 +234,7 @@ async def dev_att_questions_menu_handler(callback: CallbackQuery, state: FSMCont
     for role in roles:
         cnt = q_counts.get(role, 0)
         total_q += cnt
-        icon = "✅" if cnt >= 15 else ("⚠️" if cnt > 0 else "❌")
+        icon = "✅" if cnt >= 5 else ("⚠️" if cnt > 0 else "❌")
         text += f"• {icon} <b>{role}:</b> {cnt} питань\n"
 
     text += f"\n<b>Всього в базі:</b> {total_q} питань.\n\n"
@@ -399,7 +400,7 @@ async def dev_att_target_type_handler(callback: CallbackQuery, state: FSMContext
 
     tgt_label = "Працівники пекарень" if target_type == "staff" else "Керівники"
     text = (
-        f"➕ <b>Створення нової хвилі атестації ({tgt_label})</b> [Крок 2/4]\n\n"
+        f"➕ <b>Створення нової хвилі атестації ({tgt_label})</b> [Крок 2/5]\n\n"
         "Введіть назву хвилі атестації:\n"
         f"<i>(наприклад: <b>Осіння атестація 2026 ({tgt_label})</b>)</i>"
     )
@@ -420,17 +421,97 @@ async def att_process_wave_title(message: Message, state: FSMContext):
         return
 
     await state.update_data(wave_title=title)
+    await state.set_state(AttestationStates.create_wave_q_count)
+    await _render_q_count_picker(message, state)
+
+
+async def _render_q_count_picker(message_or_cb: Any, state: FSMContext):
+    data = await state.get_data()
+    title = data.get("wave_title", "")
+    target_type = data.get("target_type", "staff")
+    tgt_label = "Працівники пекарень" if target_type == "staff" else "Керівники"
+
+    text = (
+        f"➕ <b>Створення нової хвилі атестації ({tgt_label})</b> [Крок 3/5]\n\n"
+        f"🏷 <b>Назва:</b> {title}\n\n"
+        "🔢 <b>Оберіть кількість питань у тесті:</b>\n"
+        "<i>Для кожного учасника бот сформує унікальний набір випадкових запитань без повторень із банку.</i>\n\n"
+        "<i>Оберіть одне зі стандартних значень або введіть довільне:</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="5 питань", callback_data="dev_att_qcnt:5"),
+            InlineKeyboardButton(text="10 питань", callback_data="dev_att_qcnt:10"),
+        ],
+        [
+            InlineKeyboardButton(text="15 питань", callback_data="dev_att_qcnt:15"),
+            InlineKeyboardButton(text="20 питань", callback_data="dev_att_qcnt:20"),
+        ],
+        [
+            InlineKeyboardButton(text="✏️ Ввести іншу кількість", callback_data="dev_att_qcnt:custom")
+        ],
+        [
+            InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")
+        ]
+    ])
+    await _safe_edit_or_answer(message_or_cb, text, reply_markup=kb)
+
+
+async def dev_att_change_qcnt_handler(callback: CallbackQuery, state: FSMContext):
+    if not await _check_admin(callback):
+        return
+    await state.set_state(AttestationStates.create_wave_q_count)
+    await _render_q_count_picker(callback, state)
+    await callback.answer()
+
+
+async def dev_att_qcnt_callback_handler(callback: CallbackQuery, state: FSMContext):
+    if not await _check_admin(callback):
+        return
+    val = callback.data.split(":")[1]
+    if val == "custom":
+        await state.set_state(AttestationStates.create_wave_q_count)
+        text = (
+            "✏️ <b>Введіть бажану кількість питань у тесті:</b>\n\n"
+            "<i>Надішліть повідомленням ціле число від 1 до 100 (наприклад: 10):</i>"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад до варіантів", callback_data="dev_att_change_qcnt")],
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
+        ])
+        await _safe_edit_or_answer(callback, text, reply_markup=kb)
+        await callback.answer()
+        return
+
+    q_count = int(val)
+    await callback.answer()
+    await _proceed_after_q_count(callback, state, q_count)
+
+
+async def att_process_wave_q_count_msg(message: Message, state: FSMContext):
+    if not await _check_admin(message):
+        return
+    txt = (message.text or "").strip()
+    if not txt.isdigit() or not (1 <= int(txt) <= 100):
+        await message.answer("⚠️ Будь ласка, введіть коректне число питань від 1 до 100:")
+        return
+    q_count = int(txt)
+    await _proceed_after_q_count(message, state, q_count)
+
+
+async def _proceed_after_q_count(message_or_cb: Any, state: FSMContext, q_count: int):
+    await state.update_data(questions_count=q_count)
     data = await state.get_data()
     target_type = data.get("target_type", "staff")
 
     if target_type == "managers":
         await state.update_data(selected_managers=[])
         await state.set_state(AttestationStates.create_wave_managers)
-        await _render_managers_picker(message, state, page=1)
+        await _render_managers_picker(message_or_cb, state, page=1)
     else:
         await state.update_data(selected_shops=[])
         await state.set_state(AttestationStates.create_wave_shops)
-        await _render_shops_picker(message, state, page=1)
+        await _render_shops_picker(message_or_cb, state, page=1)
 
 
 # -------------------------------------------------------------
@@ -715,6 +796,7 @@ async def dev_att_passing_handler(callback: CallbackQuery, state: FSMContext):
     dur = data["wave_duration"]
     pass_pct = passing
     target_type = data.get("target_type", "staff")
+    q_count = data.get("questions_count", 10)
 
     if target_type == "managers":
         mgr_ids = data.get("selected_managers", [])
@@ -725,20 +807,46 @@ async def dev_att_passing_handler(callback: CallbackQuery, state: FSMContext):
         participants_to_register = await _collect_eligible_participants(shops, target_type="staff")
         tgt_text = f"🏪 <b>Обрано пекарень:</b> {len(shops)}\n"
 
+    # Перевірка наявності питань у банку для всіх посад учасників
+    needed_roles = set(p["role_name"] for p in participants_to_register)
+    q_counts = await get_questions_count_by_role()
+    deficient_roles = []
+    for r in sorted(needed_roles):
+        avail = q_counts.get(r, 0)
+        if avail < q_count:
+            deficient_roles.append((r, avail, q_count))
+
     text = (
         "📋 <b>Підтвердження запуску атестації</b>\n\n"
         f"🏷 <b>Назва:</b> {title}\n"
         f"{tgt_text}"
         f"👥 <b>Потенційних учасників:</b> {len(participants_to_register)} ос.\n"
+        f"🔢 <b>Питань у тесті:</b> {q_count} (випадкова унікальна вибірка)\n"
         f"⏱ <b>Час на тест:</b> {dur} хв (серверний таймер)\n"
         f"🎯 <b>Прохідний поріг:</b> {pass_pct}%\n"
         f"📅 <b>Дедлайн здачі:</b> 1 день (до {deadline_dt.strftime('%d.%m.%Y о 23:59')})\n\n"
-        "<i>Після натискання «Запустити» хвиля активується, а всім учасникам буде надіслано персональне запрошення з інлайн-кнопкою старту тесту.</i>"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Запустити атестацію", callback_data="dev_att_confirm_launch")],
-        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
-    ])
+
+    if deficient_roles:
+        text += "⚠️ <b>Неможливо запустити атестацію! У банку недостатньо питань:</b>\n"
+        for r, avail, req in deficient_roles:
+            text += f"• ⚠️ <b>{r}:</b> {avail} з {req} необхідних\n"
+        text += (
+            "\n💡 <i>Запуск заблоковано. Будь ласка, додайте питання в банк або оберіть меншу кількість питань для тесту.</i>"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Змінити к-ть питань", callback_data="dev_att_change_qcnt")],
+            [InlineKeyboardButton(text="📚 Банк запитань", callback_data="dev_att_questions_menu")],
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
+        ])
+    else:
+        text += "<i>Після натискання «Запустити» хвиля активується, а всім учасникам буде надіслано персональне запрошення з інлайн-кнопкою старту тесту.</i>"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Запустити атестацію", callback_data="dev_att_confirm_launch")],
+            [InlineKeyboardButton(text="🔄 Змінити к-ть питань", callback_data="dev_att_change_qcnt")],
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
+        ])
+
     await _safe_edit_or_answer(callback, text, reply_markup=kb)
     await callback.answer()
 
@@ -823,6 +931,7 @@ async def dev_att_confirm_launch_handler(callback: CallbackQuery, state: FSMCont
     pass_pct = data.get("wave_passing", 80)
     deadline = data.get("wave_deadline")
     target_type = data.get("target_type", "staff")
+    q_count = data.get("questions_count", 10)
 
     if target_type == "managers":
         mgr_ids = data.get("selected_managers", [])
@@ -840,6 +949,15 @@ async def dev_att_confirm_launch_handler(callback: CallbackQuery, state: FSMCont
             return
         participants = await _collect_eligible_participants(shops, target_type="staff")
 
+    # Сувора валідація банку питань перед запуском
+    needed_roles = set(p["role_name"] for p in participants)
+    q_counts = await get_questions_count_by_role()
+    deficient_roles = [r for r in needed_roles if q_counts.get(r, 0) < q_count]
+    if deficient_roles:
+        def_str = ", ".join(f"{r} ({q_counts.get(r, 0)}/{q_count})" for r in deficient_roles)
+        await callback.answer(f"⚠️ Недостатньо питань у банку для: {def_str}. Змініть кількість або додайте питання!", show_alert=True)
+        return
+
     await _safe_edit_or_answer(callback, "⏳ Створення та активація хвилі атестації...")
 
     # Створюємо хвилю
@@ -850,7 +968,8 @@ async def dev_att_confirm_launch_handler(callback: CallbackQuery, state: FSMCont
         passing_score_pct=pass_pct,
         deadline_date=deadline,
         shops=shops,
-        target_type=target_type
+        target_type=target_type,
+        questions_count=q_count
     )
     await activate_wave(wave_id)
 
@@ -867,7 +986,10 @@ async def dev_att_confirm_launch_handler(callback: CallbackQuery, state: FSMCont
         f"🎉 <b>Хвилю атестації «{title}» успішно запущено!</b>\n\n"
         f"🎯 Цільова група: <b>{tgt_desc}</b>\n"
         f"🏪 Пекарень: <b>{len(shops)}</b>\n"
-        f"👥 Зареєстровано учасників: <b>{len(participants)}</b>\n\n"
+        f"👥 Зареєстровано учасників: <b>{len(participants)}</b>\n"
+        f"🔢 Питань у тесті: <b>{q_count}</b>\n"
+        f"⏱ Час на спробу: <b>{dur} хв</b>\n"
+        f"🎯 Прохідний поріг: <b>{pass_pct}%</b>\n\n"
         f"Похвильова розсилка запрошень розпочалася.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -1516,6 +1638,11 @@ def register_attestation_handlers(dp: Dispatcher):
     dp.callback_query.register(dev_att_create_wave_confirmed_handler, lambda c: c.data == "dev_att_create_wave_confirmed")
     dp.callback_query.register(dev_att_target_type_handler, lambda c: c.data and c.data.startswith("dev_att_tgt:"))
     dp.message.register(att_process_wave_title, AttestationStates.create_wave_title)
+
+    # Майстер створення хвилі: вибір кількості питань
+    dp.callback_query.register(dev_att_qcnt_callback_handler, lambda c: c.data and c.data.startswith("dev_att_qcnt:"))
+    dp.callback_query.register(dev_att_change_qcnt_handler, lambda c: c.data == "dev_att_change_qcnt")
+    dp.message.register(att_process_wave_q_count_msg, AttestationStates.create_wave_q_count)
 
     # Вибір магазинів (staff)
     dp.callback_query.register(dev_att_toggle_shop_handler, lambda c: c.data and c.data.startswith("dev_att_tgl_sh:"))

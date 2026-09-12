@@ -318,6 +318,77 @@ class TestAttestationFlow(unittest.IsolatedAsyncioTestCase):
             # Перевіряємо, що індекс точно резолвиться назад у назву магазину
             self.assertEqual(all_shops[idx], shop_name)
 
+    async def test_question_limit_and_random_sampling(self):
+        """Перевіряє конфігурацію кількості запитань та випадкову вибірку без повторень."""
+        tz = pytz.timezone(TIMEZONE)
+        deadline = (datetime.now(tz) + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+
+        # 1. Створюємо хвилю з лімітом 5 запитань
+        wave_id = await create_wave(
+            title="Тест ліміту питань 2026",
+            created_by=100,
+            duration_minutes=15,
+            passing_score_pct=80,
+            deadline_date=deadline,
+            shops=["Пекарня 1"],
+            target_type="staff",
+            questions_count=5,
+            db_path=TEST_DB
+        )
+        wave_obj = await get_wave_by_id(wave_id, db_path=TEST_DB)
+        self.assertEqual(wave_obj["questions_count"], 5)
+
+        # 2. Додаємо 12 питань у банк для "ВВ Бариста"
+        questions = []
+        for i in range(1, 13):
+            questions.append({
+                "question_text": f"Питання номер {i} для бариста?",
+                "option_1": f"Відповідь {i}-A",
+                "option_2": f"Відповідь {i}-B",
+                "option_3": f"Відповідь {i}-C",
+                "option_4": f"Відповідь {i}-D",
+                "correct_option": 1,
+                "points": 1
+            })
+        await save_questions_for_role("ВВ Бариста", questions, db_path=TEST_DB)
+
+        # 3. Стартуємо спробу для першого користувача
+        attempt_user1 = await start_inline_attempt(
+            wave_id=wave_id,
+            user_id=101,
+            role_name="ВВ Бариста",
+            shop_name="Пекарня 1",
+            duration_minutes=15,
+            db_path=TEST_DB
+        )
+        q_order_1 = json.loads(attempt_user1["questions_order_json"])
+        self.assertEqual(len(q_order_1), 5, "Має бути відібрано рівно 5 питань")
+        self.assertEqual(len(set(q_order_1)), 5, "Питання не повинні дублюватися")
+
+        # 4. Стартуємо спробу для другого користувача
+        attempt_user2 = await start_inline_attempt(
+            wave_id=wave_id,
+            user_id=102,
+            role_name="ВВ Бариста",
+            shop_name="Пекарня 1",
+            duration_minutes=15,
+            db_path=TEST_DB
+        )
+        q_order_2 = json.loads(attempt_user2["questions_order_json"])
+        self.assertEqual(len(q_order_2), 5)
+        self.assertEqual(len(set(q_order_2)), 5)
+
+        # 5. Перевіряємо валідацію достатності банку питань
+        q_counts = await get_questions_count_by_role(db_path=TEST_DB)
+        self.assertEqual(q_counts.get("ВВ Бариста", 0), 12)
+        # Для 5 питань Бариста достатня (12 >= 5)
+        self.assertGreaterEqual(q_counts.get("ВВ Бариста", 0), wave_obj["questions_count"])
+
+        # Якщо у посади лише 2 питання, а хвиля вимагає 5 — фіксується дефіцит
+        await save_questions_for_role("ВВ Пекар", questions[:2], db_path=TEST_DB)
+        q_counts = await get_questions_count_by_role(db_path=TEST_DB)
+        self.assertLess(q_counts.get("ВВ Пекар", 0), wave_obj["questions_count"])
+
 
 if __name__ == "__main__":
     unittest.main()

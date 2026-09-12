@@ -36,6 +36,7 @@ async def init_attestation_db(db_path: str = DB_PATH) -> None:
             duration_minutes INTEGER NOT NULL DEFAULT 20,
             passing_score_pct INTEGER NOT NULL DEFAULT 80,
             deadline_date TEXT NOT NULL,               -- YYYY-MM-DD HH:MM:SS
+            questions_count INTEGER NOT NULL DEFAULT 10,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             closed_at TIMESTAMP
         )
@@ -117,6 +118,7 @@ async def init_attestation_db(db_path: str = DB_PATH) -> None:
         # Безпечні міграції колонок (якщо таблиці вже існували)
         migrations = [
             ("attestation_waves", "target_type", "TEXT NOT NULL DEFAULT 'staff'"),
+            ("attestation_waves", "questions_count", "INTEGER NOT NULL DEFAULT 10"),
             ("attestation_wave_shops", "status", "TEXT NOT NULL DEFAULT 'active'"),
             ("attestation_wave_shops", "started_at", "TIMESTAMP"),
             ("attestation_wave_shops", "closed_at", "TIMESTAMP"),
@@ -203,6 +205,7 @@ async def create_wave(
     deadline_date: str,
     shops: List[str],
     target_type: str = 'staff',
+    questions_count: int = 10,
     db_path: str = DB_PATH
 ) -> int:
     """Створює нову хвилю атестації та повертає її ID."""
@@ -210,9 +213,9 @@ async def create_wave(
     async with aiosqlite.connect(db_path) as db:
         cursor = await db.execute('''
         INSERT INTO attestation_waves 
-        (title, target_type, status, created_by, duration_minutes, passing_score_pct, deadline_date)
-        VALUES (?, ?, 'draft', ?, ?, ?, ?)
-        ''', (title, target_type, created_by, duration_minutes, passing_score_pct, deadline_date))
+        (title, target_type, status, created_by, duration_minutes, passing_score_pct, deadline_date, questions_count)
+        VALUES (?, ?, 'draft', ?, ?, ?, ?, ?)
+        ''', (title, target_type, created_by, duration_minutes, passing_score_pct, deadline_date, questions_count))
         wave_id = cursor.lastrowid
 
         for shop in shops:
@@ -644,6 +647,13 @@ async def start_inline_attempt(
                 return last_dict
 
         # 2. Створюємо нову спробу
+        # Отримуємо ліміт питань з налаштувань хвилі
+        q_limit = 10
+        async with db.execute("SELECT questions_count FROM attestation_waves WHERE id = ?", (wave_id,)) as w_cur:
+            w_row = await w_cur.fetchone()
+            if w_row and w_row["questions_count"]:
+                q_limit = int(w_row["questions_count"])
+
         # Отримуємо всі питання для цієї посади
         async with db.execute(
             "SELECT * FROM attestation_questions WHERE role_name = ? ORDER BY id ASC",
@@ -655,11 +665,14 @@ async def start_inline_attempt(
         if not questions:
             raise ValueError(f"Не знайдено питань у базі для посади '{role_name}'")
 
-        # Перемішуємо порядок питань
-        q_ids = [q["id"] for q in questions]
-        random.shuffle(q_ids)
+        # Перемішуємо порядок питань і відбираємо рівно q_limit питань без повторень
+        random.shuffle(questions)
+        if q_limit and len(questions) > q_limit:
+            questions = questions[:q_limit]
 
-        # Для кожного запитання перемішуємо порядок варіантів 1..4
+        q_ids = [q["id"] for q in questions]
+
+        # Для кожного обраного запитання перемішуємо порядок варіантів 1..4
         options_order: Dict[str, List[int]] = {}
         for q in questions:
             opts = [1, 2]
