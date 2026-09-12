@@ -363,7 +363,11 @@ async def menu_days(callback: CallbackQuery):
                 "city": None,
             }
     else:
-        if not user_details or not (user_details.get('manager_id') and user_details.get('role')):
+        has_role = bool(user_details and user_details.get('role'))
+        is_worker = bool(user_details and (user_details.get('status') == 'Працівник' or user_details.get('is_worker')))
+        has_manager = bool(user_details and user_details.get('manager_id'))
+        
+        if not user_details or not has_role or (not is_worker and not has_manager):
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❌ Доступ заблоковано", callback_data="none")]
             ])
@@ -382,7 +386,8 @@ async def menu_days(callback: CallbackQuery):
             await callback.answer("Доступ заблоковано", show_alert=True)
             return
     
-    initialize_user_progress(user_id)
+    from bot.state import sync_user_progress_cache
+    await sync_user_progress_cache(user_id)
     user_role = user_details.get('role', 'ALL') if user_details else 'ALL'
     day_overview = await get_days_overview(user_id, role=user_role)
     
@@ -421,7 +426,8 @@ async def menu_days_page_callback(callback: CallbackQuery):
     user_details = await get_user_details(user_id)
     user_role = user_details.get('role', 'ALL') if user_details else 'ALL'
     
-    initialize_user_progress(user_id)
+    from bot.state import sync_user_progress_cache
+    await sync_user_progress_cache(user_id)
     day_overview = await get_days_overview(user_id, role=user_role)
     
     syllabus = await get_material_by_role_day_type(user_role, 0, "syllabus")
@@ -572,25 +578,19 @@ async def _ensure_learning_access(callback: CallbackQuery):
 def _build_test_callback(day: int) -> str:
     return f"day{day}_test"
 
-async def _has_completed_course(user_id: int) -> bool:
-    overview = await get_days_overview(user_id)
-    print(f"_has_completed_course debug: User ID {user_id}, Overview: {overview}")
-    # Всі дні мають бути відкриті або завершені
+async def _has_completed_course(user_id: int, role: Optional[str] = None) -> bool:
+    overview = await get_days_overview(user_id, role=role)
     for day_num, status in overview:
-        # Перевіряємо тільки ті дні, що є частиною курсу (до DAYS_TOTAL)
-        if day_num <= DAYS_TOTAL and status == DayStatus.CLOSED:
-            print(f"_has_completed_course debug: Day {day_num} is CLOSED. Returning False.")
-            return False # Якщо хоча б один день закритий, курс не завершено
-    print(f"_has_completed_course debug: All days are OPEN or COMPLETED. Returning True.")
-    return True # Всі дні або відкриті, або завершені
+        if status == DayStatus.CLOSED:
+            return False
+    return True
 
-async def _all_days_accessible(user_id: int) -> bool:
-    overview = await get_days_overview(user_id)
-    # Перевіряємо, чи всі дні до DAYS_TOTAL є OPEN або COMPLETED
+async def _all_days_accessible(user_id: int, role: Optional[str] = None) -> bool:
+    overview = await get_days_overview(user_id, role=role)
     for day_num, status in overview:
-        if day_num <= DAYS_TOTAL and status == DayStatus.CLOSED:
-            return False # Якщо хоча б один день закритий, значить не всі доступні
-    return True # Всі дні або відкриті, або завершені (доступні)
+        if status == DayStatus.CLOSED:
+            return False
+    return True
 
 def _build_snippet(text: str, limit: int = 240) -> str:
     clean = (text or "").strip()
@@ -714,21 +714,35 @@ async def show_student_main_menu(
                     )
                     return
 
-    initialize_user_progress(user_id)
+    from bot.state import sync_user_progress_cache
+    await sync_user_progress_cache(user_id)
+    user_details = await get_user_details(user_id)
+    user_role = user_details.get('role') if user_details else None
+    from database.positions import get_days_count_for_role
+    role_days = await get_days_count_for_role(user_role) if user_role else DAYS_TOTAL
+
     progress_count = get_progress(user_id)
-    available_day = get_available_day(user_id)
-    percent = int(progress_count / DAYS_TOTAL * 100) if DAYS_TOTAL else 0
-    is_new_user = progress_count == 0
-    all_completed = progress_count >= DAYS_TOTAL
-    all_open_or_completed = await _all_days_accessible(user_id)
+    available_day = get_available_day(user_id, total_days=role_days)
+    is_worker = bool(user_details and (user_details.get('status') == 'Працівник' or user_details.get('is_worker')))
+
+    if is_worker:
+        percent = 100
+        all_completed = True
+        all_open_or_completed = True
+    else:
+        percent = int(progress_count / role_days * 100) if role_days else 0
+        all_completed = progress_count >= role_days
+        all_open_or_completed = await _all_days_accessible(user_id, role=user_role)
+
+    is_new_user = progress_count == 0 and not is_worker
     can_search = all_completed or all_open_or_completed
 
     caption = (
         "🍞 <b>Твій булочковий прогрес</b> 🏆\n\n"
         f"🔹 Пройдено: <b>{percent}%</b>\n"
-        f"🔹 Отримано матеріалів: <b>{progress_count}</b>\n"
-        f"🔹 Сьогоднішній день: <b>#{available_day}</b>\n\n"
-        f"🌟{'Розпочнімо' if is_new_user else 'Продовжимо'} твій шлях до нових знань!"
+        f"🔹 Отримано матеріалів: <b>{progress_count if not is_worker else role_days}</b>\n"
+        f"🔹 Сьогоднішній день: <b>#{available_day if not is_worker else role_days}</b>\n\n"
+        f"🌟{'Ви стали частиною команди BULKA!' if is_worker else ('Розпочнімо' if is_new_user else 'Продовжимо') + ' твій шлях до нових знань!'}"
     )
     keyboard = main_menu_keyboard(
         is_new_user=is_new_user,
@@ -2046,8 +2060,8 @@ async def observer_profile_handler(callback: CallbackQuery):
     all_users = await get_all_users()
     all_managers = await get_all_kerivnyky()
     
-    interns_count = sum(1 for u in all_users if not u.get("is_worker"))
-    workers_count = sum(1 for u in all_users if u.get("is_worker"))
+    interns_count = sum(1 for u in all_users if not (u.get("status") == "Працівник" or u.get("is_worker")))
+    workers_count = sum(1 for u in all_users if (u.get("status") == "Працівник" or u.get("is_worker")))
     managers_count = len(all_managers)
     total_users = len(all_users)
     
@@ -2087,6 +2101,8 @@ async def manager_profile_handler_new_message(callback: CallbackQuery):
 async def profile_handler_new_message(callback: CallbackQuery):
     user_id = callback.from_user.id
     from bot.utils import get_user_avatar_input, _send_or_edit_card_photo, get_manager_display_title
+    from database.positions import get_days_count_for_role
+    from bot.state import sync_user_progress_cache
     
     user_details = await get_user_details(user_id)
     if not user_details:
@@ -2100,37 +2116,65 @@ async def profile_handler_new_message(callback: CallbackQuery):
     manager_id = user_details.get('manager_id')
     manager_name_display = await get_manager_display_title(callback.bot, manager_id)
 
-    initialize_user_progress(user_id)
+    await sync_user_progress_cache(user_id)
     progress_count = get_progress(user_id)
-    available_day = get_available_day(user_id)
-    percent = int(progress_count / DAYS_TOTAL * 100) if DAYS_TOTAL else 0
+    user_role = user_details.get('role', 'Не вказано')
+    total_days = await get_days_count_for_role(user_role) if user_role != 'Не вказано' else DAYS_TOTAL
+    available_day = get_available_day(user_id, total_days=total_days)
 
-    progress_bar_length = 10
-    filled_length = int(progress_bar_length * percent / 100)
-    progress_bar = "🟢" * filled_length + "⚪" * (progress_bar_length - filled_length)
+    is_worker = bool(user_details.get('status') == 'Працівник' or user_details.get('is_worker'))
+    user_name = user_details.get('full_name') or callback.from_user.full_name or ("Працівник" if is_worker else "Стажер")
 
-    if percent == 0:
-        motivation = "🌱 Ваша подорож тільки починається! Вперед до нових знань!"
-    elif percent < 30:
-        motivation = "🌿 Хороший початок - половина справи! Продовжуйте в тому ж дусі!"
-    elif percent < 70:
-        motivation = "🌲 Ви на правильному шляху до досконалості!"
+    if is_worker:
+        progress_bar = "🟢" * 10
+        status_line = "💼 Статус: <b>Працівник компанії</b> 🌟"
+        worker_since = user_details.get('worker_since')
+        if worker_since:
+            try:
+                dt = datetime.fromisoformat(worker_since)
+                status_line += f" <i>(з {dt.strftime('%d.%m.%Y')})</i>"
+            except Exception:
+                status_line += f" <i>(з {worker_since})</i>"
+
+        motivation = "🎉 Ви успішно завершили навчання та є частиною дружньої команди BULKA! Бажаємо нових досягнень та успіхів у роботі! 🥐✨"
+
+        text = (
+            f"🍞 <b>Персональний профіль BULKA: {user_name}</b> 🍞\n\n"
+            f"{status_line}\n"
+            f"🔹 Ваша посада: <b>{user_role}</b>\n"
+            f"🔹 Місто: <b>{user_details.get('city', 'Не вказано')}</b>\n"
+            f"🔹 Магазин: <b>{user_details.get('shop', 'Не вказано')}</b>\n"
+            f"🔹 Керівник: <b>{html.escape(manager_name_display)}</b>\n\n"
+            f"📊 <b>Матеріали курсу:</b>\n"
+            f"{progress_bar} 100% ({total_days}/{total_days})\n\n"
+            f"{motivation}"
+        )
     else:
-        motivation = "✨ Ви дуже близько до початку нових звершень!"
+        percent = int(progress_count / total_days * 100) if total_days else 0
+        progress_bar_length = 10
+        filled_length = int(progress_bar_length * percent / 100)
+        progress_bar = "🟢" * filled_length + "⚪" * (progress_bar_length - filled_length)
 
-    user_name = user_details.get('full_name') or callback.from_user.full_name or "Стажер"
+        if percent == 0:
+            motivation = "🌱 Ваша подорож тільки починається! Вперед до нових знань!"
+        elif percent < 30:
+            motivation = "🌿 Хороший початок - половина справи! Продовжуйте в тому ж дусі!"
+        elif percent < 70:
+            motivation = "🌲 Ви на правильному шляху до досконалості!"
+        else:
+            motivation = "✨ Ви дуже близько до початку нових звершень!"
 
-    text = (
-        f"🍞 <b>Персональний профіль BULKA: {user_name}</b> 🍞\n\n"
-        f"🔹 Поточний день навчання: <b>День {available_day}</b>\n"
-        f"🔹 Ваша посада: <b>{user_details.get('role', 'Не вказано')}</b>\n"
-        f"🔹 Місто: <b>{user_details.get('city', 'Не вказано')}</b>\n"
-        f"🔹 Магазин: <b>{user_details.get('shop', 'Не вказано')}</b>\n"
-        f"🔹 Керівник: <b>{html.escape(manager_name_display)}</b>\n\n"
-        f"📊 <b>Ваш прогрес:</b>\n"
-        f"{progress_bar} {percent}% ({progress_count}/{DAYS_TOTAL})\n\n"
-        f"{motivation}"
-    )
+        text = (
+            f"🍞 <b>Персональний профіль BULKA: {user_name}</b> 🍞\n\n"
+            f"🔹 Поточний день навчання: <b>День {available_day}</b>\n"
+            f"🔹 Ваша посада: <b>{user_role}</b>\n"
+            f"🔹 Місто: <b>{user_details.get('city', 'Не вказано')}</b>\n"
+            f"🔹 Магазин: <b>{user_details.get('shop', 'Не вказано')}</b>\n"
+            f"🔹 Керівник: <b>{html.escape(manager_name_display)}</b>\n\n"
+            f"📊 <b>Ваш прогрес:</b>\n"
+            f"{progress_bar} {percent}% ({progress_count}/{total_days})\n\n"
+            f"{motivation}"
+        )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏠 В головне меню", callback_data="main_menu")]
@@ -2166,13 +2210,16 @@ async def manager_intern_profile_handler(callback: CallbackQuery):
             last_activity_str = last_activity
 
     intern_name = intern.get('full_name', 'Невідомий стажер') if intern else 'Невідомий стажер'
+    intern_role = intern.get('role', 'Не вказано') if intern else 'Не вказано'
+    from database.positions import get_days_count_for_role
+    role_days = await get_days_count_for_role(intern_role) if intern_role != 'Не вказано' else DAYS_TOTAL
     text = (
         f"🐾 <b>Це – {intern_name}</b> і він(вона) один з твоїх Булка Котиків!\n"
         f"Давай поглянемо про цього більше:\n\n"
-        f"🔷 Посада: <b>{intern.get('role', 'Не вказано') if intern else 'Не вказано'}</b>\n"
+        f"🔷 Посада: <b>{intern_role}</b>\n"
         f"🔷 Місто: <b>{intern.get('city', 'Не вказано') if intern else 'Не вказано'}</b>\n"
         f"🔷 Магазин: <b>{intern.get('shop', 'Не вказано') if intern else 'Не вказано'}</b>\n"
-        f"📊 Днів пройдено: <b>{completed_days} із {DAYS_TOTAL}</b>\n"
+        f"📊 Днів пройдено: <b>{completed_days} із {role_days}</b>\n"
         f"🕒 Остання активність: <b>{last_activity_str}</b>"
     )
 
@@ -2256,8 +2303,10 @@ async def _get_active_interns(user_id: int) -> List[dict]:
     active: List[dict] = []
     for intern in all_interns:
         progress_data = await get_user_progress(intern['user_id'])
-        completed_days = len([p for p in progress_data if p['completed']])
-        if completed_days >= DAYS_TOTAL:
+        role = intern.get("role")
+        from database.positions import get_days_count_for_role
+        role_days = await get_days_count_for_role(role) if role else DAYS_TOTAL
+        if completed_days >= role_days:
             continue
         last_activity = intern.get('last_activity')
         if last_activity:
@@ -2696,15 +2745,18 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
 
 async def global_error_handler(event: ErrorEvent):
     """
-    Globally handle errors to suppress specific harmless Telegram API exceptions.
+    Глобальний обробник помилок для Aiogram dispatcher.
+    Витягує контекст користувача (ID, нікнейм, дію), придушує нешкідливі помилки мережі/API
+    та передає виняток у логер для генерації Telegram-алерту.
     """
     exception = event.exception
-    
+    from bot.services.logger import get_logger
+    logger = get_logger()
+
     # Log incoming callback data if available for debugging
-    if hasattr(event, 'update') and event.update.callback_query:
-        from bot.services.logger import get_logger
-        get_logger().debug(f"DEBUG: Incoming callback: {event.update.callback_query.data}")
-    
+    if hasattr(event, 'update') and event.update and event.update.callback_query:
+        logger.debug(f"DEBUG: Incoming callback: {event.update.callback_query.data}")
+
     if isinstance(exception, TelegramBadRequest):
         error_message = str(exception).lower()
         # Suppress harmless Telegram API exceptions
@@ -2727,16 +2779,38 @@ async def global_error_handler(event: ErrorEvent):
         "request timeout error",
         "timeouterror"
     ]):
-        from bot.services.logger import get_logger
-        get_logger().debug(f"Network transient error suppressed: {exception}")
+        logger.debug(f"Network transient error suppressed: {exception}")
         return
 
-    # For other errors, we allow the default logger to handle them or log them here if needed.
-    from bot.services.logger import get_logger
-    import traceback
-    logger = get_logger()
-    tb = traceback.format_exc()
-    logger.error(f"Global error handler caught: {exception}\n{tb}", exc_info=False)
+    # Витягуємо контекст користувача та події
+    user_info = "Невідомо"
+    action_info = "Невідома дія"
+
+    if hasattr(event, "update") and event.update:
+        upd = event.update
+        if upd.callback_query:
+            cq = upd.callback_query
+            u = cq.from_user
+            user_info = f"@{u.username} (ID: {u.id})" if u.username else f"{u.full_name} (ID: {u.id})"
+            action_info = f"Кнопка: {cq.data}"
+        elif upd.message:
+            m = upd.message
+            u = m.from_user
+            if u:
+                user_info = f"@{u.username} (ID: {u.id})" if u.username else f"{u.full_name} (ID: {u.id})"
+            msg_preview = m.text[:120] if m.text else m.content_type
+            action_info = f"Повідомлення: {msg_preview}"
+
+    tg_context = f"{user_info} | {action_info}"
+
+    # Логуємо помилку з трейсбеком та контекстом
+    exc_info_tuple = (type(exception), exception, exception.__traceback__) if exception else True
+    logger.error(
+        f"Aiogram Handler Exception: {exception}",
+        exc_info=exc_info_tuple,
+        extra={"tg_context": tg_context}
+    )
+
 
 def register_handlers(dp: Dispatcher):
     # Register global error handler
@@ -2746,6 +2820,8 @@ def register_handlers(dp: Dispatcher):
     register_developer_menu_handlers(dp)
     from bot.menus.manager import register_manager_handlers
     register_manager_handlers(dp)
+    from bot.menus.survey_taking import register_survey_taking_handlers
+    register_survey_taking_handlers(dp)
 
     # 2. Main handlers
     dp.message.register(start_menu, Command("start"))

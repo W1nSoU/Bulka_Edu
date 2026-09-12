@@ -68,12 +68,39 @@ async def daily_test_failure_notifier(bot: Bot):
     logger.info("🔵 daily_test_failure_notifier finished.")
 
 
+def custom_asyncio_exception_handler(loop, context):
+    """
+    Глобальний обробник необроблених винятків в asyncio фонових задачах.
+    """
+    exception = context.get("exception")
+    message = context.get("message", "Unhandled exception in asyncio task")
+    future = context.get("future")
+    task_name = getattr(future, "get_name", lambda: None)() if future else None
+
+    extra_parts = []
+    if task_name:
+        extra_parts.append(f"Task: {task_name}")
+    if "handle" in context:
+        extra_parts.append(f"Handle: {context['handle']}")
+
+    ctx_str = f"AsyncIO Task ({', '.join(extra_parts)})" if extra_parts else "AsyncIO Background Task"
+
+    if exception:
+        exc_tuple = (type(exception), exception, exception.__traceback__)
+        logger.error(f"{message}: {exception}", exc_info=exc_tuple, extra={"tg_context": ctx_str})
+    else:
+        logger.error(f"AsyncIO Loop Error: {message}", extra={"tg_context": ctx_str})
+
+
 async def start_bot():
     """Запуск бота з ініціалізацією БД та обробниками"""
     # Ініціалізуємо бота, диспетчер і планувальник всередині async контексту
     bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(custom_asyncio_exception_handler)
 
     print_banner()
     print_status("🚀", "Запуск бота...")
@@ -84,6 +111,7 @@ async def start_bot():
     # Ініціалізуємо БД
     print_status("📦", "Ініціалізація баз даних...")
     await init_db()
+
     print_status("✅", "База користувачів")
     # await init_mentors_db()
     print_status("✅", "База менторів")
