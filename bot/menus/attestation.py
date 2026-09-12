@@ -4,7 +4,7 @@ import io
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Set, Optional
+from typing import Dict, Any, List, Set, Optional, Union
 
 import pytz
 from aiogram import Dispatcher, Bot
@@ -15,6 +15,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     BufferedInputFile
 )
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -115,6 +116,58 @@ async def _check_admin(callback_or_message) -> bool:
     return True
 
 
+async def _safe_edit_or_answer(
+    message_or_cb: Union[Message, CallbackQuery],
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    parse_mode: str = "HTML"
+) -> Message:
+    """
+    Універсальний безпечний хелпер редагування повідомлення в адмін-панелі атестації:
+    - Якщо повідомлення має фото (наприклад, з головного меню розсилок):
+      - Якщо текст поміщається у підпис (<= 1000 символів), оновлює підпис (edit_caption).
+      - Якщо не поміщається або помилка -> видаляє старе фото-повідомлення і надсилає текст (answer).
+    - Якщо повідомлення звичайне текстове -> редагує текст (edit_text).
+    - У разі збоїв (message not found, there is no text, caption too long) -> видаляє і надсилає нове.
+    """
+    message = message_or_cb.message if isinstance(message_or_cb, CallbackQuery) else message_or_cb
+    has_photo = bool(getattr(message, "photo", None))
+    if has_photo:
+        if len(text) <= 1000:
+            try:
+                await message.edit_caption(caption=text, parse_mode=parse_mode, reply_markup=reply_markup)
+                return message
+            except TelegramBadRequest as e:
+                if "message is not modified" in str(e).lower():
+                    return message
+            except Exception:
+                pass
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return await message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
+
+    try:
+        await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        return message
+    except TelegramBadRequest as e:
+        err = str(e).lower()
+        if "message is not modified" in err:
+            return message
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return await message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return await message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
+
+
 # =============================================================
 # 1. ГОЛОВНЕ МЕНЮ АТЕСТАЦІЇ
 # =============================================================
@@ -153,11 +206,13 @@ async def dev_attestation_menu_handler(callback: CallbackQuery, state: Optional[
     buttons.append([InlineKeyboardButton(text="🔙 Назад у розсилки", callback_data="dev_broadcasts_menu")])
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    except Exception:
-        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
-    await callback.answer()
+    from bot.menus.developer import _show_admin_photo_menu
+    await _show_admin_photo_menu(
+        callback,
+        "img/admin/admin_broadcasts.jpg",
+        text,
+        kb
+    )
 
 
 # =============================================================
@@ -189,7 +244,7 @@ async def dev_att_questions_menu_handler(callback: CallbackQuery, state: FSMCont
         [InlineKeyboardButton(text="📤 Оновити питання (Excel)", callback_data="dev_att_upload_excel")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_attestation_menu")]
     ]
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _safe_edit_or_answer(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 
@@ -228,7 +283,7 @@ async def dev_att_upload_excel_handler(callback: CallbackQuery, state: FSMContex
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_att_questions_menu")]
     ])
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await _safe_edit_or_answer(callback, text, reply_markup=kb)
     await callback.answer()
 
 
@@ -305,7 +360,7 @@ async def dev_att_create_wave_handler(callback: CallbackQuery, state: FSMContext
             [InlineKeyboardButton(text="✅ Продовжити", callback_data="dev_att_create_wave_confirmed")],
             [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
         ])
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        await _safe_edit_or_answer(callback, text, reply_markup=kb)
         await callback.answer()
         return
 
@@ -330,7 +385,7 @@ async def _start_create_wave_flow(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="👔 Керівники", callback_data="dev_att_tgt:managers")],
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
     ])
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await _safe_edit_or_answer(callback, text, reply_markup=kb)
     await callback.answer()
 
 
@@ -351,7 +406,7 @@ async def dev_att_target_type_handler(callback: CallbackQuery, state: FSMContext
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
     ])
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await _safe_edit_or_answer(callback, text, reply_markup=kb)
     await callback.answer()
 
 
@@ -428,11 +483,9 @@ async def _render_shops_picker(message_or_cb, state: FSMContext, page: int = 1):
     buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")])
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await _safe_edit_or_answer(message_or_cb, text, reply_markup=kb)
     if isinstance(message_or_cb, CallbackQuery):
-        await message_or_cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
         await message_or_cb.answer()
-    else:
-        await message_or_cb.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 async def dev_att_toggle_shop_handler(callback: CallbackQuery, state: FSMContext):
@@ -541,11 +594,9 @@ async def _render_managers_picker(message_or_cb, state: FSMContext, page: int = 
     buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")])
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await _safe_edit_or_answer(message_or_cb, text, reply_markup=kb)
     if isinstance(message_or_cb, CallbackQuery):
-        await message_or_cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
         await message_or_cb.answer()
-    else:
-        await message_or_cb.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 async def dev_att_toggle_manager_handler(callback: CallbackQuery, state: FSMContext):
@@ -620,7 +671,7 @@ async def _prompt_duration_step(callback: CallbackQuery, state: FSMContext):
         ],
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
     ])
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await _safe_edit_or_answer(callback, text, reply_markup=kb)
     await callback.answer()
 
 
@@ -645,7 +696,7 @@ async def dev_att_duration_handler(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="90%", callback_data="dev_att_pass:90")],
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
     ])
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await _safe_edit_or_answer(callback, text, reply_markup=kb)
     await callback.answer()
 
 
@@ -688,7 +739,7 @@ async def dev_att_passing_handler(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="🚀 Запустити атестацію", callback_data="dev_att_confirm_launch")],
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_attestation_menu")]
     ])
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await _safe_edit_or_answer(callback, text, reply_markup=kb)
     await callback.answer()
 
 
@@ -789,7 +840,7 @@ async def dev_att_confirm_launch_handler(callback: CallbackQuery, state: FSMCont
             return
         participants = await _collect_eligible_participants(shops, target_type="staff")
 
-    await callback.message.edit_text("⏳ Створення та активація хвилі атестації...", parse_mode="HTML")
+    await _safe_edit_or_answer(callback, "⏳ Створення та активація хвилі атестації...")
 
     # Створюємо хвилю
     wave_id = await create_wave(
@@ -888,7 +939,7 @@ async def dev_att_active_wave_handler(callback: CallbackQuery):
         buttons.append([InlineKeyboardButton(text="🛑 Завершити всю атестацію", callback_data=f"dev_att_close:{wave_id}")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_attestation_menu")])
 
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _safe_edit_or_answer(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 
@@ -900,7 +951,10 @@ async def dev_att_add_shop_menu_handler(callback: CallbackQuery):
     if not await _check_admin(callback):
         return
 
-    wave_id = int(callback.data.split(":")[1])
+    parts = callback.data.split(":")
+    wave_id = int(parts[1])
+    page = int(parts[2]) if len(parts) > 2 and parts[0] == "dev_att_add_sh_p" else 1
+
     wave = await get_wave_by_id(wave_id)
     if not wave:
         await callback.answer("Хвилю не знайдено", show_alert=True)
@@ -914,6 +968,12 @@ async def dev_att_add_shop_menu_handler(callback: CallbackQuery):
         await callback.answer("Усі діючі магазини мережі вже підключені до цієї хвилі!", show_alert=True)
         return
 
+    PER_PAGE = 8
+    total_pages = max(1, (len(available_to_add) + PER_PAGE - 1) // PER_PAGE)
+    page = max(1, min(page, total_pages))
+    start_idx = (page - 1) * PER_PAGE
+    page_shops = available_to_add[start_idx:start_idx + PER_PAGE]
+
     text = (
         f"➕ <b>Підключити магазин до активної атестації</b>\n"
         f"Хвиля: <b>{wave['title']}</b>\n\n"
@@ -921,11 +981,22 @@ async def dev_att_add_shop_menu_handler(callback: CallbackQuery):
     )
 
     buttons = []
-    for s in available_to_add[:12]:
-        buttons.append([InlineKeyboardButton(text=f"🏪 {s[:26]}", callback_data=f"dev_att_add_sh_confirm:{wave_id}:{s}")])
+    for s in page_shops:
+        global_idx = all_shops.index(s)
+        buttons.append([InlineKeyboardButton(text=f"🏪 {s[:26]}", callback_data=f"dev_att_add_sh_cf:{wave_id}:{global_idx}")])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_att_add_sh_p:{wave_id}:{page - 1}"))
+    if total_pages > 1:
+        nav_row.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_att_add_sh_p:{wave_id}:{page + 1}"))
+    if nav_row:
+        buttons.append(nav_row)
 
     buttons.append([InlineKeyboardButton(text="🔙 До активної хвилі", callback_data=f"dev_att_active_wave:{wave_id}")])
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _safe_edit_or_answer(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 
@@ -933,9 +1004,15 @@ async def dev_att_add_shop_confirm_handler(callback: CallbackQuery, bot: Bot):
     if not await _check_admin(callback):
         return
 
-    parts = callback.data.split(":", 2)
+    parts = callback.data.split(":")
     wave_id = int(parts[1])
-    shop_name = parts[2]
+    shop_idx = int(parts[2])
+
+    all_shops = await get_all_system_shops()
+    if shop_idx < 0 or shop_idx >= len(all_shops):
+        await callback.answer("Помилка індексу магазину", show_alert=True)
+        return
+    shop_name = all_shops[shop_idx]
 
     await callback.answer("⏳ Підключення пекарні...")
 
@@ -1026,7 +1103,7 @@ async def dev_att_shop_details_handler(callback: CallbackQuery):
 
     buttons.append([InlineKeyboardButton(text="🔙 До списку магазинів", callback_data=f"dev_att_active_wave:{wave_id}")])
 
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _safe_edit_or_answer(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 
@@ -1145,7 +1222,7 @@ async def dev_att_history_handler(callback: CallbackQuery):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_attestation_menu")]
         ])
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        await _safe_edit_or_answer(callback, text, reply_markup=kb)
         await callback.answer()
         return
 
@@ -1157,7 +1234,7 @@ async def dev_att_history_handler(callback: CallbackQuery):
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_att_active_wave:{w['id']}")])
 
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_attestation_menu")])
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _safe_edit_or_answer(callback, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 
@@ -1461,8 +1538,9 @@ def register_attestation_handlers(dp: Dispatcher):
 
     # Моніторинг та звіти
     dp.callback_query.register(dev_att_active_wave_handler, lambda c: c.data and c.data.startswith("dev_att_active_wave"))
-    dp.callback_query.register(dev_att_add_shop_menu_handler, lambda c: c.data and c.data.startswith("dev_att_add_sh_menu:"))
-    dp.callback_query.register(dev_att_add_shop_confirm_handler, lambda c: c.data and c.data.startswith("dev_att_add_sh_confirm:"))
+    dp.callback_query.register(dev_att_add_shop_menu_handler, lambda c: c.data and (c.data.startswith("dev_att_add_sh_menu:") or c.data.startswith("dev_att_add_sh_p:")))
+    dp.callback_query.register(dev_att_add_shop_confirm_handler, lambda c: c.data and (c.data.startswith("dev_att_add_sh_cf:") or c.data.startswith("dev_att_add_sh_confirm:")))
+    dp.callback_query.register(lambda c: c.answer(), lambda c: c.data == "noop")
     dp.callback_query.register(dev_att_shop_details_handler, lambda c: c.data and c.data.startswith("dev_att_sh_dt:"))
     dp.callback_query.register(dev_att_stop_shop_handler, lambda c: c.data and c.data.startswith("dev_att_stop_sh:"))
     dp.callback_query.register(dev_att_resume_shop_handler, lambda c: c.data and c.data.startswith("dev_att_resume_sh:"))

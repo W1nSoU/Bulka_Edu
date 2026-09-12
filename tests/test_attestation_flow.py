@@ -307,6 +307,17 @@ class TestAttestationFlow(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(p["is_manager"], 0)
             self.assertNotEqual(p["role_name"], "Керівник")
 
+    async def test_add_shop_callback_data_length_limit(self):
+        """Перевіряє, що callback_data для додавання магазинів строго <= 64 байт (запобігання BUTTON_DATA_INVALID)."""
+        from bot.menus.attestation import get_all_system_shops
+        all_shops = await get_all_system_shops()
+        wave_id = 999
+        for idx, shop_name in enumerate(all_shops):
+            cb_data = f"dev_att_add_sh_cf:{wave_id}:{idx}"
+            self.assertLessEqual(len(cb_data.encode("utf-8")), 64, f"Callback {cb_data} exceeds 64 bytes!")
+            # Перевіряємо, що індекс точно резолвиться назад у назву магазину
+            self.assertEqual(all_shops[idx], shop_name)
+
 
 if __name__ == "__main__":
     unittest.main()

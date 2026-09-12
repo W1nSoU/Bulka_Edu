@@ -69,10 +69,10 @@ async def launch_attestation_broadcast(bot: Bot, wave_id: int) -> None:
                 f"⏱ <b>Час на тест:</b> {duration} хвилин (1 спроба)\n"
                 f"🎯 <b>Прохідний поріг:</b> {passing_pct}%\n"
                 f"📅 <b>Дедлайн:</b> до {deadline_formatted}\n\n"
-                f"Натискай кнопку нижче, щоб відкрити застосунок та перевірити свої знання! 👇"
+                f"Натискай кнопку нижче, щоб розпочати тестування прямо в Telegram! 👇"
             )
 
-            # Безпечна інлайн-кнопка (HTTPS -> Mini App, HTTP -> browser fallback)
+            # Нативна інлайн-кнопка для тестування в чаті Telegram
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [get_attestation_action_button("🚀 Розпочати атестацію", user_id=user_id)]
             ])
