@@ -143,72 +143,77 @@ async def build_and_reset_embeddings():
     Builds semantic embeddings and then resets the in-memory cache.
     Uses lazy imports to avoid loading heavy libraries at startup.
     """
-    # Lazy import heavy libraries only when this function is called
-    from database.materials import get_all_materials
-    import faiss
-    import numpy as np
-    from sentence_transformers import SentenceTransformer
+    try:
+        # Lazy import heavy libraries only when this function is called
+        from database.materials import get_all_materials
+        import faiss
+        import numpy as np
+        from sentence_transformers import SentenceTransformer
 
-    def _prepare_text(record: dict) -> str:
-        parts: List[str] = []
-        title = (record.get("title") or "").strip()
-        content = (record.get("content") or "").strip()
-        if title:
-            parts.append(title)
-        if content:
-            parts.append(content)
-        return "\n".join(parts).strip()
+        def _prepare_text(record: dict) -> str:
+            parts: List[str] = []
+            title = (record.get("title") or "").strip()
+            content = (record.get("content") or "").strip()
+            if title:
+                parts.append(title)
+            if content:
+                parts.append(content)
+            return "\n".join(parts).strip()
 
-    def _build_preview(text: str, limit: int = 1500) -> str:
-        if len(text) <= limit:
-            return text
-        return text[: limit - 1].rstrip() + "…"
+        def _build_preview(text: str, limit: int = 1500) -> str:
+            if len(text) <= limit:
+                return text
+            return text[: limit - 1].rstrip() + "…"
 
-    materials = await get_all_materials()
-    documents = []
-    metadata = []
-    for record in materials:
-        text = _prepare_text(record)
-        if not text:
-            continue
-        documents.append(text)
-        metadata.append({
-            "material_id": record.get("id"),
-            "day": record.get("day"),
-            "role": record.get("role"),
-            "block_type": record.get("content_type"),
-            "preview": _build_preview(text),
-        })
+        materials = await get_all_materials()
+        documents = []
+        metadata = []
+        for record in materials:
+            text = _prepare_text(record)
+            if not text:
+                continue
+            documents.append(text)
+            metadata.append({
+                "material_id": record.get("id"),
+                "day": record.get("day"),
+                "role": record.get("role"),
+                "block_type": record.get("content_type"),
+                "preview": _build_preview(text),
+            })
 
-    if not documents:
-        print("⚠️ No text-based materials found to build index.")
-        return
+        if not documents:
+            print("⚠️ No text-based materials found to build index.")
+            return
 
-    # Use a separate thread for heavy CPU work to avoid blocking the bot's event loop
-    loop = asyncio.get_event_loop()
-    
-    def _run_encoding():
-        model = SentenceTransformer(DEFAULT_MODEL_NAME)
-        embeddings = model.encode(documents, convert_to_numpy=True, normalize_embeddings=True)
-        return embeddings.astype("float32")
+        # Use a separate thread for heavy CPU work to avoid blocking the bot's event loop
+        loop = asyncio.get_event_loop()
+        
+        def _run_encoding():
+            model = SentenceTransformer(DEFAULT_MODEL_NAME)
+            embeddings = model.encode(documents, convert_to_numpy=True, normalize_embeddings=True)
+            return embeddings.astype("float32")
 
-    embeddings = await loop.run_in_executor(None, _run_encoding)
+        embeddings = await loop.run_in_executor(None, _run_encoding)
 
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatIP(dimension)
-    index.add(embeddings)
+        dimension = embeddings.shape[1]
+        index = faiss.IndexFlatIP(dimension)
+        index.add(embeddings)
 
-    INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    faiss.write_index(index, str(INDEX_PATH))
-    with META_PATH.open("w", encoding="utf-8") as meta_file:
-        payload = {
-            "model_name": DEFAULT_MODEL_NAME,
-            "items": metadata,
-        }
-        json.dump(payload, meta_file, ensure_ascii=False, indent=2)
+        INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        faiss.write_index(index, str(INDEX_PATH))
+        with META_PATH.open("w", encoding="utf-8") as meta_file:
+            payload = {
+                "model_name": DEFAULT_MODEL_NAME,
+                "items": metadata,
+            }
+            json.dump(payload, meta_file, ensure_ascii=False, indent=2)
 
-    # After building, reset the cache
-    await reset_semantic_search_index()
+        # After building, reset the cache
+        await reset_semantic_search_index()
+    except Exception as e:
+        from bot.services.logger import get_logger
+        get_logger().error(f"Помилка створення семантичних ембедінгів (SentenceTransformer): {e}", exc_info=True)
+
 
 
 __all__ = [

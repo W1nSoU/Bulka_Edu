@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 import traceback
 
-from bot.config import LOG_TO_FILE, LOG_FILE_PATH, DEV_CHAT_ID, TIMEZONE, DEBUG
+from bot.config import LOG_TO_FILE, LOG_FILE_PATH, DEV_CHAT_ID, MAIN_DEVELOPER_ID, TIMEZONE, DEBUG
 import pytz
+
 
 
 class TelegramLoggingHandler(logging.Handler):
@@ -159,33 +160,67 @@ class TelegramLoggingHandler(logging.Handler):
 
         return "\n".join(parts)
 
-    async def _async_send(self, alert_text: str):
-        if not self.bot or not DEV_CHAT_ID:
-            return
+    async def _send_to_chat(self, chat_id: int, text: str):
+        """Допоміжний метод відправки з fallback на звичайний текст при помилці HTML."""
         try:
-            chat_id_str = str(DEV_CHAT_ID).strip().split()[0]
-            if not chat_id_str or chat_id_str == "-.":
-                return
-            chat_id = int(chat_id_str)
             await self.bot.send_message(
                 chat_id=chat_id,
-                text=alert_text,
+                text=text,
                 parse_mode="HTML"
             )
         except Exception as e:
-            # Fallback на випадок, якщо HTML-сутності не розпарсилися Telegram API
             err_str = str(e).lower()
             if "can't parse entities" in err_str or "bad request" in err_str:
+                plain_text = re.sub(r'<[^>]+>', '', text)
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=plain_text[:4000]
+                )
+            else:
+                raise
+
+    async def _async_send(self, alert_text: str):
+        if not self.bot:
+            return
+
+        target_chat_id = None
+        if DEV_CHAT_ID:
+            try:
+                chat_id_str = str(DEV_CHAT_ID).strip().split()[0]
+                if chat_id_str and chat_id_str != "-.":
+                    target_chat_id = int(chat_id_str)
+            except Exception:
+                target_chat_id = None
+
+        # Якщо DEV_CHAT_ID не вказано, пробуємо MAIN_DEVELOPER_ID
+        if target_chat_id is None:
+            if MAIN_DEVELOPER_ID:
                 try:
-                    plain_text = re.sub(r'<[^>]+>', '', alert_text)
-                    await self.bot.send_message(
-                        chat_id=chat_id,
-                        text=plain_text[:4000]
-                    )
-                    return
+                    target_chat_id = int(MAIN_DEVELOPER_ID)
                 except Exception:
-                    pass
-            sys.stderr.write(f"[TelegramLoggingHandler] Failed to send alert: {e}\n")
+                    return
+            else:
+                return
+
+        try:
+            await self._send_to_chat(target_chat_id, alert_text)
+        except Exception as e:
+            err_str = str(e).lower()
+            sys.stderr.write(f"[TelegramLoggingHandler] Failed to send alert to {target_chat_id}: {e}\n")
+
+            # Якщо чат не знайдено чи бота заблоковано в групі, надсилаємо безпосередньо розробнику в ПП
+            if MAIN_DEVELOPER_ID and target_chat_id != int(MAIN_DEVELOPER_ID) and any(term in err_str for term in ["chat not found", "forbidden", "chat_id is empty", "migrated"]):
+                try:
+                    dev_id = int(MAIN_DEVELOPER_ID)
+                    fallback_text = (
+                        f"⚠️ <i>[УВАГА: DEV_CHAT_ID={target_chat_id} недоступний ({e}). Додайте бота @Winsou_bot у групу!]\n\n</i>"
+                        + alert_text
+                    )
+                    await self._send_to_chat(dev_id, fallback_text)
+                    sys.stderr.write(f"[TelegramLoggingHandler] Alert successfully forwarded to MAIN_DEVELOPER_ID ({dev_id})\n")
+                except Exception as fb_err:
+                    sys.stderr.write(f"[TelegramLoggingHandler] Fallback to MAIN_DEVELOPER_ID failed: {fb_err}\n")
+
 
 
 class BotLogger:
