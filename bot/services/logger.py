@@ -277,6 +277,12 @@ class BotLogger:
                 file_handler.setFormatter(formatter)
                 root_logger.addHandler(file_handler)
 
+        # Приглушуємо шумні рутинні INFO-логи обробки подій Aiogram та Faiss
+        logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+        logging.getLogger("aiogram.dispatcher").setLevel(logging.WARNING)
+        logging.getLogger("faiss.loader").setLevel(logging.WARNING)
+
+
     def set_bot(self, bot):
         """Встановлює екземпляр бота для Telegram алертів."""
         self._bot = bot
