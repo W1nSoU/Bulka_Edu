@@ -973,13 +973,19 @@ async def _show_material_entry(
                      media = types.InputMediaPhoto(media=photo_0, caption=text_0)
                      await callback.message.edit_media(media=media, reply_markup=keyboard)
                 else:
-                     await callback.message.delete()
+                     try:
+                         await callback.message.delete()
+                     except Exception:
+                         pass
                      await callback.message.answer_photo(photo_0, caption=text_0, reply_markup=keyboard)
             else:
                 if is_text_message:
                      await callback.message.edit_text(text_0, reply_markup=keyboard)
                 else:
-                     await callback.message.delete()
+                     try:
+                         await callback.message.delete()
+                     except Exception:
+                         pass
                      await callback.message.answer(text_0, reply_markup=keyboard)
         await callback.answer()
         return
@@ -1218,13 +1224,19 @@ async def _handle_pagination(callback: CallbackQuery):
                         media = types.InputMediaPhoto(media=photo, caption=text)
                         await callback.message.edit_media(media=media, reply_markup=keyboard)
                     else:
-                        await callback.message.delete()
+                        try:
+                            await callback.message.delete()
+                        except Exception:
+                            pass
                         await callback.message.answer_photo(photo, caption=text, reply_markup=keyboard)
                 else:
                     if is_text_message:
                         await callback.message.edit_text(text, reply_markup=keyboard)
                     else:
-                        await callback.message.delete()
+                        try:
+                            await callback.message.delete()
+                        except Exception:
+                            pass
                         await callback.message.answer(text, reply_markup=keyboard)
         else:
             await callback.answer("Помилка: сторінка не знайдена.")

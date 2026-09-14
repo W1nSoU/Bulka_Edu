@@ -20,7 +20,6 @@ def main_menu_keyboard(is_new_user=False, is_manager=False, is_hr=False, is_deve
 
     if is_manager:
         buttons = [
-            [InlineKeyboardButton(text="📚 Навчання", callback_data="mgr_study_root")],
             [InlineKeyboardButton(text="👑 Панель керівника", callback_data="manager_menu")],
             [InlineKeyboardButton(text="👤 Профіль", callback_data="profile")]
         ]
@@ -173,18 +172,18 @@ def get_pagination_keyboard(
     content_identifier: str,
     day: int,
     final_button: Optional[InlineKeyboardButton] = None,
+    back_button: Optional[InlineKeyboardButton] = None,
 ) -> Optional[InlineKeyboardMarkup]:
     """
     Generates a pagination keyboard.
-    If a final_button is provided, it's added on the last page.
+    - Row 1: Page switching controls (⬅️ Назад, 📄 X/Y, Далі ➡️)
+    - Row 2: Completion / action button (final_button on the last page, e.g. ➡️ До тесту)
+    - Row 3: Persistent back navigation button on all pages (⬅️ Повернутися до вибору)
     """
-    if total_pages <= 1 and not final_button:
-        return InlineKeyboardMarkup(inline_keyboard=[[final_button]]) if final_button else None
-    
     buttons = []
     row = []
 
-    # Back button
+    # Page navigation controls
     if current_page > 0:
         row.append(
             InlineKeyboardButton(
@@ -193,7 +192,6 @@ def get_pagination_keyboard(
             )
         )
 
-    # Page indicator (only if there are multiple pages)
     if total_pages > 1:
         row.append(
             InlineKeyboardButton(
@@ -202,7 +200,6 @@ def get_pagination_keyboard(
             )
         )
 
-    # Next button
     if current_page < total_pages - 1:
         row.append(
             InlineKeyboardButton(
@@ -214,8 +211,26 @@ def get_pagination_keyboard(
     if row:
         buttons.append(row)
 
-    # Add the final button on the last page
+    # Determine the back button (returns to day format selection or main menu if day==0)
+    if back_button is not None:
+        resolved_back = back_button
+    elif day == 0:
+        resolved_back = InlineKeyboardButton(text="⬅️ В головне меню", callback_data="main_menu")
+    else:
+        resolved_back = InlineKeyboardButton(text="⬅️ Повернутися до вибору", callback_data=f"day_{day}")
+
+    # On the last page: add final action button if provided and distinct from resolved_back
     if final_button and current_page == total_pages - 1:
-        buttons.append([final_button])
-        
+        final_cb = getattr(final_button, "callback_data", None)
+        back_cb = getattr(resolved_back, "callback_data", None) if resolved_back else None
+        if final_cb != back_cb:
+            buttons.append([final_button])
+
+    # Add persistent back navigation button on all pages
+    if resolved_back:
+        buttons.append([resolved_back])
+
+    if not buttons:
+        return None
+
     return InlineKeyboardMarkup(inline_keyboard=buttons)
