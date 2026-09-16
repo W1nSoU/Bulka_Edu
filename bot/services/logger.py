@@ -277,10 +277,13 @@ class BotLogger:
                 file_handler.setFormatter(formatter)
                 root_logger.addHandler(file_handler)
 
-        # Приглушуємо шумні рутинні INFO-логи обробки подій Aiogram та Faiss
+        # Приглушуємо шумні рутинні INFO-логи обробки подій Aiogram, Faiss та APScheduler
         logging.getLogger("aiogram.event").setLevel(logging.WARNING)
         logging.getLogger("aiogram.dispatcher").setLevel(logging.WARNING)
         logging.getLogger("faiss.loader").setLevel(logging.WARNING)
+        logging.getLogger("apscheduler").setLevel(logging.WARNING)
+        logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+        logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
 
 
     def set_bot(self, bot):
