@@ -331,6 +331,36 @@ def step4_verify_columns_and_tables():
             conn.execute("ALTER TABLE users ADD COLUMN status TEXT")
             print("  ✅ Додано колонку status у users")
 
+        # surveys
+        has_surveys = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='surveys'").fetchone() is not None
+        if has_surveys:
+            s_cols = [r[1] for r in conn.execute("PRAGMA table_info(surveys)").fetchall()]
+            if "launched_at" not in s_cols:
+                conn.execute("ALTER TABLE surveys ADD COLUMN launched_at TIMESTAMP")
+                print("  ✅ Додано колонку launched_at у surveys")
+            if "total_recipients" not in s_cols:
+                conn.execute("ALTER TABLE surveys ADD COLUMN total_recipients INTEGER DEFAULT 0")
+                print("  ✅ Додано колонку total_recipients у surveys")
+
+        # survey_recipients
+        has_rec = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='survey_recipients'").fetchone() is not None
+        if has_rec:
+            rec_cols = [r[1] for r in conn.execute("PRAGMA table_info(survey_recipients)").fetchall()]
+            if "current_question_idx" not in rec_cols:
+                conn.execute("ALTER TABLE survey_recipients ADD COLUMN current_question_idx INTEGER NOT NULL DEFAULT 1")
+            if "current_q_idx" not in rec_cols:
+                conn.execute("ALTER TABLE survey_recipients ADD COLUMN current_q_idx INTEGER NOT NULL DEFAULT 1")
+            for col_name, col_def in [
+                ("wave_number", "INTEGER NOT NULL DEFAULT 1"),
+                ("reminders_sent", "INTEGER NOT NULL DEFAULT 0"),
+                ("last_reminder_at", "TIMESTAMP"),
+                ("next_reminder_at", "TIMESTAMP"),
+                ("sent_at", "TIMESTAMP"),
+                ("completed_at", "TIMESTAMP"),
+            ]:
+                if col_name not in rec_cols:
+                    conn.execute(f"ALTER TABLE survey_recipients ADD COLUMN {col_name} {col_def}")
+
         # Міграція старих записів де role='Працівник' -> status='Працівник'
         conn.execute("UPDATE users SET status = 'Працівник' WHERE role = 'Працівник' AND (status IS NULL OR status = '')")
         conn.commit()

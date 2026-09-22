@@ -30,7 +30,9 @@ async def init_surveys_db(db_path: str = DB_PATH) -> None:
             target_city TEXT,           -- NULL для "Усі міста" або назва міста
             status TEXT NOT NULL DEFAULT 'draft', -- draft | broadcasting | active | closed
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            closed_at TIMESTAMP
+            closed_at TIMESTAMP,
+            launched_at TIMESTAMP,
+            total_recipients INTEGER DEFAULT 0
         )
         ''')
 
@@ -77,7 +79,15 @@ async def init_surveys_db(db_path: str = DB_PATH) -> None:
         )
         ''')
 
-        # Міграція колонок survey_recipients (current_question_idx / current_q_idx)
+        # Міграція колонок таблиці surveys
+        cursor = await db.execute("PRAGMA table_info(surveys)")
+        survey_cols = [row[1] for row in await cursor.fetchall()]
+        if "launched_at" not in survey_cols:
+            await db.execute("ALTER TABLE surveys ADD COLUMN launched_at TIMESTAMP")
+        if "total_recipients" not in survey_cols:
+            await db.execute("ALTER TABLE surveys ADD COLUMN total_recipients INTEGER DEFAULT 0")
+
+        # Міграція колонок survey_recipients (current_question_idx / current_q_idx та додаткові)
         cursor = await db.execute("PRAGMA table_info(survey_recipients)")
         rec_cols = [row[1] for row in await cursor.fetchall()]
         if "current_question_idx" not in rec_cols:
@@ -88,6 +98,17 @@ async def init_surveys_db(db_path: str = DB_PATH) -> None:
             await db.execute("ALTER TABLE survey_recipients ADD COLUMN current_q_idx INTEGER NOT NULL DEFAULT 1")
             if "current_question_idx" in rec_cols:
                 await db.execute("UPDATE survey_recipients SET current_q_idx = COALESCE(current_question_idx, 1)")
+
+        for col_name, col_def in [
+            ("wave_number", "INTEGER NOT NULL DEFAULT 1"),
+            ("reminders_sent", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_reminder_at", "TIMESTAMP"),
+            ("next_reminder_at", "TIMESTAMP"),
+            ("sent_at", "TIMESTAMP"),
+            ("completed_at", "TIMESTAMP"),
+        ]:
+            if col_name not in rec_cols:
+                await db.execute(f"ALTER TABLE survey_recipients ADD COLUMN {col_name} {col_def}")
 
         await db.commit()
 
