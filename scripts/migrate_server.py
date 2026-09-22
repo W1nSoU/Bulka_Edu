@@ -336,13 +336,25 @@ def step4_verify_columns_and_tables():
         conn.commit()
         conn.close()
 
-    # managers.shops
+    # managers.shops та інші колонки
     if os.path.exists(MANAGERS_DB):
         m_conn = sqlite3.connect(MANAGERS_DB)
         m_cols = [r[1] for r in m_conn.execute("PRAGMA table_info(managers)").fetchall()]
         if "shops" not in m_cols:
             m_conn.execute("ALTER TABLE managers ADD COLUMN shops TEXT DEFAULT '[]'")
             print("  ✅ Додано колонку shops у managers")
+        if "city" not in m_cols:
+            m_conn.execute("ALTER TABLE managers ADD COLUMN city TEXT")
+        if "responsible_uid" not in m_cols:
+            m_conn.execute("ALTER TABLE managers ADD COLUMN responsible_uid INTEGER")
+        if "territorial_type" not in m_cols:
+            m_conn.execute("ALTER TABLE managers ADD COLUMN territorial_type TEXT")
+        if "status" not in m_cols:
+            m_conn.execute("ALTER TABLE managers ADD COLUMN status TEXT DEFAULT 'active'")
+            m_conn.execute("UPDATE managers SET status = 'active' WHERE status IS NULL")
+            print("  ✅ Додано колонку status у managers")
+        if "fired_at" not in m_cols:
+            m_conn.execute("ALTER TABLE managers ADD COLUMN fired_at TIMESTAMP DEFAULT NULL")
         m_conn.commit()
         m_conn.close()
 
@@ -393,10 +405,14 @@ def step5_health_report():
 
     if os.path.exists(MANAGERS_DB):
         m_conn = sqlite3.connect(MANAGERS_DB)
+        m_cols = [r[1] for r in m_conn.execute("PRAGMA table_info(managers)").fetchall()]
         m_total = m_conn.execute("SELECT COUNT(*) FROM managers").fetchone()[0]
-        m_active = m_conn.execute("SELECT COUNT(*) FROM managers WHERE status = 'active'").fetchone()[0]
+        if "status" in m_cols:
+            m_active = m_conn.execute("SELECT COUNT(*) FROM managers WHERE status = 'active'").fetchone()[0]
+            print(f"  👔 Керівників у базі: {m_total} (активних: {m_active})")
+        else:
+            print(f"  👔 Керівників у базі: {m_total}")
         m_conn.close()
-        print(f"  👔 Керівників у базі: {m_total} (активних: {m_active})")
 
 
 def main():
