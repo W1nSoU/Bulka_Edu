@@ -191,7 +191,7 @@ class TestObserverMenuAndProfile(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(len(captured_text) > 0)
         profile_text = captured_text[0]
-        self.assertIn("Профіль наглядача-Булочки", profile_text)
+        self.assertIn("Профіль наглядача BULKA", profile_text)
         self.assertIn("Посада: <b>Наглядач</b>", profile_text)
         self.assertIn("Загальна статистика мережі:", profile_text)
 

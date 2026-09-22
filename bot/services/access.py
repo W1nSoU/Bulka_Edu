@@ -2,7 +2,7 @@
 
 from typing import Optional
 from database.hr import is_hr_user, is_developer_user
-from database.managers import get_manager_by_uid, is_manager_user # Ensure is_manager_user is imported
+from database.managers import get_manager_by_uid, is_manager_user, is_territorial_user, is_observer_user # Ensure all manager checks are imported
 from database.users import get_user_details
 from bot.config import MAIN_DEVELOPER_ID
 from bot.services.logger import get_logger
@@ -32,19 +32,26 @@ async def is_privileged_user(user_id: int) -> bool:
 
 async def get_display_role(user_id: int) -> str:
     """
-    Повертає стандартизовану роль користувача для відображення: 'Адміністратор', 'Керівник', 'Стажер'.
+    Повертає стандартизовану роль користувача для відображення.
+    Можливі значення: 'Адміністратор', 'Керівник', 'Наглядач', 'Територіал', 'Стажер'.
     """
     if user_id == MAIN_DEVELOPER_ID:
         return "Адміністратор"
-    
+
     if await is_developer_user(user_id):
         return "Адміністратор"
-    
-    # is_manager_user вже перевіряє role='Керівник' в таблиці managers
+
+    # is_manager_user перевіряє process IN ('Керівник', 'Керівник Стажер')
     if await is_manager_user(user_id):
         return "Керівник"
-    
-    # Якщо не є ні Адміністратор, ні Керівник, вважаємо стажером
+
+    if await is_territorial_user(user_id):
+        return "Територіал"
+
+    if await is_observer_user(user_id):
+        return "Наглядач"
+
+    # Не є жодним із привілейованих — стажер
     return "Стажер"
 
 

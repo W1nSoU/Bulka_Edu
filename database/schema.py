@@ -232,3 +232,11 @@ async def init_db():
         await db.commit()
     # print(f"База даних ініціалізована за шляхом: {DB_PATH}")
 
+    # Ініціалізація підсистеми опитувань
+    from .surveys import init_surveys_db
+    await init_surveys_db(DB_PATH)
+
+    # Ініціалізація підсистеми новин
+    from .news import init_news_db
+    await init_news_db(DB_PATH)
+

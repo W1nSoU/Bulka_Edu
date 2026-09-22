@@ -225,7 +225,7 @@ class TestInlineCardsAndAvatar(unittest.IsolatedAsyncioTestCase):
         await manager_profile_handler(mock_cb)
         self.assertTrue(mock_cb.message.answer_photo.called)
         caption = mock_cb.message.answer_photo.call_args.kwargs.get("caption")
-        self.assertIn("Профіль керівника-Булочки", caption)
+        self.assertIn("Профіль керівника BULKA", caption)
 
         # 3. Regular User Profile
         mock_cb.message.answer_photo.reset_mock()
@@ -236,7 +236,7 @@ class TestInlineCardsAndAvatar(unittest.IsolatedAsyncioTestCase):
             await profile_handler_new_message(mock_cb)
             self.assertTrue(mock_cb.message.answer_photo.called)
             caption = mock_cb.message.answer_photo.call_args.kwargs.get("caption")
-            self.assertIn("Персональний профіль", caption)
+            self.assertIn("Персональний профіль BULKA", caption)
 
         # 4. Manager Intern Profile
         mock_cb.message.answer_photo.reset_mock()

@@ -29,11 +29,12 @@ def get_progress(user_id):
     progress = user_progress.get(user_id, {})
     return sum(1 for k, v in progress.items() if v.get("completed"))
 
-def get_available_day(user_id):
-    for day in range(1, DAYS_TOTAL + 1):
+def get_available_day(user_id, total_days=None):
+    max_days = total_days or DAYS_TOTAL
+    for day in range(1, max_days + 1):
         if is_day_available(user_id, day):
             return day
-    return DAYS_TOTAL
+    return max_days
 
 def is_day_available(user_id, day):
     """
@@ -162,3 +163,29 @@ async def load_all_progress():
             if p.get("manual_open"):
                 entry["manual_open"] = bool(p["manual_open"])
             user_progress[uid][f"day_{p['day']}"] = entry
+
+async def sync_user_progress_cache(user_id: int) -> None:
+    """
+    Синхронізує in-memory кеш user_progress для одного користувача з бази даних.
+    """
+    global user_progress
+    user_progress[user_id] = {}
+    progress_list = await get_user_progress(user_id)
+    for p in progress_list:
+        entry = {"completed": bool(p["completed"])}
+        completed_at = p.get("completed_at")
+        if completed_at:
+            if isinstance(completed_at, datetime):
+                dt = completed_at
+            else:
+                try:
+                    dt = datetime.fromisoformat(completed_at)
+                except Exception:
+                    dt = None
+            if dt:
+                if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+                    dt = pytz.timezone(TIMEZONE).localize(dt)
+                entry["completed_at"] = dt
+        if p.get("manual_open"):
+            entry["manual_open"] = bool(p["manual_open"])
+        user_progress[user_id][f"day_{p['day']}"] = entry

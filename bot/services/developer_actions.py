@@ -11,6 +11,7 @@ from database.users import (
     update_user_current_block,
 )
 from database.managers import get_manager_by_uid
+from bot.services.access import get_display_role
 from .learning_progress import (
     DayStatus,
     get_days_overview,
@@ -77,6 +78,34 @@ async def get_user_days_report(user_id: int, bot: Optional[Bot] = None) -> str:
     from database.positions import get_days_count_for_role, get_position_direction
     from bot.utils.manager import get_manager_display_title
 
+    # Визначаємо реальну роль — перш за все через managers.db (Керівник/Наглядач/Територіал/Адміністратор)
+    display_role = await get_display_role(user_id)
+    privileged_roles = {"Адміністратор", "Dev", "Керівник", "Наглядач", "Територіал"}
+
+    if display_role in privileged_roles:
+        # Для привілейованих — посада = їхня роль, дні навчання не показуємо
+        role_label = display_role
+        direction = ""
+        manager_title = "—"
+        full_name = user.get("full_name") or "Без імені"
+        username = (user.get("username") or "").strip().lstrip("@")
+        city = user.get("city") or "Не вказано"
+        shop = user.get("shop") or "Не вказано"
+
+        user_line = f"👤 <b>{html.escape(full_name)}</b>"
+        if username:
+            user_line += f" (@{html.escape(username)})"
+
+        lines = [
+            user_line,
+            f"🏢 <b>Роль:</b> {html.escape(role_label)}",
+            f"🏙 <b>Місто:</b> {html.escape(city)}",
+            f"🏪 <b>Магазин:</b> {html.escape(shop)}",
+            f"ℹ️ <i>Привілейований користувач — навчальний прогрес не відстежується</i>",
+        ]
+        return "\n".join(lines)
+
+    # Звичайний стажер/працівник
     role = user.get("role") or "Не вказано"
     direction = await get_position_direction(role)
     total_days = await get_days_count_for_role(role) or DAYS_TOTAL

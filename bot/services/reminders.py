@@ -34,7 +34,7 @@ INACTIVE_DAYS_THRESHOLD = 3
 DAY_3_QUESTIONS = [
     "Привіт! 🍞 Як проходить твоє стажування? Все зрозуміло?",
     "Вітаю! 🥐 Вже 3-й день навчання! Є якісь питання по матеріалам?",
-    "Привіт! 🧁 Як тобі поки що Булка? Маєш труднощі з чимось?",
+    "Привіт! 🧁 Як тобі поки що в BULKA? Маєш труднощі з чимось?",
     "Хей! 🍩 Як справи з навчанням? Керівник завжди готовий допомогти!",
     "Добридень! 🥨 Як враження від перших днів? Є що обговорити?",
 ]
@@ -69,6 +69,11 @@ async def send_intern_reminder(
     if not intern:
         return False
 
+    # Працівники та керівні ролі не повинні отримувати нагадування стажерів
+    from database.users import MANAGEMENT_ROLES
+    if intern.get("status") == "Працівник" or intern.get("role") in MANAGEMENT_ROLES:
+        return False
+
     full_name = intern.get("full_name") or "Булка-котик"
     role = intern.get("role") or "посада не вказана"
     city = intern.get("city") or "місто не вказано"
@@ -76,8 +81,8 @@ async def send_intern_reminder(
 
     header_map = {
         "manager": "🔔 <b>Нагадування від вашого керівника</b>",
-        "hr": "🔔 <b>Нагадування від HR Bulka</b>",
-        "auto": "🤖 <b>Булка нагадує про навчання</b>",
+        "hr": "🔔 <b>Нагадування від HR BULKA</b>",
+        "auto": "🤖 <b>BULKA нагадує про навчання</b>",
     }
     header = header_map.get(source, header_map["auto"])
 
@@ -93,7 +98,7 @@ async def send_intern_reminder(
         lines.extend(
             [
                 "Керівник турбується, щоб ви не втратили темп навчання. "
-                "Поверніться до ботика і продовжіть свій шлях булочки!",
+                "Поверніться до ботика і продовжіть своє навчання в BULKA!",
             ]
         )
     elif source == "hr":
@@ -105,13 +110,13 @@ async def send_intern_reminder(
             lines.append(f"Ваш керівник: <b>{manager_name}</b>")
     else:  # auto
         lines.append(
-            "Система навчання Булка помітила, що давно не було активності. "
+            "Система навчання BULKA помітила, що давно не було активності. "
             "Загляньте до ботика і продовжуйте навчання, щоб не втрачати прогрес."
         )
         if manager_name:
             lines.append(f"Ваш керівник: <b>{manager_name}</b> чекає на нові результати 💪")
 
-    lines.append("\nБулочка завжди поруч, щоб підтримати 🥐")
+    lines.append("\nBULKA завжди поруч, щоб підтримати 💪")
 
     markup = _build_keyboard(include_home=source in {"manager", "hr"})
 
@@ -238,7 +243,7 @@ async def get_interns_for_day3_question(now: datetime) -> list[dict]:
     """
     Повертає стажерів, які на 3-му дні і ще не отримували питання.
     """
-    from database.users import get_all_users
+    from database.users import get_all_users, MANAGEMENT_ROLES
     from bot.services.access import is_privileged_user
     
     result = []
@@ -247,6 +252,10 @@ async def get_interns_for_day3_question(now: datetime) -> list[dict]:
     for user in users:
         user_id = user.get("user_id")
         
+        # Пропускаємо якщо користувач став працівником або має керівну роль
+        if user.get("status") == "Працівник" or user.get("role") in MANAGEMENT_ROLES:
+            continue
+
         # Пропускаємо якщо немає керівника
         if not user.get("manager_id"):
             continue
@@ -286,26 +295,9 @@ async def auto_reminder_loop(bot: Bot) -> None:
         
         now = datetime.now(tz)
 
-        # 0. Автоматичне видалення стажерів з неактивністю >= 3 днів
-        to_delete = await get_inactive_interns_for_auto_delete(days=INACTIVE_DAYS_THRESHOLD)
-        deleted_count = 0
-        for intern in to_delete:
-            intern_id = intern["user_id"]
-            await log_training_event(
-                user_id=intern_id,
-                event_type="left_deleted",
-                actor_id=None,
-                full_name=intern.get("full_name"),
-                username=intern.get("username"),
-                city=intern.get("city"),
-                shop=intern.get("shop"),
-                role=intern.get("role"),
-                manager_id=intern.get("manager_id"),
-            )
-            await delete_user(intern_id)
-            deleted_count += 1
-        if deleted_count:
-            logger.info(f"Auto-deleted inactive interns: {deleted_count}")
+        # 0. Автоматичне видалення ВИМКНЕНО:
+        # Раніше бот безповоротно видаляв стажерів після 3 днів неактивності (наприклад, вихідні/офлайн),
+        # що викликало втрату даних і збої прогресу. Тепер видалення виконує тільки керівник/HR вручну.
         
         # 1. Автоматичні нагадування неактивним (тільки стажерам)
         interns = await get_interns_for_auto_reminder(now)
@@ -380,14 +372,14 @@ async def manager_daily_report_loop(bot: Bot) -> None:
     Виконується планувальником о 18:00.
     """
     from bot.services.logger import get_logger
-    from database.managers import get_all_managers
+    from database.managers import get_all_kerivnyky
     from database.users import get_interns_in_progress_for_manager, get_user_progress
     
     logger = get_logger()
     logger.info("🔵 Generating manager daily reports...")
     
     try:
-        managers = await get_all_managers()
+        managers = await get_all_kerivnyky()
         
         for mgr in managers:
             mgr_id = mgr['uid']

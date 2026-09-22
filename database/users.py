@@ -70,12 +70,36 @@ async def update_progress(user_id, day, completed=True):
             )
         
         # Оновлюємо поточний блок навчання користувача
-        await db.execute(
-            "UPDATE users SET current_block = CASE WHEN current_block < ? THEN ? ELSE current_block END WHERE user_id = ?",
-            (day, day, user_id)
-        )
+        if completed:
+            cursor = await db.execute("SELECT role FROM users WHERE user_id = ?", (user_id,))
+            u_row = await cursor.fetchone()
+            u_role = u_row[0] if u_row else None
+            from database.positions import get_days_count_for_role
+            from bot.config import DAYS_TOTAL
+            total_days = await get_days_count_for_role(u_role) if u_role else DAYS_TOTAL
+            next_block = min(day + 1, total_days)
+            await db.execute(
+                "UPDATE users SET current_block = CASE WHEN current_block <= ? THEN ? ELSE current_block END WHERE user_id = ?",
+                (day, next_block, user_id)
+            )
+        else:
+            await db.execute(
+                "UPDATE users SET current_block = CASE WHEN current_block < ? THEN ? ELSE current_block END WHERE user_id = ?",
+                (day, day, user_id)
+            )
         
         await db.commit()
+
+    # Оновлюємо in-memory кеш у bot.state якщо він є
+    try:
+        from bot.state import user_progress
+        if user_id not in user_progress:
+            user_progress[user_id] = {}
+        entry = user_progress[user_id].setdefault(f"day_{day}", {})
+        entry["completed"] = bool(completed)
+        entry["completed_at"] = now
+    except Exception:
+        pass
     
     return now  # Повертаємо datetime об'єкт для використання в інших функціях
 
@@ -154,6 +178,31 @@ async def delete_user(user_id):
         await delete_manager_by_uid(user_id, cascade_user=False)
     except Exception as e:
         print(f"Error deleting from managers: {e}")
+
+    # Логуємо подію видалення стажера, якщо він ще не був залогований як rejected/fired
+    try:
+        existing_user = await get_user_details(user_id)
+        if existing_user and existing_user.get("status") != "Працівник" and existing_user.get("role") not in MANAGEMENT_ROLES:
+            async with aiosqlite.connect(DB_PATH) as db:
+                cur = await db.execute(
+                    "SELECT id FROM training_events WHERE user_id = ? AND event_type IN ('rejected', 'fired') AND event_at >= datetime('now', '-2 minutes')",
+                    (user_id,)
+                )
+                recent = await cur.fetchone()
+                if not recent:
+                    await log_training_event(
+                        user_id=user_id,
+                        event_type="left_deleted",
+                        actor_id=None,
+                        full_name=existing_user.get("full_name"),
+                        username=existing_user.get("username"),
+                        city=existing_user.get("city"),
+                        shop=existing_user.get("shop"),
+                        role=existing_user.get("role"),
+                        manager_id=existing_user.get("manager_id"),
+                    )
+    except Exception:
+        pass
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
@@ -251,9 +300,10 @@ async def change_user_role(user_id: int, new_role: str) -> dict:
 
         await db.commit()
 
-    # 3. Скидаємо in-memory кеш
+    # 3. Синхронізуємо in-memory кеш
     try:
-        user_progress.pop(user_id, None)
+        from bot.state import sync_user_progress_cache
+        await sync_user_progress_cache(user_id)
     except Exception:
         pass
 
@@ -287,9 +337,33 @@ async def update_user_role(user_id: int, new_role: str, actor_id: Optional[int] 
                 "UPDATE users SET status = ?, worker_since = COALESCE(worker_since, ?) WHERE user_id = ?",
                 (new_role, now, user_id),
             )
+            # Переконуємося, що всі навчальні дні посади відкриті та пройдені
+            role = user["role"]
+            from database.positions import get_days_count_for_role
+            from bot.config import DAYS_TOTAL
+            total_days = await get_days_count_for_role(role) if role else DAYS_TOTAL
+            for d in range(1, total_days + 1):
+                await db.execute(
+                    """
+                    INSERT INTO progress (user_id, day, completed, completed_at, manual_open, manual_opened_by)
+                    VALUES (?, ?, 1, ?, 1, 'promotion')
+                    ON CONFLICT(user_id, day) DO UPDATE SET completed = 1, manual_open = 1
+                    """,
+                    (user_id, d, now),
+                )
+            await db.execute(
+                "UPDATE users SET current_block = ? WHERE user_id = ?",
+                (total_days, user_id),
+            )
         else:
             await db.execute("UPDATE users SET status = ? WHERE user_id = ?", (new_role, user_id))
         await db.commit()
+
+    try:
+        from bot.state import sync_user_progress_cache
+        await sync_user_progress_cache(user_id)
+    except Exception:
+        pass
 
     if new_role == "Працівник":
         await log_training_event(
@@ -494,6 +568,7 @@ async def get_interns_in_progress_for_manager(manager_id, active_only=True):
         interns = await cursor.fetchall()
         
         in_progress = []
+        from database.positions import get_days_count_for_role
         for intern in interns:
             if intern["role"] in MANAGEMENT_ROLES:
                 continue
@@ -503,15 +578,16 @@ async def get_interns_in_progress_for_manager(manager_id, active_only=True):
                 (intern['user_id'],)
             )
             completed_days = (await cursor.fetchone())[0]
+            role = intern.get("role") or ""
+            required_days = await get_days_count_for_role(role)
             
-            if completed_days < DAYS_TOTAL:
+            if completed_days < required_days:
                 in_progress.append(dict(intern))
         
         return in_progress
 
 async def get_inactive_interns_for_manager(manager_id, days=3):
     """Отримує список стажерів, які не завершили навчання ТА не були активні вказану кількість днів"""
-    from bot.config import DAYS_TOTAL
     cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     
     async with aiosqlite.connect(DB_PATH) as db:
@@ -524,6 +600,7 @@ async def get_inactive_interns_for_manager(manager_id, days=3):
         interns = await cursor.fetchall()
         
         inactive = []
+        from database.positions import get_days_count_for_role
         for intern in interns:
             if intern["role"] in MANAGEMENT_ROLES:
                 continue
@@ -532,8 +609,10 @@ async def get_inactive_interns_for_manager(manager_id, days=3):
                 (intern['user_id'],)
             )
             completed_days = (await cursor.fetchone())[0]
+            role = intern.get("role") or ""
+            required_days = await get_days_count_for_role(role)
             
-            if completed_days < DAYS_TOTAL:
+            if completed_days < required_days:
                 inactive.append(dict(intern))
         
         return inactive
@@ -543,7 +622,7 @@ async def get_inactive_interns_for_auto_delete(days: int = 3) -> list[dict]:
     Повертає стажерів для автоматичного видалення:
     неактивні >= days, не є Працівниками, мають керівника, не завершили навчання.
     """
-    from bot.config import DAYS_TOTAL
+    from database.positions import get_days_count_for_role
     cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     privileged_ids = await _get_privileged_user_ids()
     async with aiosqlite.connect(DB_PATH) as db:
@@ -555,22 +634,29 @@ async def get_inactive_interns_for_auto_delete(days: int = 3) -> list[dict]:
               AND (status IS NULL OR status != 'Працівник')
               AND last_activity IS NOT NULL
               AND last_activity < ?
-              AND user_id NOT IN (
-                    SELECT user_id
-                    FROM progress
-                    WHERE completed = 1
-                    GROUP BY user_id
-                    HAVING COUNT(day) >= ?
-              )
             ORDER BY last_activity ASC
             """,
-            (cutoff_date, DAYS_TOTAL),
+            (cutoff_date,),
         )
         rows = await cursor.fetchall()
-        return [
-            dict(r) for r in rows 
-            if r["user_id"] not in privileged_ids and r["role"] not in MANAGEMENT_ROLES
-        ]
+        
+        eligible = []
+        for r in rows:
+            user = dict(r)
+            uid = user["user_id"]
+            if uid in privileged_ids or user.get("role") in MANAGEMENT_ROLES:
+                continue
+            role = user.get("role") or ""
+            required_days = await get_days_count_for_role(role)
+            p_cur = await db.execute(
+                "SELECT COUNT(day) FROM progress WHERE user_id = ? AND completed = 1",
+                (uid,)
+            )
+            completed_days = (await p_cur.fetchone())[0]
+            if completed_days >= required_days:
+                continue
+            eligible.append(user)
+        return eligible
 
 async def update_last_activity(user_id):
     """Оновлює час останньої активності користувача"""
@@ -646,23 +732,17 @@ async def close_conversation(user_id: int, manager_id: int) -> None:
 
 async def get_inactive_interns_for_auto_reminder(now: datetime, inactive_days: int, cooldown_hours: int) -> list[dict]:
     """Повертає стажерів, які відповідають критеріям для автоматичного нагадування."""
-    from bot.config import DAYS_TOTAL
+    from database.positions import get_days_count_for_role
     
     inactive_cutoff = now - timedelta(days=inactive_days)
     cooldown_cutoff = now - timedelta(hours=cooldown_hours)
+    privileged_ids = await _get_privileged_user_ids()
     
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         
-        # Знаходимо user_id тих, хто завершив курс
-        cursor = await db.execute(
-            "SELECT user_id FROM progress WHERE completed = 1 GROUP BY user_id HAVING COUNT(day) >= ?",
-            (DAYS_TOTAL,)
-        )
-        completed_users = {row[0] for row in await cursor.fetchall()}
-        
-        # Отримуємо всіх користувачів
-        cursor = await db.execute("SELECT * FROM users")
+        # Отримуємо тільки стажерів (статус не 'Працівник')
+        cursor = await db.execute("SELECT * FROM users WHERE (status IS NULL OR status != 'Працівник')")
         all_users = await cursor.fetchall()
         
         eligible_users = []
@@ -670,8 +750,19 @@ async def get_inactive_interns_for_auto_reminder(now: datetime, inactive_days: i
             user = dict(user_row)
             user_id = user["user_id"]
             
-            # Пропускаємо, якщо користувач завершив курс
-            if user_id in completed_users:
+            # Пропускаємо privileged та керівні ролі
+            if user_id in privileged_ids or user.get("role") in MANAGEMENT_ROLES:
+                continue
+            
+            # Перевіряємо чи завершив курс для своєї посади
+            role = user.get("role") or ""
+            required_days = await get_days_count_for_role(role)
+            p_cur = await db.execute(
+                "SELECT COUNT(day) FROM progress WHERE user_id = ? AND completed = 1",
+                (user_id,)
+            )
+            completed_days = (await p_cur.fetchone())[0]
+            if completed_days >= required_days:
                 continue
             
             # Перевірка неактивності
@@ -759,6 +850,13 @@ async def log_reminder(intern_id: int, source: str, sender_id: Optional[int] = N
         )
         await db.commit()
 
+async def get_reminder_history_count() -> int:
+    """Retrieves total count of reminder history records."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM reminder_history")
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
 async def get_reminder_history(limit: int = 50, offset: int = 0) -> list[dict]:
     """Retrieves the global reminder history, ordered by date descending."""
     history_records = []
@@ -784,8 +882,13 @@ async def get_reminder_history(limit: int = 50, offset: int = 0) -> list[dict]:
                     record["sender_name"] = manager_info.get("full_name")
                     record["sender_role"] = manager_info.get("process")
                 else:
-                    record["sender_name"] = None
-                    record["sender_role"] = None
+                    user_info = await get_user_details(record["sender_id"])
+                    if user_info:
+                        record["sender_name"] = user_info.get("full_name") or user_info.get("username")
+                        record["sender_role"] = user_info.get("role")
+                    else:
+                        record["sender_name"] = None
+                        record["sender_role"] = None
             else:
                 record["sender_name"] = None
                 record["sender_role"] = None

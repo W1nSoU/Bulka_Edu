@@ -624,10 +624,13 @@ async def manager_completed_interns(callback: CallbackQuery):
     all_interns = await get_manager_interns(callback.from_user.id)
     completed = []
     
+    from database.positions import get_days_count_for_role
     for intern in all_interns:
         progress = await get_user_progress(intern['user_id'])
         completed_count = sum(1 for p in progress if p.get('completed'))
-        if completed_count >= DAYS_TOTAL:
+        role = intern.get('role')
+        role_days = await get_days_count_for_role(role) if role else DAYS_TOTAL
+        if completed_count >= role_days:
             completed.append(intern)
             
     await _list_interns_generic(
@@ -962,9 +965,13 @@ async def manager_report(callback: CallbackQuery):
 
     total = len(interns)
     completed_list = []
+    from database.positions import get_days_count_for_role
     for i in interns:
         progress = await get_user_progress(i['user_id'])
-        if sum(1 for p in progress if p.get('completed')) >= DAYS_TOTAL:
+        completed_count = sum(1 for p in progress if p.get('completed'))
+        role = i.get('role')
+        role_days = await get_days_count_for_role(role) if role else DAYS_TOTAL
+        if completed_count >= role_days:
             completed_list.append(i)
     completed = len(completed_list)
     

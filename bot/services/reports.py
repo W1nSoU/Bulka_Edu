@@ -19,11 +19,15 @@ async def get_report_data(start_date: datetime, end_date: datetime) -> List[Dict
     Агрегує дані для звіту за вказаний період.
     Повертає список словників з метриками по містах та магазинах.
     """
+    from database.positions import get_days_count_for_role
+    from database.users import MANAGEMENT_ROLES, _get_privileged_user_ids
+
     start_str = start_date.strftime("%Y-%m-%d %H:%M:%S")
     end_str = end_date.strftime("%Y-%m-%d %H:%M:%S")
     
     # 3 дні неактивності для метрики "Активні"
     active_cutoff = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    privileged_ids = await _get_privileged_user_ids()
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -38,48 +42,62 @@ async def get_report_data(start_date: datetime, end_date: datetime) -> List[Dict
             city = loc['city']
             shop = loc['shop']
             
-            # 1. Нові стажери (зареєстровані в періоді)
+            # 1. Нові стажери (зареєстровані в періоді, не працівники, не менеджмент)
             cursor = await db.execute(
-                "SELECT COUNT(*) FROM users WHERE city = ? AND shop = ? AND first_seen BETWEEN ? AND ?",
+                """
+                SELECT user_id, role FROM users 
+                WHERE city = ? AND shop = ? 
+                  AND (status IS NULL OR status != 'Працівник')
+                  AND first_seen BETWEEN ? AND ?
+                """,
                 (city, shop, start_str, end_str)
             )
-            new_count = (await cursor.fetchone())[0]
+            new_candidates = await cursor.fetchall()
+            new_count = sum(1 for r in new_candidates if r[0] not in privileged_ids and r[1] not in MANAGEMENT_ROLES)
             
             # 2. Активні стажери (в процесі ТА активність < 3 дні)
             cursor = await db.execute(
                 """
-                SELECT u.user_id FROM users u
+                SELECT u.user_id, u.role FROM users u
                 WHERE u.city = ? AND u.shop = ?
-                AND u.last_activity >= ?
+                  AND (u.status IS NULL OR u.status != 'Працівник')
+                  AND u.last_activity >= ?
                 """,
                 (city, shop, active_cutoff)
             )
             active_candidates = await cursor.fetchall()
             active_count = 0
             for row in active_candidates:
-                uid = row[0]
+                uid, role = row[0], row[1]
+                if uid in privileged_ids or role in MANAGEMENT_ROLES:
+                    continue
+                req_days = await get_days_count_for_role(role or "")
                 cursor = await db.execute("SELECT COUNT(*) FROM progress WHERE user_id = ? AND completed = 1", (uid,))
                 completed_days = (await cursor.fetchone())[0]
-                if completed_days < DAYS_TOTAL:
+                if completed_days < req_days:
                     active_count += 1
             
             # 3. Відсів (dropout)
             # Визначаємо як: не завершили навчання ТА не заходили більше 3 днів
             cursor = await db.execute(
                 """
-                SELECT u.user_id FROM users u
+                SELECT u.user_id, u.role FROM users u
                 WHERE u.city = ? AND u.shop = ?
-                AND u.last_activity < ?
+                  AND (u.status IS NULL OR u.status != 'Працівник')
+                  AND u.last_activity < ?
                 """,
                 (city, shop, active_cutoff)
             )
             potential_dropouts = await cursor.fetchall()
             dropout_count = 0
             for row in potential_dropouts:
-                uid = row[0]
+                uid, role = row[0], row[1]
+                if uid in privileged_ids or role in MANAGEMENT_ROLES:
+                    continue
+                req_days = await get_days_count_for_role(role or "")
                 cursor = await db.execute("SELECT COUNT(*) FROM progress WHERE user_id = ? AND completed = 1", (uid,))
                 completed_days = (await cursor.fetchone())[0]
-                if completed_days < DAYS_TOTAL:
+                if completed_days < req_days:
                     dropout_count += 1
             
             # 4. Частота запитів до керівників
@@ -110,7 +128,7 @@ async def get_report_details(start_date: datetime, end_date: datetime) -> Dict[s
     """
     Повертає деталізацію для XLSX:
     - хто додався
-    - хто відсіявся (автовидалені)
+    - хто відсіявся (автовидалені або звільнені)
     - хто став працівником
     - хто відхилений керівником
     """
@@ -120,23 +138,24 @@ async def get_report_details(start_date: datetime, end_date: datetime) -> Dict[s
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
 
-        async def _fetch(event_type: str) -> List[Dict[str, Any]]:
+        async def _fetch(event_types: list[str]) -> List[Dict[str, Any]]:
+            placeholders = ",".join("?" for _ in event_types)
             cur = await db.execute(
-                """
+                f"""
                 SELECT user_id, full_name, username, city, role, manager_id, event_at
                 FROM training_events
-                WHERE event_type = ? AND event_at BETWEEN ? AND ?
+                WHERE event_type IN ({placeholders}) AND event_at BETWEEN ? AND ?
                 ORDER BY event_at DESC
                 """,
-                (event_type, start_str, end_str),
+                (*event_types, start_str, end_str),
             )
             return [dict(r) for r in await cur.fetchall()]
 
         return {
-            "added": await _fetch("added"),
-            "dropped": await _fetch("left_deleted"),
-            "promoted": await _fetch("promoted"),
-            "rejected": await _fetch("rejected"),
+            "added": await _fetch(["added"]),
+            "dropped": await _fetch(["left_deleted", "fired"]),
+            "promoted": await _fetch(["promoted"]),
+            "rejected": await _fetch(["rejected"]),
         }
 
 

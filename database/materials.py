@@ -27,6 +27,8 @@ async def init_materials_db():
         columns = [row[1] for row in await cursor.fetchall()]
         if 'is_enabled' not in columns:
             await db.execute("ALTER TABLE materials ADD COLUMN is_enabled BOOLEAN DEFAULT 1")
+        if 'summary' not in columns:
+            await db.execute("ALTER TABLE materials ADD COLUMN summary TEXT")
             
         await db.commit()
     # print(f"База матеріалів ініціалізована за шляхом: {DB_PATH}")
@@ -70,6 +72,7 @@ async def add_or_update_material(
                 title=excluded.title,
                 content=excluded.content,
                 resource_url=excluded.resource_url,
+                summary=NULL,
                 updated_at=CURRENT_TIMESTAMP
             """,
             (role, day, content_type, title, content, resource_url, order_index),
@@ -234,18 +237,55 @@ async def get_material_by_role_day_type(role: str, day: int, content_type: str) 
 
 
 async def update_material_content(material_id: int, content: str) -> bool:
-    """Оновлює текстовий контент матеріалу."""
+    """Оновлює текстовий контент матеріалу і скидає summary для перегенерації."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
             UPDATE materials 
-            SET content = ?, updated_at = CURRENT_TIMESTAMP
+            SET content = ?, summary = NULL, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
             (content, material_id)
         )
         await db.commit()
         return True
+
+
+async def update_material_summary(material_id: int, summary: str) -> bool:
+    """Зберігає згенероване ШІ коротке резюме/паспорт матеріалу."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE materials 
+            SET summary = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (summary, material_id)
+        )
+        await db.commit()
+        return True
+
+
+async def get_materials_without_summary() -> List[dict]:
+    """
+    Повертає всі текстові матеріали, у яких відсутнє резюме (summary).
+    Сортує за ролями та днями для послідовної безпечної генерації.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT id, role, day, content_type, title, content
+            FROM materials
+            WHERE (summary IS NULL OR trim(summary) = '')
+              AND content IS NOT NULL
+              AND length(trim(content)) > 20
+              AND content_type = 'text'
+            ORDER BY role ASC, day ASC, order_index ASC
+            """
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
 
 async def update_material_resource_url(material_id: int, resource_url: str) -> bool:

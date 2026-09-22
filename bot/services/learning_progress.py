@@ -34,7 +34,7 @@ async def _fetch_progress_rows(user_id: int) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT day, completed, manual_open FROM progress WHERE user_id = ?",
+            "SELECT day, completed, manual_open, manual_opened_by FROM progress WHERE user_id = ?",
             (user_id,),
         )
         rows = await cursor.fetchall()
@@ -51,7 +51,14 @@ def _status_from_row(
     if day == 1:
         return DayStatus.OPEN
     if row and row.get("manual_open"):
-        return DayStatus.OPEN
+        opened_by = row.get("manual_opened_by")
+        # Якщо керівник/адмін/HR явно відкрив день вручну — відкриваємо
+        if opened_by in ("manager", "dev", "hr"):
+            return DayStatus.OPEN
+        # Якщо відкриття автоматичне (auto) або джерело невідоме,
+        # день може бути відкритий ТІЛЬКИ якщо попередній день пройдений!
+        if prev_completed:
+            return DayStatus.OPEN
     return DayStatus.CLOSED
 
 
