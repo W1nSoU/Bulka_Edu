@@ -45,7 +45,6 @@ data/
 logs/
 *.log
 scratch/
-docs/
 
 # ==========================================
 # OS & IDE Files
