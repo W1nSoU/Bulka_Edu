@@ -41,6 +41,7 @@ from database.users import (
 from bot.services.developer_actions import get_user_days_report, _format_last_activity
 from bot.constants import AVAILABLE_ROLES, AVAILABLE_CITIES, AVAILABLE_SHOPS
 from database.tokens import generate_token
+from database.shops import get_shops_by_city
 from bot.utils import get_user_avatar_input, _send_or_edit_card_photo
 
 class ManagerStates(StatesGroup):
@@ -1063,8 +1064,12 @@ async def manager_process_add_city_callback(callback: CallbackQuery, state: FSMC
 
     await state.update_data(add_city=city)
     
-    # Отримуємо список магазинів для обраного міста
-    shops = AVAILABLE_SHOPS.get(city, [])
+    # Отримуємо список магазинів для обраного міста з бази даних
+    db_shops = await get_shops_by_city(city)
+    if not db_shops:
+        norm = city.replace("'", "ʼ") if "'" in city else city.replace("ʼ", "'")
+        db_shops = await get_shops_by_city(norm)
+    shops = [s["name"] for s in db_shops] if db_shops else AVAILABLE_SHOPS.get(city, [])
     
     buttons = []
     if shops:
@@ -1115,7 +1120,11 @@ async def manager_process_add_shop_callback(callback: CallbackQuery, state: FSMC
         
         data = await state.get_data()
         city = data.get("add_city")
-        shops = AVAILABLE_SHOPS.get(city, [])
+        db_shops = await get_shops_by_city(city)
+        if not db_shops:
+            norm = city.replace("'", "ʼ") if "'" in city else city.replace("ʼ", "'")
+            db_shops = await get_shops_by_city(norm)
+        shops = [s["name"] for s in db_shops] if db_shops else AVAILABLE_SHOPS.get(city, [])
         shop = shops[shop_idx]
     except (ValueError, IndexError):
         await callback.answer("Помилка даних магазину.", show_alert=True)

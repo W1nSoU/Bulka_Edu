@@ -20,6 +20,21 @@ from aiogram.exceptions import TelegramBadRequest
 from bot.config import MAIN_DEVELOPER_ID, DAYS_TOTAL, TIMEZONE
 from bot.services.positions import get_all_positions, get_position_by_id, add_position, update_position_name, update_position_days, update_position_type, get_position_stats, delete_position
 from bot.services.cities import get_all_cities, get_city_by_id, add_city, update_city_name, delete_city
+from database.shops import (
+    get_cities_with_shops,
+    get_shops_by_city,
+    get_all_shops,
+    get_shop_by_id,
+    get_shop_by_name,
+    count_users_in_shop,
+    get_shop_manager,
+    set_shop_manager,
+    get_active_managers_for_city,
+    add_shop,
+    rename_shop,
+    change_shop_city,
+    delete_shop_and_transfer_users,
+)
 from bot.services.logger import get_logger
 from bot.services.semantic_search import build_and_reset_embeddings
 from database.users import (
@@ -164,6 +179,9 @@ class DeveloperStates(StatesGroup):
     # Стани для управління містами
     waiting_add_city_name = State()
     waiting_edit_city_name = State()
+    # Стани для управління магазинами
+    waiting_add_shop_name = State()
+    waiting_edit_shop_name = State()
     waiting_photo_uploads = State() # New state for photo uploads
     waiting_syllabus_text = State() # State for editing syllabus
 
@@ -352,6 +370,9 @@ def _admin_other_keyboard(is_observer: bool = False) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="👔 Посади", callback_data="dev_positions_menu"),
             InlineKeyboardButton(text="🏙 Міста", callback_data="dev_cities_menu")
+        ],
+        [
+            InlineKeyboardButton(text="🏪 Магазини", callback_data="dev_shops_menu")
         ],
     ]
     if is_observer:
@@ -754,11 +775,16 @@ async def _build_managers_team_view(is_admin: bool, is_territorial: bool, user_i
         
         city = hr.get("city")
         if not city and shop_list:
-            from bot.constants import AVAILABLE_SHOPS
-            for city_name, city_shops in AVAILABLE_SHOPS.items():
-                if any(s in city_shops for s in shop_list):
-                    city = city_name
-                    break
+            from database.shops import get_shop_by_name
+            first_shop = await get_shop_by_name(shop_list[0])
+            if first_shop:
+                city = first_shop.get("city")
+            if not city:
+                from bot.constants import AVAILABLE_SHOPS
+                for city_name, city_shops in AVAILABLE_SHOPS.items():
+                    if any(s in city_shops for s in shop_list):
+                        city = city_name
+                        break
         
         abbr = city_abbr.get(city, "??")
         
@@ -1616,7 +1642,7 @@ async def developer_users_by_shop_menu(callback: CallbackQuery):
 
 async def _show_shops_for_city_index(callback: CallbackQuery, c_idx: int, back_cb: str):
     city = AVAILABLE_CITIES[c_idx] if c_idx < len(AVAILABLE_CITIES) else "Хмельницький"
-    shops = _get_shops_for_city(city)
+    shops = await _get_shops_for_city(city)
     buttons = []
     for s_idx, shop in enumerate(shops):
         cnt = await count_users_by_shop(city, shop)
@@ -1652,7 +1678,7 @@ async def developer_users_shop_selected(callback: CallbackQuery):
         return
 
     city = AVAILABLE_CITIES[c_idx] if c_idx < len(AVAILABLE_CITIES) else "Хмельницький"
-    shops = _get_shops_for_city(city)
+    shops = await _get_shops_for_city(city)
     shop = shops[s_idx] if s_idx < len(shops) else ""
 
     users = await get_users_by_shop(city, shop)
@@ -2114,9 +2140,16 @@ async def developer_users_add_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-def _get_shops_for_city(city: Optional[str]) -> list:
+async def _get_shops_for_city(city: Optional[str]) -> list:
     if not city:
         return []
+    from database.shops import get_shops_by_city
+    db_shops = await get_shops_by_city(city)
+    if not db_shops:
+        norm = city.replace("'", "ʼ") if "'" in city else city.replace("ʼ", "'")
+        db_shops = await get_shops_by_city(norm)
+    if db_shops:
+        return [s["name"] for s in db_shops]
     if city in AVAILABLE_SHOPS:
         return AVAILABLE_SHOPS[city]
     norm = city.replace("'", "ʼ")
@@ -2136,7 +2169,7 @@ async def developer_users_add_city(callback: CallbackQuery, state: FSMContext):
         return await callback.answer("Помилка даних міста.", show_alert=True)
 
     await state.update_data(dev_add_city=city)
-    shops = _get_shops_for_city(city)
+    shops = await _get_shops_for_city(city)
 
     if shops:
         buttons = []
@@ -2173,7 +2206,7 @@ async def developer_users_add_shop(callback: CallbackQuery, state: FSMContext):
 
     try:
         shop_idx = int(callback.data.split(":", 1)[1])
-        shops = _get_shops_for_city(city)
+        shops = await _get_shops_for_city(city)
         shop = shops[shop_idx]
     except (IndexError, ValueError):
         shop = None
@@ -2747,7 +2780,7 @@ async def developer_process_add_manager_city(callback: CallbackQuery, state: FSM
 
 async def _build_manager_shops_keyboard(city: str, selected_shops: list, is_territorial: bool = False) -> InlineKeyboardMarkup:
     """Будує інлайн-клавіатуру для мульти-вибору магазинів (максимум 5)."""
-    shops_in_city = _get_shops_for_city(city)
+    shops_in_city = await _get_shops_for_city(city)
     
     buttons = []
     for i in range(0, len(shops_in_city), 2):
@@ -2781,7 +2814,7 @@ async def developer_process_shop_selection(callback: CallbackQuery, state: FSMCo
         
     try:
         shop_index = int(callback.data.split(":", 1)[1])
-        shops_in_city = _get_shops_for_city(city)
+        shops_in_city = await _get_shops_for_city(city)
         shop_name = shops_in_city[shop_index]
     except (IndexError, ValueError):
         return await callback.answer("Помилка даних магазину.", show_alert=True)
@@ -2813,7 +2846,7 @@ async def developer_finish_shop_selection(callback: CallbackQuery, state: FSMCon
         await callback.answer("Помилка: місто не обрано.", show_alert=True)
         return await developer_manage_managers_menu(callback, state)
 
-    shops_in_city = _get_shops_for_city(city)
+    shops_in_city = await _get_shops_for_city(city)
     if shops_in_city and not selected_shops:
         await callback.answer("⚠️ Будь ласка, оберіть хоча б один магазин.", show_alert=True)
         return
@@ -3059,8 +3092,7 @@ async def _build_manager_card(manager_uid: int, is_admin: bool, is_territorial: 
 
 async def _build_edit_shops_keyboard(city: str, selected_shops: list, manager_uid: int) -> InlineKeyboardMarkup:
     """Builds keyboard for editing manager shops with multi-select."""
-    from bot.constants import AVAILABLE_SHOPS
-    shops_in_city = AVAILABLE_SHOPS.get(city, [])
+    shops_in_city = await _get_shops_for_city(city)
     
     buttons = []
     for i in range(0, len(shops_in_city), 2):
@@ -3285,8 +3317,7 @@ async def dev_mgr_edit_shop_toggle(callback: CallbackQuery, state: FSMContext):
         
     try:
         shop_index = int(callback.data.split(":", 1)[1])
-        from bot.constants import AVAILABLE_SHOPS
-        shops_in_city = AVAILABLE_SHOPS.get(city, [])
+        shops_in_city = await _get_shops_for_city(city)
         shop_name = shops_in_city[shop_index]
     except (IndexError, ValueError):
         return await callback.answer("Помилка даних магазину.", show_alert=True)
@@ -9550,6 +9581,469 @@ async def dev_city_delete_confirm(callback: CallbackQuery):
     )
 
 
+# ==============================================================================
+# УПРАВЛІННЯ МАГАЗИНАМИ (Shops)
+# ==============================================================================
+
+def _shops_cities_keyboard(cities_with_counts: list, is_observer: bool = False) -> InlineKeyboardMarkup:
+    buttons = []
+    for item in cities_with_counts:
+        city = item["city"]
+        count = item["shop_count"]
+        buttons.append([InlineKeyboardButton(text=f"🏙 {city} ({count})", callback_data=f"dev_shops_city:{city}:1")])
+
+    action_row = []
+    if not is_observer:
+        action_row.append(InlineKeyboardButton(text="➕ Додати магазин", callback_data="dev_shop_add"))
+    action_row.append(InlineKeyboardButton(text="🔙 Назад", callback_data="dev_main_other"))
+    buttons.append(action_row)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _shops_by_city_keyboard(city: str, shops: list, page: int = 1, is_observer: bool = False) -> InlineKeyboardMarkup:
+    items_per_page = 6
+    total_pages = max(1, (len(shops) - 1) // items_per_page + 1)
+    page = max(1, min(page, total_pages))
+    start_idx = (page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    current_shops = shops[start_idx:end_idx]
+
+    buttons = []
+    for shop in current_shops:
+        buttons.append([InlineKeyboardButton(text=f"🏪 {shop['name']}", callback_data=f"dev_shop_view:{shop['id']}")])
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_shops_city:{city}:{page-1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {page}/{total_pages}", callback_data="ignore"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_shops_city:{city}:{page+1}"))
+        buttons.append(nav_row)
+
+    bottom_row = []
+    if not is_observer:
+        bottom_row.append(InlineKeyboardButton(text="➕ Додати магазин", callback_data=f"dev_shop_add_city:{city}"))
+    bottom_row.append(InlineKeyboardButton(text="🔙 До списку міст", callback_data="dev_shops_menu"))
+    buttons.append(bottom_row)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _shop_card_keyboard(shop_id: int, city: str, is_observer: bool = False) -> InlineKeyboardMarkup:
+    if is_observer:
+        buttons = [
+            [InlineKeyboardButton(text="🔙 До списку магазинів", callback_data=f"dev_shops_city:{city}:1")]
+        ]
+    else:
+        buttons = [
+            [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_shop_edit_name:{shop_id}")],
+            [InlineKeyboardButton(text="🏙 Змінити місто", callback_data=f"dev_shop_change_city:{shop_id}")],
+            [InlineKeyboardButton(text="👔 Змінити керівника", callback_data=f"dev_shop_change_mgr:{shop_id}")],
+            [InlineKeyboardButton(text="🗑 Видалити магазин", callback_data=f"dev_shop_delete:{shop_id}")],
+            [InlineKeyboardButton(text="🔙 До списку магазинів", callback_data=f"dev_shops_city:{city}:1")]
+        ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def dev_shops_menu(callback: CallbackQuery):
+    cities_with_counts = await get_cities_with_shops()
+    is_obs = await is_observer_user(callback.from_user.id)
+    await _edit_or_answer(
+        callback.message,
+        "🏪 <b>Управління магазинами</b>\n" + ("Список міст та торгових точок:" if is_obs else "Оберіть місто для перегляду та редагування магазинів:"),
+        reply_markup=_shops_cities_keyboard(cities_with_counts, is_observer=is_obs)
+    )
+    await callback.answer()
+
+
+async def dev_shops_city_handler(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    city = parts[1]
+    page = int(parts[2]) if len(parts) > 2 else 1
+    shops = await get_shops_by_city(city)
+    is_obs = await is_observer_user(callback.from_user.id)
+    await _edit_or_answer(
+        callback.message,
+        f"🏪 <b>Магазини: {city}</b>\nУсього торгових точок: <b>{len(shops)}</b>\nОберіть магазин для перегляду деталей:",
+        reply_markup=_shops_by_city_keyboard(city, shops, page, is_observer=is_obs)
+    )
+    await callback.answer()
+
+
+async def dev_shop_view_handler(callback: CallbackQuery):
+    shop_id = int(callback.data.split(":")[1])
+    shop = await get_shop_by_id(shop_id)
+    if not shop:
+        await callback.answer("Магазин не знайдено!", show_alert=True)
+        return
+
+    manager = await get_shop_manager(shop["name"])
+    user_counts = await count_users_in_shop(shop["name"])
+    is_obs = await is_observer_user(callback.from_user.id)
+
+    if manager:
+        mgr_str = f"{manager['full_name']} (@{manager['username']})" if manager.get('username') else manager['full_name']
+    else:
+        mgr_str = "❌ Не закріплено"
+
+    text = (
+        f"🏪 <b>Магазин:</b> {shop['name']}\n"
+        f"🏙 <b>Місто:</b> {shop['city']}\n"
+        f"👔 <b>Керівник:</b> {mgr_str}\n"
+        f"👥 <b>Закріплено людей:</b> {user_counts['total']} "
+        f"({user_counts['workers']} працівників, {user_counts['interns']} стажерів)"
+    )
+
+    await _edit_or_answer(
+        callback.message,
+        text,
+        reply_markup=_shop_card_keyboard(shop_id, shop["city"], is_observer=is_obs)
+    )
+    await callback.answer()
+
+
+async def dev_shop_edit_name_start(callback: CallbackQuery, state: FSMContext):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
+    shop_id = int(callback.data.split(":")[1])
+    shop = await get_shop_by_id(shop_id)
+    if not shop:
+        await callback.answer("Магазин не знайдено!", show_alert=True)
+        return
+
+    await _edit_or_answer(
+        callback.message,
+        f"Введіть нову назву для магазину <b>{shop['name']}</b>:\n\n"
+        f"⚠️ <i>Увага: зміна назви автоматично оновлює дані користувачів, токенів та прив'язок керівників!</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Скасувати", callback_data=f"dev_shop_view:{shop_id}")]
+        ])
+    )
+    await state.update_data(edit_shop_id=shop_id)
+    await state.set_state(DeveloperStates.waiting_edit_shop_name)
+    await callback.answer()
+
+
+async def dev_shop_edit_name_process(message: Message, state: FSMContext):
+    data = await state.get_data()
+    shop_id = data.get('edit_shop_id')
+    new_name = message.text.strip()
+
+    success, msg = await rename_shop(shop_id, new_name)
+    if success:
+        await message.answer(f"✅ {msg}")
+    else:
+        await message.answer(f"❌ {msg}")
+    await state.clear()
+
+    shop = await get_shop_by_id(shop_id)
+    if shop:
+        manager = await get_shop_manager(shop["name"])
+        user_counts = await count_users_in_shop(shop["name"])
+        mgr_str = f"{manager['full_name']} (@{manager['username']})" if manager and manager.get('username') else (manager['full_name'] if manager else "❌ Не закріплено")
+        text = (
+            f"🏪 <b>Магазин:</b> {shop['name']}\n"
+            f"🏙 <b>Місто:</b> {shop['city']}\n"
+            f"👔 <b>Керівник:</b> {mgr_str}\n"
+            f"👥 <b>Закріплено людей:</b> {user_counts['total']} "
+            f"({user_counts['workers']} працівників, {user_counts['interns']} стажерів)"
+        )
+        await message.answer(text, reply_markup=_shop_card_keyboard(shop_id, shop["city"], is_observer=False))
+
+
+async def dev_shop_change_city_menu(callback: CallbackQuery):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
+    shop_id = int(callback.data.split(":")[1])
+    shop = await get_shop_by_id(shop_id)
+    if not shop:
+        await callback.answer("Магазин не знайдено!", show_alert=True)
+        return
+
+    all_cities = await get_all_cities()
+    buttons = []
+    for c in all_cities:
+        if c["name"] != shop["city"]:
+            buttons.append([InlineKeyboardButton(text=f"🏙 {c['name']}", callback_data=f"dev_shop_set_city:{shop_id}:{c['name']}")])
+
+    buttons.append([InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"dev_shop_view:{shop_id}")])
+
+    await _edit_or_answer(
+        callback.message,
+        f"Оберіть нове місто для магазину <b>{shop['name']}</b> (поточне: <b>{shop['city']}</b>):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+
+async def dev_shop_set_city_handler(callback: CallbackQuery):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
+    _, shop_id_str, new_city = callback.data.split(":", 2)
+    shop_id = int(shop_id_str)
+    success, msg = await change_shop_city(shop_id, new_city)
+    if success:
+        await callback.answer(msg, show_alert=True)
+    else:
+        await callback.answer(f"Помилка: {msg}", show_alert=True)
+
+    shop = await get_shop_by_id(shop_id)
+    if shop:
+        manager = await get_shop_manager(shop["name"])
+        user_counts = await count_users_in_shop(shop["name"])
+        mgr_str = f"{manager['full_name']} (@{manager['username']})" if manager and manager.get('username') else (manager['full_name'] if manager else "❌ Не закріплено")
+        text = (
+            f"🏪 <b>Магазин:</b> {shop['name']}\n"
+            f"🏙 <b>Місто:</b> {shop['city']}\n"
+            f"👔 <b>Керівник:</b> {mgr_str}\n"
+            f"👥 <b>Закріплено людей:</b> {user_counts['total']} "
+            f"({user_counts['workers']} працівників, {user_counts['interns']} стажерів)"
+        )
+        await _edit_or_answer(callback.message, text, reply_markup=_shop_card_keyboard(shop_id, shop["city"], is_observer=False))
+
+
+async def dev_shop_change_mgr_menu(callback: CallbackQuery):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
+    shop_id = int(callback.data.split(":")[1])
+    shop = await get_shop_by_id(shop_id)
+    if not shop:
+        await callback.answer("Магазин не знайдено!", show_alert=True)
+        return
+
+    managers = await get_active_managers_for_city(shop["city"])
+    current_manager = await get_shop_manager(shop["name"])
+    current_uid = current_manager["uid"] if current_manager else None
+
+    buttons = []
+    for m in managers:
+        prefix = "✅ " if m["uid"] == current_uid else "👔 "
+        buttons.append([InlineKeyboardButton(text=f"{prefix}{m['full_name']}", callback_data=f"dev_shop_set_mgr:{shop_id}:{m['uid']}")])
+
+    if current_uid:
+        buttons.append([InlineKeyboardButton(text="❌ Зняти керівника", callback_data=f"dev_shop_set_mgr:{shop_id}:none")])
+
+    buttons.append([InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"dev_shop_view:{shop_id}")])
+
+    await _edit_or_answer(
+        callback.message,
+        f"Оберіть керівника для магазину <b>{shop['name']}</b> ({shop['city']}):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+
+async def dev_shop_set_mgr_handler(callback: CallbackQuery):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
+    _, shop_id_str, mgr_str = callback.data.split(":", 2)
+    shop_id = int(shop_id_str)
+    mgr_uid = None if mgr_str == "none" else int(mgr_str)
+
+    shop = await get_shop_by_id(shop_id)
+    if not shop:
+        await callback.answer("Магазин не знайдено!", show_alert=True)
+        return
+
+    await set_shop_manager(shop["name"], mgr_uid)
+    await callback.answer("Керівника успішно оновлено!", show_alert=True)
+
+    manager = await get_shop_manager(shop["name"])
+    user_counts = await count_users_in_shop(shop["name"])
+    mgr_display = f"{manager['full_name']} (@{manager['username']})" if manager and manager.get('username') else (manager['full_name'] if manager else "❌ Не закріплено")
+    text = (
+        f"🏪 <b>Магазин:</b> {shop['name']}\n"
+        f"🏙 <b>Місто:</b> {shop['city']}\n"
+        f"👔 <b>Керівник:</b> {mgr_display}\n"
+        f"👥 <b>Закріплено людей:</b> {user_counts['total']} "
+        f"({user_counts['workers']} працівників, {user_counts['interns']} стажерів)"
+    )
+    await _edit_or_answer(callback.message, text, reply_markup=_shop_card_keyboard(shop_id, shop["city"], is_observer=False))
+
+
+async def dev_shop_delete_start(callback: CallbackQuery):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
+    shop_id = int(callback.data.split(":")[1])
+    shop = await get_shop_by_id(shop_id)
+    if not shop:
+        await callback.answer("Магазин не знайдено!", show_alert=True)
+        return
+
+    user_counts = await count_users_in_shop(shop["name"])
+    total_users = user_counts["total"]
+
+    if total_users == 0:
+        text = (
+            f"🗑 <b>Видалення магазину</b>\n\n"
+            f"Ви дійсно бажаєте видалити магазин <b>«{shop['name']}»</b>?\n"
+            f"Закріплених співробітників немає."
+        )
+        buttons = [
+            [InlineKeyboardButton(text="❌ Так, видалити", callback_data=f"dev_shop_del_confirm:{shop_id}")],
+            [InlineKeyboardButton(text="Скасувати", callback_data=f"dev_shop_view:{shop_id}")]
+        ]
+    else:
+        other_shops = [s for s in await get_shops_by_city(shop["city"]) if s["id"] != shop_id]
+        if not other_shops:
+            await callback.answer(
+                "Неможливо видалити єдиний магазин у місті, поки в ньому є працівники! Створіть новий магазин перед видаленням.",
+                show_alert=True
+            )
+            return
+
+        text = (
+            f"⚠️ <b>Видалення магазину</b>\n\n"
+            f"У магазині <b>«{shop['name']}»</b> закріплено <b>{total_users}</b> співробітників.\n"
+            f"Оберіть магазин у місті <b>{shop['city']}</b>, куди їх перевести перед видаленням:"
+        )
+        buttons = []
+        for s in other_shops[:8]:
+            buttons.append([InlineKeyboardButton(text=f"🏪 {s['name']}", callback_data=f"dev_shop_del_transfer:{shop_id}:{s['id']}")])
+        buttons.append([InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"dev_shop_view:{shop_id}")])
+
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_shop_del_confirm(callback: CallbackQuery):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
+    shop_id = int(callback.data.split(":")[1])
+    shop = await get_shop_by_id(shop_id)
+    if not shop:
+        await callback.answer("Магазин вже не існує.", show_alert=True)
+        return
+    city = shop["city"]
+
+    success, msg = await delete_shop_and_transfer_users(shop_id, None)
+    await callback.answer(msg, show_alert=True)
+
+    shops = await get_shops_by_city(city)
+    await _edit_or_answer(
+        callback.message,
+        f"🏪 <b>Магазини: {city}</b>\nУсього торгових точок: <b>{len(shops)}</b>\nОберіть магазин для перегляду:",
+        reply_markup=_shops_by_city_keyboard(city, shops, 1, is_observer=False)
+    )
+
+
+async def dev_shop_del_transfer(callback: CallbackQuery):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
+    _, shop_id_str, target_id_str = callback.data.split(":", 2)
+    shop_id = int(shop_id_str)
+    target_id = int(target_id_str)
+
+    shop = await get_shop_by_id(shop_id)
+    target_shop = await get_shop_by_id(target_id)
+    if not shop or not target_shop:
+        await callback.answer("Помилка: магазин не знайдено.", show_alert=True)
+        return
+
+    city = shop["city"]
+    success, msg = await delete_shop_and_transfer_users(shop_id, target_shop["name"])
+    await callback.answer(msg, show_alert=True)
+
+    shops = await get_shops_by_city(city)
+    await _edit_or_answer(
+        callback.message,
+        f"🏪 <b>Магазини: {city}</b>\nУсього торгових точок: <b>{len(shops)}</b>\nОберіть магазин для перегляду:",
+        reply_markup=_shops_by_city_keyboard(city, shops, 1, is_observer=False)
+    )
+
+
+async def dev_shop_add(callback: CallbackQuery, state: FSMContext):
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
+
+    if callback.data == "dev_shop_add":
+        cities = await get_all_cities()
+        buttons = []
+        for c in cities:
+            buttons.append([InlineKeyboardButton(text=f"🏙 {c['name']}", callback_data=f"dev_shop_add_city:{c['name']}")])
+        buttons.append([InlineKeyboardButton(text="🔙 Скасувати", callback_data="dev_shops_menu")])
+
+        await _edit_or_answer(
+            callback.message,
+            "🏪 <b>Створення магазину</b>\nОберіть місто для нового магазину:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+        await callback.answer()
+        return
+
+    city = callback.data.split(":", 1)[1]
+    await state.update_data(add_shop_city=city)
+    await state.set_state(DeveloperStates.waiting_add_shop_name)
+
+    await _edit_or_answer(
+        callback.message,
+        f"Введіть назву нового магазину для міста <b>{city}</b>:\n\n<i>Наприклад: <code>B-35 вул. Центральна, 10</code></i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Скасувати", callback_data=f"dev_shops_city:{city}:1")]
+        ])
+    )
+    await callback.answer()
+
+
+async def dev_shop_add_name_process(message: Message, state: FSMContext):
+    data = await state.get_data()
+    city = data.get('add_shop_city')
+    name = message.text.strip()
+
+    if not city:
+        await message.answer("Помилка стану: місто не обрано.")
+        await state.clear()
+        return
+
+    success, msg = await add_shop(name, city)
+    await state.clear()
+
+    if success:
+        shop = await get_shop_by_name(name)
+        if shop:
+            managers = await get_active_managers_for_city(city)
+            if managers:
+                buttons = []
+                for m in managers:
+                    buttons.append([InlineKeyboardButton(text=f"👔 {m['full_name']}", callback_data=f"dev_shop_set_mgr:{shop['id']}:{m['uid']}")])
+                buttons.append([InlineKeyboardButton(text="⏩ Пропустити (без керівника)", callback_data=f"dev_shop_view:{shop['id']}")])
+                await message.answer(
+                    f"✅ {msg}\n\n"
+                    f"👔 <b>Оберіть керівника для магазину «{shop['name']}» ({city}):</b>",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                )
+                return
+            else:
+                await message.answer(f"✅ {msg}")
+                user_counts = await count_users_in_shop(shop["name"])
+                text = (
+                    f"🏪 <b>Магазин:</b> {shop['name']}\n"
+                    f"🏙 <b>Місто:</b> {shop['city']}\n"
+                    f"👔 <b>Керівник:</b> ❌ Не закріплено\n"
+                    f"👥 <b>Закріплено людей:</b> {user_counts['total']} "
+                    f"({user_counts['workers']} працівників, {user_counts['interns']} стажерів)"
+                )
+                await message.answer(text, reply_markup=_shop_card_keyboard(shop["id"], shop["city"], is_observer=False))
+                return
+    else:
+        await message.answer(f"❌ {msg}")
+
+    shops = await get_shops_by_city(city)
+    await message.answer(
+        f"🏪 <b>Магазини: {city}</b>",
+        reply_markup=_shops_by_city_keyboard(city, shops, 1, is_observer=False)
+    )
+
+
 
 # =========================================================
 # ТЕРИТОРІАЛИ (Territorials)
@@ -10282,6 +10776,22 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.message.register(dev_city_edit_name_process, DeveloperStates.waiting_edit_city_name)
     dp.callback_query.register(dev_city_delete, lambda c: c.data and c.data.startswith("dev_city_delete:"))
     dp.callback_query.register(dev_city_delete_confirm, lambda c: c.data and c.data.startswith("dev_city_delete_confirm:"))
+
+    # Shops
+    dp.callback_query.register(dev_shops_menu, lambda c: c.data in ("dev_shops_menu", "dev_shops_cities_menu"))
+    dp.callback_query.register(dev_shops_city_handler, lambda c: c.data and c.data.startswith("dev_shops_city:"))
+    dp.callback_query.register(dev_shop_view_handler, lambda c: c.data and c.data.startswith("dev_shop_view:"))
+    dp.callback_query.register(dev_shop_edit_name_start, lambda c: c.data and c.data.startswith("dev_shop_edit_name:"))
+    dp.message.register(dev_shop_edit_name_process, DeveloperStates.waiting_edit_shop_name)
+    dp.callback_query.register(dev_shop_change_city_menu, lambda c: c.data and c.data.startswith("dev_shop_change_city:"))
+    dp.callback_query.register(dev_shop_set_city_handler, lambda c: c.data and c.data.startswith("dev_shop_set_city:"))
+    dp.callback_query.register(dev_shop_change_mgr_menu, lambda c: c.data and c.data.startswith("dev_shop_change_mgr:"))
+    dp.callback_query.register(dev_shop_set_mgr_handler, lambda c: c.data and c.data.startswith("dev_shop_set_mgr:"))
+    dp.callback_query.register(dev_shop_delete_start, lambda c: c.data and c.data.startswith("dev_shop_delete:"))
+    dp.callback_query.register(dev_shop_del_confirm, lambda c: c.data and c.data.startswith("dev_shop_del_confirm:"))
+    dp.callback_query.register(dev_shop_del_transfer, lambda c: c.data and c.data.startswith("dev_shop_del_transfer:"))
+    dp.callback_query.register(dev_shop_add, lambda c: c.data == "dev_shop_add" or (c.data and c.data.startswith("dev_shop_add_city:")))
+    dp.message.register(dev_shop_add_name_process, DeveloperStates.waiting_add_shop_name)
 
     # XLSX Reports (Priority)
     dp.callback_query.register(developer_xlsx_menu, lambda c: c.data == "dev_xlsx_menu")

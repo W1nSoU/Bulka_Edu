@@ -71,3 +71,72 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now bulka-bot
 sudo journalctl -u bulka-bot -f
 ```
+
+---
+
+## 3. Деплой глобальної версії v2 на бойовому сервері (Systemd)
+
+### Крок 1. Зупинити бота на сервері
+```bash
+sudo systemctl stop bulka-edu || sudo pkill -f "python.*main.py"
+```
+
+### Крок 2. Оновити код із репозиторію
+```bash
+cd /home/admin1/Bulka_Edu
+git pull
+```
+
+### Крок 3. Оновити залежності у віртуальному середовищі
+```bash
+/home/admin1/Bulka_Edu/venv/bin/pip install -r requirements.txt
+```
+
+### Крок 4. Скопіювати нові зображення (якщо змінювалися або додавалися)
+```bash
+scp -r ./img admin1@46.63.xx.xx:/home/admin1/Bulka_Edu/
+```
+
+### Крок 5. Запустити міграційний скрипт (зробить автоматичний бекап всіх БД)
+```bash
+sudo /home/admin1/Bulka_Edu/venv/bin/python3 /home/admin1/Bulka_Edu/scripts/migrate_server.py
+```
+
+### Крок 6. Запустити бота та перевірити статус і логи
+```bash
+sudo systemctl start bulka-edu
+sudo journalctl -u bulka-edu -f -n 50
+```
+
+---
+
+## 4. Відкат (Rollback) — якщо щось пішло не так
+
+### Варіант А. Автоматичний відкат баз даних (рекомендовано)
+```bash
+# 1. Зупинити бота
+sudo systemctl stop bulka-edu
+
+# 2. Відновити останній бекап
+sudo /home/admin1/Bulka_Edu/venv/bin/python3 /home/admin1/Bulka_Edu/scripts/rollback_server.py --latest
+
+# 3. (За потреби) Відкотити код у Git до попереднього коміту
+git reset --hard HEAD~1
+
+# 4. Запустити бота
+sudo systemctl start bulka-edu
+```
+
+### Варіант Б. Ручне відновлення з папки backups/
+```bash
+sudo systemctl stop bulka-edu
+# Подивитися список доступних бекапів
+ls -la /home/admin1/Bulka_Edu/backups/
+
+# Скопіювати потрібний бекап назад у database/
+cp /home/admin1/Bulka_Edu/backups/backup_РРРРММДД_ГГХХСС/*.db /home/admin1/Bulka_Edu/database/
+
+# Запустити бота
+sudo systemctl start bulka-edu
+```
+

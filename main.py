@@ -10,6 +10,7 @@ from database.tokens import init_tokens_db
 from database.hr import init_hr_db
 from database.materials import init_materials_db # New import
 from database.material_notifications import init_material_notifications_db
+from database.shops import init_shops_db
 from bot.state import load_all_progress, auto_open_blocks_scheduler
 from bot.middleware import AccessMiddleware
 from bot.services.reminders import auto_reminder_loop, manager_daily_report_loop
@@ -127,6 +128,8 @@ async def start_bot():
     print_status("✅", "База сповіщень матеріалів")
     await init_attestation_db()
     print_status("✅", "База атестації")
+    await init_shops_db()
+    print_status("✅", "База магазинів")
     await perform_monthly_reset_if_due()
     print_status("✅", "Перевірено та оновлено статистику помилок тестів (якщо потрібно)")
     await load_all_progress()

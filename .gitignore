@@ -25,12 +25,34 @@ private_server/.env
 private_server/activation_log.db
 
 # ==========================================
-# Databases & Storage
+# Databases, Backups & Storage
 # ==========================================
 *.db
 *.sqlite
 *.sqlite3
+*.db.backup*
+*.backup*
+*.bak
+*.dump
+*.sql
 data/
+backups/
+
+# ==========================================
+# Temporary, Dump & Text Files
+# ==========================================
+*.tmp
+*.temp
+*~
+*.txt
+!requirements.txt
+
+# Reports & Exports
+reports/
+exports/
+*.xlsx
+!template_attestation.xlsx
+*.csv
 
 # ==========================================
 # AI Agents & Assistant Configs
@@ -45,6 +67,9 @@ data/
 logs/
 *.log
 scratch/
+.pytest_cache/
+.coverage
+htmlcov/
 
 # ==========================================
 # OS & IDE Files
@@ -52,6 +77,9 @@ scratch/
 .DS_Store
 */.DS_Store
 **/.DS_Store
+._*
+.Spotlight-V100
+.Trashes
 Thumbs.db
 .idea/
 .vscode/

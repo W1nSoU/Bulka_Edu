@@ -194,6 +194,36 @@ async def init_db():
                 (role_name, 5, t_type)
             )
 
+        # Автоматичне витягування та міграція будь-яких існуючих посад з таблиці users
+        try:
+            cursor = await db.execute("SELECT DISTINCT role FROM users WHERE role IS NOT NULL AND role != ''")
+            existing_user_roles = [row[0] for row in await cursor.fetchall()]
+            for role_name in existing_user_roles:
+                role_clean = role_name.strip()
+                if role_clean and role_clean not in ("Працівник", "Стажер"):
+                    t_type = _infer_territorial_type(role_clean)
+                    await db.execute(
+                        "INSERT OR IGNORE INTO positions (name, days_count, territorial_type) VALUES (?, ?, ?)",
+                        (role_clean, 5, t_type)
+                    )
+        except Exception:
+            pass
+
+        # Автоматичне витягування посад з таблиці materials
+        try:
+            cursor = await db.execute("SELECT DISTINCT role FROM materials WHERE role IS NOT NULL AND role != '' AND role != 'ALL'")
+            existing_material_roles = [row[0] for row in await cursor.fetchall()]
+            for role_name in existing_material_roles:
+                role_clean = role_name.strip()
+                if role_clean:
+                    t_type = _infer_territorial_type(role_clean)
+                    await db.execute(
+                        "INSERT OR IGNORE INTO positions (name, days_count, territorial_type) VALUES (?, ?, ?)",
+                        (role_clean, 5, t_type)
+                    )
+        except Exception:
+            pass
+
         # Синхронізація типу посади для фіксованих посад (ВВ -> 'ВВ', інші -> 'ТЗ')
         await db.execute(
             "UPDATE positions SET territorial_type = 'ВВ' WHERE name LIKE 'ВВ %' AND territorial_type != 'ВВ'"
@@ -239,4 +269,8 @@ async def init_db():
     # Ініціалізація підсистеми новин
     from .news import init_news_db
     await init_news_db(DB_PATH)
+
+    # Ініціалізація підсистеми магазинів
+    from .shops import init_shops_db
+    await init_shops_db()
 

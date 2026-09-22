@@ -101,6 +101,14 @@ async def get_all_system_shops() -> List[str]:
         for s in sh_list:
             shops_set.add(s.strip())
 
+    try:
+        from database.shops import get_all_shops
+        db_shops = await get_all_shops()
+        for s in db_shops:
+            shops_set.add(s["name"].strip())
+    except Exception:
+        pass
+
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT DISTINCT shop FROM users WHERE shop IS NOT NULL AND shop != ''") as cur:
             rows = await cur.fetchall()
