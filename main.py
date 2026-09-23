@@ -13,7 +13,11 @@ from database.material_notifications import init_material_notifications_db
 from database.shops import init_shops_db
 from bot.state import load_all_progress, auto_open_blocks_scheduler
 from bot.middleware import AccessMiddleware
-from bot.services.reminders import auto_reminder_loop, manager_daily_report_loop
+from bot.services.reminders import (
+    auto_reminder_loop,
+    manager_daily_report_loop,
+    send_daily_test_failure_report_to_manager
+)
 from bot.services.logger import setup_bot_logger, get_logger
 from bot.services.health import token_cleanup_loop, health_monitor_loop
 from bot.services.reports import auto_monthly_report_sender # New import

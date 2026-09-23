@@ -58,7 +58,11 @@ class TelegramLoggingHandler(logging.Handler):
             "message can't be deleted for everyone",
             "message to delete not found",
             "bot was blocked by the user",
-            "user is deactivated"
+            "user is deactivated",
+            "failed to fetch updates",
+            "telegramnetworkerror",
+            "request timeout error",
+            "network is unreachable"
         ]):
             return
 
