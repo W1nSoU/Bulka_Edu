@@ -8,7 +8,7 @@ import html
 import pytz
 import calendar
 import math
-from typing import Optional, Union
+from typing import Optional, Union, Dict, Any, List
 from pathlib import Path
 from datetime import datetime # NEW IMPORT
 from database import DB_PATH
