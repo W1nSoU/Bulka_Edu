@@ -148,7 +148,7 @@ async def create_survey(
     db_path: str = DB_PATH
 ) -> int:
     """Створює нове опитування в БД та повертає його ID. Опціонально додає питання та реципієнтів."""
-    final_template = template_text if template_text is not None else raw_template
+    final_template = template_text if template_text is not None else (raw_template or "")
     target_roles = target_roles or []
     now_str = get_current_kyiv_time_str()
     async with aiosqlite.connect(db_path) as db:
@@ -905,3 +905,55 @@ async def record_survey_reminder_sent(
             (now_str, next_rem_str, recipient_id)
         )
         await db.commit()
+
+
+async def delete_survey(survey_id: int, db_path: str = DB_PATH) -> bool:
+    """
+    Повністю та безповоротно видаляє опитування та всі пов'язані з ним записи
+    (відповіді, реципієнти, запитання, саме опитування) в межах однієї транзакції.
+    """
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("DELETE FROM survey_answers WHERE survey_id = ?", (survey_id,))
+            await db.execute("DELETE FROM survey_recipients WHERE survey_id = ?", (survey_id,))
+            await db.execute("DELETE FROM survey_questions WHERE survey_id = ?", (survey_id,))
+            await db.execute("DELETE FROM surveys WHERE id = ?", (survey_id,))
+            await db.commit()
+            return True
+    except Exception as e:
+        logger.exception(f"Помилка при видаленні опитування #{survey_id}: {e}")
+        return False
+
+
+async def get_closed_surveys_count(db_path: str = DB_PATH) -> int:
+    """Повертає кількість завершених опитувань (status = 'closed')."""
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM surveys WHERE status = 'closed'")
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+async def delete_closed_surveys(db_path: str = DB_PATH) -> int:
+    """
+    Видаляє всі завершені опитування (status = 'closed') та всі пов'язані з ними записи.
+    Повертає кількість видалених опитувань.
+    """
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            cursor = await db.execute("SELECT id FROM surveys WHERE status = 'closed'")
+            rows = await cursor.fetchall()
+            closed_ids = [r[0] for r in rows]
+            if not closed_ids:
+                return 0
+
+            placeholders = ",".join("?" for _ in closed_ids)
+            await db.execute(f"DELETE FROM survey_answers WHERE survey_id IN ({placeholders})", closed_ids)
+            await db.execute(f"DELETE FROM survey_recipients WHERE survey_id IN ({placeholders})", closed_ids)
+            await db.execute(f"DELETE FROM survey_questions WHERE survey_id IN ({placeholders})", closed_ids)
+            await db.execute(f"DELETE FROM surveys WHERE id IN ({placeholders})", closed_ids)
+            await db.commit()
+            return len(closed_ids)
+    except Exception as e:
+        logger.exception(f"Помилка при масовому видаленні завершених опитувань: {e}")
+        return 0
+

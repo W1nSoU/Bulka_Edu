@@ -6990,12 +6990,57 @@ async def _show_survey_card_view(callback: CallbackQuery, survey_id: int):
         f"• Ще не розпочали: <b>{pending}</b>\n"
     )
 
+    is_obs = await is_observer_user(callback.from_user.id)
     buttons = [
-        [InlineKeyboardButton(text="📥 Завантажити звіт Excel", callback_data=f"dev_survey_export_xlsx:{survey_id}")],
-        [InlineKeyboardButton(text="🔙 До списку опитувань", callback_data="dev_surveys_list:0")]
+        [InlineKeyboardButton(text="📥 Завантажити звіт Excel", callback_data=f"dev_survey_export_xlsx:{survey_id}")]
+    ]
+    if not is_obs:
+        buttons.append([InlineKeyboardButton(text="🗑 Видалити опитування", callback_data=f"dev_survey_del_confirm:{survey_id}")])
+    buttons.append([InlineKeyboardButton(text="🔙 До списку опитувань", callback_data="dev_surveys_list:0")])
+
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_survey_del_confirm_handler(callback: CallbackQuery):
+    """Екран підтвердження видалення конкретного опитування."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    survey_id = int(callback.data.split(":")[1])
+    from database.surveys import get_survey_by_id
+    survey = await get_survey_by_id(survey_id)
+    if not survey:
+        await callback.answer("Опитування не знайдено або вже видалено.", show_alert=True)
+        await dev_surveys_list_handler(callback)
+        return
+
+    title = survey.get("title", "Опитування")
+    text = (
+        f"🗑 <b>Видалення опитування #{survey_id}</b>\n"
+        f"───────────────────\n\n"
+        f"Ви дійсно бажаєте безповоротно видалити опитування <b>«{html.escape(title)}»</b>?\n\n"
+        f"⚠️ <i>Це призведе до видалення всіх запитань, списку реципієнтів та надісланих відповідей співробітників. Цю дію неможливо скасувати.</i>"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="🔴 Так, видалити", callback_data=f"dev_survey_del_do:{survey_id}")],
+        [InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"dev_survey_card:{survey_id}")]
     ]
     await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
+
+
+async def dev_survey_del_do_handler(callback: CallbackQuery):
+    """Виконання видалення опитування."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    survey_id = int(callback.data.split(":")[1])
+    from database.surveys import delete_survey
+    success = await delete_survey(survey_id)
+    if success:
+        await callback.answer("✅ Опитування успішно видалено!", show_alert=True)
+    else:
+        await callback.answer("❌ Помилка при видаленні опитування.", show_alert=True)
+    await dev_surveys_list_handler(callback)
 
 
 async def dev_survey_card_handler(callback: CallbackQuery):
@@ -7011,8 +7056,10 @@ async def dev_surveys_list_handler(callback: CallbackQuery):
     if not await _ensure_developer(callback, allow_observer=True):
         return
 
-    from database.surveys import get_all_surveys
+    from database.surveys import get_all_surveys, get_closed_surveys_count
     surveys = await get_all_surveys()
+    is_obs = await is_observer_user(callback.from_user.id)
+    closed_count = await get_closed_surveys_count()
 
     page = 0
     if callback.data and callback.data.startswith("dev_surveys_list:"):
@@ -7059,6 +7106,8 @@ async def dev_surveys_list_handler(callback: CallbackQuery):
         buttons.append(nav_row)
 
     buttons.append([InlineKeyboardButton(text="➕ Створити нове", callback_data="dev_survey_create_start")])
+    if closed_count > 0 and not is_obs:
+        buttons.append([InlineKeyboardButton(text=f"🧹 Очистити завершені ({closed_count})", callback_data="dev_surveys_clear_closed_confirm")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_surveys_menu")])
 
     text = (
@@ -7068,6 +7117,42 @@ async def dev_surveys_list_handler(callback: CallbackQuery):
     )
     await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
+
+
+async def dev_surveys_clear_closed_confirm_handler(callback: CallbackQuery):
+    """Екран підтвердження очищення всіх завершених опитувань."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    from database.surveys import get_closed_surveys_count
+    closed_count = await get_closed_surveys_count()
+    if closed_count == 0:
+        await callback.answer("Немає завершених опитувань для очищення.", show_alert=True)
+        await dev_surveys_list_handler(callback)
+        return
+
+    text = (
+        f"🧹 <b>Очищення завершених опитувань</b>\n"
+        f"───────────────────\n\n"
+        f"Знайдено завершених опитувань: <b>{closed_count}</b> шт.\n\n"
+        f"⚠️ <i>Ви впевнені, що хочете безповоротно видалити всі завершені опитування та їхні результати з бази даних?</i>"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="🔴 Так, очистити все", callback_data="dev_surveys_clear_closed_do")],
+        [InlineKeyboardButton(text="🔙 Скасувати", callback_data="dev_surveys_list:0")]
+    ]
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_surveys_clear_closed_do_handler(callback: CallbackQuery):
+    """Виконання масового очищення завершених опитувань."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    from database.surveys import delete_closed_surveys
+    deleted_count = await delete_closed_surveys()
+    await callback.answer(f"✅ Очищено опитувань: {deleted_count} шт.", show_alert=True)
+    await dev_surveys_list_handler(callback)
+
 
 
 async def dev_survey_export_xlsx_handler(callback: CallbackQuery):
@@ -11385,6 +11470,10 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(dev_surveys_list_handler, lambda c: c.data and c.data.startswith("dev_surveys_list:"))
     dp.callback_query.register(dev_survey_card_handler, lambda c: c.data and c.data.startswith("dev_survey_card:"))
     dp.callback_query.register(dev_survey_export_xlsx_handler, lambda c: c.data and c.data.startswith("dev_survey_export_xlsx:"))
+    dp.callback_query.register(dev_survey_del_confirm_handler, lambda c: c.data and c.data.startswith("dev_survey_del_confirm:"))
+    dp.callback_query.register(dev_survey_del_do_handler, lambda c: c.data and c.data.startswith("dev_survey_del_do:"))
+    dp.callback_query.register(dev_surveys_clear_closed_confirm_handler, lambda c: c.data == "dev_surveys_clear_closed_confirm")
+    dp.callback_query.register(dev_surveys_clear_closed_do_handler, lambda c: c.data == "dev_surveys_clear_closed_do")
 
     # News & Categories Handlers
     dp.callback_query.register(dev_news_menu_handler, lambda c: c.data == "dev_news_menu")
