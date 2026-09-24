@@ -77,6 +77,15 @@ TERRITORIAL_TYPES = {
     "ВВ": "🍞 Власне виробництво",
 }
 
+POSITION_TYPES = {
+    "ТЗ": "🏪 ТЗ",
+    "ВВ": "🍞 ВВ",
+    "РЦ": "📦 РЦ",
+    "ОФІС": "🏢 ОФІС",
+}
+
+VALID_POSITION_TYPES = tuple(POSITION_TYPES.keys())
+
 
 def is_valid_role(role: Optional[str]) -> bool:
     """
@@ -97,6 +106,8 @@ __all__ = [
     "AVAILABLE_SHOPS",
     "CONTENT_TYPES",
     "TERRITORIAL_TYPES",
+    "POSITION_TYPES",
+    "VALID_POSITION_TYPES",
     "is_valid_role",
     "is_valid_city",
 ]

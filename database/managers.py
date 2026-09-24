@@ -550,11 +550,14 @@ async def get_appropriate_territorial_for_user(city: str, role: str) -> int | No
     """
     Знаходить найбільш підходящого активного Територіала для міста та посади:
     - За напрямком посади (ТЗ або ВВ)
+    - Для РЦ та ОФІС територіали не призначаються (повертає None)
     - Якщо точного збігу немає - першого активного територіала міста
     - Якщо в місті немає територіалів - None
     """
     from database.positions import get_position_direction
     direction = await get_position_direction(role or "")
+    if direction in ("РЦ", "ОФІС"):
+        return None
     territorials = await get_territorials_by_city(city)
     if not territorials:
         return None

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import aiosqlite
 
+from bot.constants import VALID_POSITION_TYPES
 from . import DB_PATH
 
 
@@ -81,9 +82,9 @@ async def add_position(name: str, days_count: int = 5, territorial_type: str = "
     """
     Додає нову посаду. Повертає id нового запису.
     Raises ValueError якщо посада з такою назвою вже існує.
-    territorial_type: 'ТЗ' (торговий зал) або 'ВВ' (власне виробництво)
+    territorial_type: 'ТЗ', 'ВВ', 'РЦ' або 'ОФІС'
     """
-    if territorial_type not in ("ТЗ", "ВВ"):
+    if territorial_type not in VALID_POSITION_TYPES:
         territorial_type = "ВВ" if name.startswith("ВВ ") else "ТЗ"
     async with aiosqlite.connect(DB_PATH) as db:
         try:
@@ -179,11 +180,12 @@ async def update_days_count(position_id: int, new_days_count: int) -> None:
 
 async def update_territorial_type(position_id: int, new_type: str) -> None:
     """
-    Змінює тип посади: 'ТЗ' або 'ВВ'.
+    Змінює тип посади: 'ТЗ', 'ВВ', 'РЦ' або 'ОФІС'.
     Raises ValueError якщо переданий невідомий тип.
     """
-    if new_type not in ("ТЗ", "ВВ"):
-        raise ValueError(f"territorial_type має бути 'ТЗ' або 'ВВ', отримано: '{new_type}'")
+    if new_type not in VALID_POSITION_TYPES:
+        valid_str = ", ".join(repr(t) for t in VALID_POSITION_TYPES)
+        raise ValueError(f"territorial_type має бути одним із ({valid_str}), отримано: '{new_type}'")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE positions SET territorial_type = ? WHERE id = ?",

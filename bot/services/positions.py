@@ -3,6 +3,7 @@ import aiosqlite
 from database import DB_PATH
 import logging
 from database.materials import update_materials_role_name
+from bot.constants import VALID_POSITION_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,8 @@ def _infer_territorial_type(name: str) -> str:
 
 
 async def add_position(name: str, days_count: int = 5, territorial_type: str | None = None):
-    """Додає нову посаду. territorial_type: 'ТЗ'/'ВВ'; якщо None — визначається автоматично за назвою."""
-    t_type = territorial_type if territorial_type in ("ТЗ", "ВВ") else _infer_territorial_type(name)
+    """Додає нову посаду. territorial_type: один із VALID_POSITION_TYPES; якщо None — визначається автоматично за назвою."""
+    t_type = territorial_type if territorial_type in VALID_POSITION_TYPES else _infer_territorial_type(name)
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
@@ -53,8 +54,8 @@ async def add_position(name: str, days_count: int = 5, territorial_type: str | N
 
 
 async def update_position_type(position_id: int, new_type: str) -> bool:
-    """Змінює тип посади ('ТЗ' або 'ВВ'). Повертає True якщо успішно."""
-    if new_type not in ("ТЗ", "ВВ"):
+    """Змінює тип посади (один із VALID_POSITION_TYPES). Повертає True якщо успішно."""
+    if new_type not in VALID_POSITION_TYPES:
         return False
     try:
         async with aiosqlite.connect(DB_PATH) as db:

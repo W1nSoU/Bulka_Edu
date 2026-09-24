@@ -942,6 +942,35 @@ async def get_users_by_city(city: str) -> list[dict]:
         users = await cursor.fetchall()
         return [dict(user) for user in users]
 
+async def get_users_by_position_type(territorial_type: str) -> list[dict]:
+    """
+    Retrieves a list of users whose role belongs to the specified position type
+    ('ТЗ', 'ВВ', 'РЦ', 'ОФІС').
+    """
+    from database.positions import get_all_positions
+    positions = await get_all_positions()
+    pos_type_map = {p["name"]: p.get("territorial_type", "ТЗ") for p in positions}
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM users ORDER BY last_activity DESC")
+        all_users = [dict(u) for u in await cursor.fetchall()]
+
+    filtered = []
+    for u in all_users:
+        u_role = (u.get("role") or "").strip()
+        if u_role in pos_type_map:
+            u_type = pos_type_map[u_role]
+        elif u_role.startswith("ВВ ") or u_role == "ВВ":
+            u_type = "ВВ"
+        else:
+            u_type = "ТЗ"
+
+        if u_type == territorial_type:
+            filtered.append(u)
+
+    return filtered
+
 async def get_users_by_managers(manager_ids: list[int], active_only: bool = False) -> list[dict]:
     """Retrieves a list of users that belong to any of the specified manager IDs."""
     if not manager_ids:

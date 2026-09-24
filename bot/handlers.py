@@ -2674,14 +2674,21 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
     await register_user(user_id, username=username, full_name=full_name)
     
     # Динамічно визначаємо дійсного керівника:
+    # 0. Для посад РЦ та ОФІС: стажери закріплюються за адміністратором (creator_id / target_manager_id)
     # 1. Пріоритет: цільовий керівник/територіал, обраний адміністратором вручну
     # 2. Якщо обрано авто: керівник активного магазину
     # 3. Якщо в магазині немає керівника -> закріплюємо за Територіалом міста за напрямком (ВВ або ТЗ)
     from database.managers import get_manager_by_shop, get_appropriate_territorial_for_user, is_manager_user, get_manager_by_uid
+    from database.positions import get_position_direction
     assigned_manager_id = None
 
     target_manager_id = extra_data.get("target_manager_id") if isinstance(extra_data, dict) else None
-    if target_manager_id and await is_manager_user(target_manager_id):
+    creator_id = extra_data.get("creator_id") if isinstance(extra_data, dict) else None
+    role_direction = await get_position_direction(role)
+
+    if role_direction in ("РЦ", "ОФІС"):
+        assigned_manager_id = target_manager_id or creator_id or manager_id
+    elif target_manager_id and await is_manager_user(target_manager_id):
         assigned_manager_id = target_manager_id
     elif shop:
         shop_mgr = await get_manager_by_shop(city, shop)

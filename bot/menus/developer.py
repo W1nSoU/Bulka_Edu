@@ -124,7 +124,7 @@ from bot.services.reports import get_report_data, get_report_details, generate_x
 from bot.services.test_parser import parse_test_input, format_test_display
 from bot.services.learning_progress import get_days_overview, DayStatus
 from bot.services.access import get_display_role # Import get_display_role
-from bot.constants import AVAILABLE_ROLES, AVAILABLE_SHOPS, AVAILABLE_CITIES
+from bot.constants import AVAILABLE_ROLES, AVAILABLE_SHOPS, AVAILABLE_CITIES, POSITION_TYPES, VALID_POSITION_TYPES
 from bot.keyboards import get_pagination_keyboard # Import get_pagination_keyboard
 from bot.utils.paginator import split_text # NEW IMPORT
 import json
@@ -1019,6 +1019,7 @@ def _users_filters_keyboard(is_admin: bool, is_territorial: bool, is_observer: b
         ],
         [
             InlineKeyboardButton(text="👔 За керівниками", callback_data="dev_users_by_manager"),
+            InlineKeyboardButton(text="🏷️ За типом", callback_data="dev_users_by_type"),
         ],
         [
             InlineKeyboardButton(text="🚀 Активні стажери", callback_data="dev_users_active"),
@@ -1606,6 +1607,55 @@ async def developer_users_filter_city(callback: CallbackQuery):
     await _developer_show_users_list(callback, users, f"🏙️ <b>Стажери: {city}</b>", f"city:{city}", 0)
 
 
+async def developer_users_by_type_menu(callback: CallbackQuery):
+    """Відображає меню вибору типу посади для фільтрації користувачів."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+
+    buttons = [
+        [
+            InlineKeyboardButton(text="🏪 ТЗ", callback_data="dev_users_filter_type:ТЗ"),
+            InlineKeyboardButton(text="🍞 ВВ", callback_data="dev_users_filter_type:ВВ"),
+        ],
+        [
+            InlineKeyboardButton(text="📦 РЦ", callback_data="dev_users_filter_type:РЦ"),
+            InlineKeyboardButton(text="🏢 ОФІС", callback_data="dev_users_filter_type:ОФІС"),
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_filters")]
+    ]
+
+    await _send_text_screen(
+        callback,
+        "🏷️ <b>Фільтр за типом посади</b>\n\nОберіть тип посади для фільтрації:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+async def developer_users_filter_type(callback: CallbackQuery):
+    """Відображає список користувачів за обраним типом посади."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    try:
+        t_type = callback.data.split(":")[1]
+    except IndexError:
+        return
+
+    from database.users import get_users_by_position_type
+    users = await get_users_by_position_type(t_type)
+    if is_territorial and not is_admin:
+        users = await _filter_users_for_territorial(callback.from_user.id, users)
+
+    type_label = POSITION_TYPES.get(t_type, t_type)
+    await _developer_show_users_list(callback, users, f"🏷️ <b>Користувачі: {type_label}</b>", f"type:{t_type}", 0)
+
+
+
 # ---------- Advanced Filters: By Shop & By Manager ----------
 
 async def developer_users_by_shop_menu(callback: CallbackQuery):
@@ -1965,6 +2015,17 @@ async def developer_users_pagination_handler(callback: CallbackQuery):
             page = int(parts[3])
             users = await get_users_by_city(city)
             await _developer_show_users_list(callback, users, f"🏙️ <b>Стажери: {city}</b>", f"city:{city}", page)
+            return
+        elif len(parts) == 4 and parts[1] == "type":
+            t_type = parts[2]
+            page = int(parts[3])
+            from database.users import get_users_by_position_type
+            users = await get_users_by_position_type(t_type)
+            has_access, is_admin, is_territorial = await _check_access(callback)
+            if is_territorial and not is_admin:
+                users = await _filter_users_for_territorial(callback.from_user.id, users)
+            type_label = POSITION_TYPES.get(t_type, t_type)
+            await _developer_show_users_list(callback, users, f"🏷️ <b>Користувачі: {type_label}</b>", f"type:{t_type}", page)
             return
         elif len(parts) == 3:
             mode = parts[1]
@@ -2372,11 +2433,24 @@ async def developer_users_add_role(callback: CallbackQuery, state: FSMContext):
         return
 
     creator_id = callback.from_user.id
-    token_manager_id = target_supervisor_uid if target_supervisor_uid else creator_id
-    extra_data = {
-        "creator_id": creator_id,
-        "target_manager_id": target_supervisor_uid
-    }
+    from database.positions import get_position_direction
+    role_direction = await get_position_direction(role)
+    is_rc_or_office = role_direction in ("РЦ", "ОФІС")
+
+    if is_rc_or_office:
+        token_manager_id = creator_id
+        target_supervisor_uid = creator_id
+        extra_data = {
+            "creator_id": creator_id,
+            "target_manager_id": creator_id,
+            "role_direction": role_direction,
+        }
+    else:
+        token_manager_id = target_supervisor_uid if target_supervisor_uid else creator_id
+        extra_data = {
+            "creator_id": creator_id,
+            "target_manager_id": target_supervisor_uid
+        }
     token = await generate_token(
         token_manager_id,
         role,
@@ -2396,7 +2470,9 @@ async def developer_users_add_role(callback: CallbackQuery, state: FSMContext):
     shop_text = f"\n🏪 Магазин: <b>{shop}</b>" if shop else ""
 
     sup_text = ""
-    if target_supervisor_uid:
+    if is_rc_or_office:
+        sup_text = "\n👤 Закріплено за: <b>Адміністратор (ви)</b>"
+    elif target_supervisor_uid:
         from database.managers import get_manager_by_uid
         sup_mgr = await get_manager_by_uid(target_supervisor_uid)
         if sup_mgr:
@@ -9044,15 +9120,19 @@ async def dev_pos_add_name(message: Message, state: FSMContext):
 async def _dev_pos_prompt_type(message_or_callback, state: FSMContext, pos_name: str, days: int):
     await state.update_data(pos_days=days)
     buttons = [
-        [InlineKeyboardButton(text="🏪 Торговий зал (ТЗ)", callback_data="dev_pos_add_type:ТЗ")],
-        [InlineKeyboardButton(text="🍞 Власне виробництво (ВВ)", callback_data="dev_pos_add_type:ВВ")],
+        [
+            InlineKeyboardButton(text="🏪 ТЗ", callback_data="dev_pos_add_type:ТЗ"),
+            InlineKeyboardButton(text="🍞 ВВ", callback_data="dev_pos_add_type:ВВ"),
+        ],
+        [
+            InlineKeyboardButton(text="📦 РЦ", callback_data="dev_pos_add_type:РЦ"),
+            InlineKeyboardButton(text="🏢 ОФІС", callback_data="dev_pos_add_type:ОФІС"),
+        ],
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_positions_menu")]
     ]
     text = (
         f"Посада: <b>{pos_name}</b> ({days} днів)\n\n"
-        f"Оберіть напрямок посади:\n"
-        f"• <b>ТЗ (Торговий зал)</b> — касири, продавці тощо\n"
-        f"• <b>ВВ (Власне виробництво)</b> — пекарі, кухарі, піцайоло тощо"
+        f"Оберіть тип посади:"
     )
     if isinstance(message_or_callback, CallbackQuery):
         await _edit_or_answer(message_or_callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -9100,8 +9180,8 @@ async def dev_pos_add_type_callback(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Дані сесії застаріли.", show_alert=True)
         return
 
-    t_type = callback.data.split(":")[1]  # 'ТЗ' або 'ВВ'
-    type_label = "🏪 Торговий зал (ТЗ)" if t_type == "ТЗ" else "🍞 Власне виробництво (ВВ)"
+    t_type = callback.data.split(":")[1]
+    type_label = POSITION_TYPES.get(t_type, t_type)
     
     success = await add_position(pos_name, days, territorial_type=t_type)
     if success:
@@ -9133,7 +9213,7 @@ async def dev_pos_view(callback: CallbackQuery):
         
     stats = await get_position_stats(pos['name'])
     t_type = pos.get('territorial_type', 'ТЗ')
-    type_label = "🏪 Торговий зал (ТЗ)" if t_type == "ТЗ" else "🍞 Власне виробництво (ВВ)"
+    type_label = POSITION_TYPES.get(t_type, t_type)
     
     text = (
         f"👔 <b>Посада:</b> {pos['name']}\n"
@@ -9152,15 +9232,13 @@ async def dev_pos_view(callback: CallbackQuery):
     else:
         from database.hr import is_developer_user
         is_admin = await is_developer_user(callback.from_user.id)
-        other_type = "ВВ" if t_type == "ТЗ" else "ТЗ"
-        other_label = "🍞 Змінити на ВВ" if t_type == "ТЗ" else "🏪 Змінити на ТЗ"
         buttons = [
             [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_pos_edit_name:{pos_id}")],
         ]
         if pos['name'] != 'Керівник' or is_admin:
             buttons.append([InlineKeyboardButton(text="✏️ Змінити кількість днів", callback_data=f"dev_pos_edit_days:{pos_id}")])
         buttons.extend([
-            [InlineKeyboardButton(text=other_label, callback_data=f"dev_pos_toggle_type:{pos_id}:{other_type}")],
+            [InlineKeyboardButton(text="🏷 Змінити тип", callback_data=f"dev_pos_type_menu:{pos_id}")],
             [InlineKeyboardButton(text="🗑 Видалити посаду", callback_data=f"dev_pos_delete:{pos_id}")],
             [InlineKeyboardButton(text="🔙 До списку посад", callback_data="dev_positions_menu")]
         ])
@@ -9169,48 +9247,80 @@ async def dev_pos_view(callback: CallbackQuery):
     await callback.answer()
 
 
+async def dev_pos_type_menu(callback: CallbackQuery):
+    """Відображає підменю вибору нового типу посади (сітка 2х2)."""
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
+
+    pos_id = int(callback.data.split(":")[1])
+    pos = await get_position_by_id(pos_id)
+    if not pos:
+        await callback.answer("Посаду не знайдено!", show_alert=True)
+        return
+
+    current_type = pos.get('territorial_type', 'ТЗ')
+
+    def make_btn(code: str) -> InlineKeyboardButton:
+        lbl = POSITION_TYPES.get(code, code)
+        if code == current_type:
+            return InlineKeyboardButton(text=f"{lbl} ✅", callback_data="ignore")
+        return InlineKeyboardButton(text=lbl, callback_data=f"dev_pos_set_type:{pos_id}:{code}")
+
+    buttons = [
+        [make_btn("ТЗ"), make_btn("ВВ")],
+        [make_btn("РЦ"), make_btn("ОФІС")],
+        [InlineKeyboardButton(text="🔙 Назад до посади", callback_data=f"dev_pos_view:{pos_id}")]
+    ]
+
+    text = (
+        f"👔 Посада: <b>{pos['name']}</b>\n"
+        f"🏷 Поточний тип: <b>{POSITION_TYPES.get(current_type, current_type)}</b>\n\n"
+        f"Оберіть новий тип посади:"
+    )
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_pos_set_type(callback: CallbackQuery):
+    """Встановлює обраний тип посади та повертає в картку посади."""
+    if await is_observer_user(callback.from_user.id):
+        await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    pos_id = int(parts[1])
+    new_type = parts[2]
+
+    success = await update_position_type(pos_id, new_type)
+    if not success:
+        await callback.answer("❌ Помилка зміни типу", show_alert=True)
+        return
+
+    type_label = POSITION_TYPES.get(new_type, new_type)
+    await callback.answer(f"✅ Тип змінено на {type_label}")
+    callback.data = f"dev_pos_view:{pos_id}"
+    await dev_pos_view(callback)
+
+
 async def dev_pos_toggle_type(callback: CallbackQuery):
-    """Перемикає тип посади між ТЗ та ВВ."""
+    """Перемикає тип посади (legacy fallback)."""
     if await is_observer_user(callback.from_user.id):
         await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
         return
     parts = callback.data.split(":")
     pos_id = int(parts[1])
-    new_type = parts[2]  # 'ТЗ' або 'ВВ'
+    new_type = parts[2]
     
     success = await update_position_type(pos_id, new_type)
     if not success:
         await callback.answer("❌ Помилка зміни типу", show_alert=True)
         return
     
-    pos = await get_position_by_id(pos_id)
-    stats = await get_position_stats(pos['name'])
-    t_type = pos.get('territorial_type', 'ТЗ')
-    type_label = "🏪 Торговий зал (ТЗ)" if t_type == "ТЗ" else "🍞 Власне виробництво (ВВ)"
-    
-    text = (
-        f"👔 <b>Посада:</b> {pos['name']}\n"
-        f"🏷 <b>Тип:</b> {type_label}\n"
-        f"📅 <b>Днів навчання:</b> {pos['days_count']}\n\n"
-        f"📊 <b>Статистика:</b>\n"
-        f"• Працівників: {stats['workers_count']}\n"
-        f"• Стажерів: {stats['interns_count']}\n"
-        f"• Всього: {stats['total']}"
-    )
-    
-    other_type = "ВВ" if t_type == "ТЗ" else "ТЗ"
-    other_label = "🍞 Змінити на ВВ" if t_type == "ТЗ" else "🏪 Змінити на ТЗ"
-    
-    buttons = [
-        [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_pos_edit_name:{pos_id}")],
-        [InlineKeyboardButton(text="✏️ Змінити кількість днів", callback_data=f"dev_pos_edit_days:{pos_id}")],
-        [InlineKeyboardButton(text=other_label, callback_data=f"dev_pos_toggle_type:{pos_id}:{other_type}")],
-        [InlineKeyboardButton(text="🗑 Видалити посаду", callback_data=f"dev_pos_delete:{pos_id}")],
-        [InlineKeyboardButton(text="🔙 До списку посад", callback_data="dev_positions_menu")]
-    ]
-    
-    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    await callback.answer(f"✅ Тип змінено на {t_type}")
+    type_label = POSITION_TYPES.get(new_type, new_type)
+    await callback.answer(f"✅ Тип змінено на {type_label}")
+    callback.data = f"dev_pos_view:{pos_id}"
+    await dev_pos_view(callback)
 
 
 async def dev_pos_delete(callback: CallbackQuery):
@@ -10759,6 +10869,8 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(dev_pos_add_days_callback, DeveloperStates.waiting_add_position_days, lambda c: c.data and c.data.startswith("dev_pos_add_days:"))
     dp.callback_query.register(dev_pos_add_type_callback, DeveloperStates.waiting_add_position_type, lambda c: c.data and c.data.startswith("dev_pos_add_type:"))
     dp.callback_query.register(dev_pos_view, lambda c: c.data and c.data.startswith("dev_pos_view:"))
+    dp.callback_query.register(dev_pos_type_menu, lambda c: c.data and c.data.startswith("dev_pos_type_menu:"))
+    dp.callback_query.register(dev_pos_set_type, lambda c: c.data and c.data.startswith("dev_pos_set_type:"))
     dp.callback_query.register(dev_pos_edit_name_start, lambda c: c.data and c.data.startswith("dev_pos_edit_name:"))
     dp.message.register(dev_pos_edit_name_process, DeveloperStates.waiting_edit_position_name)
     dp.callback_query.register(dev_pos_edit_days_start, lambda c: c.data and c.data.startswith("dev_pos_edit_days:"))
@@ -10835,6 +10947,10 @@ def register_developer_menu_handlers(dp: Dispatcher):
     # Manager filter
     dp.callback_query.register(developer_users_by_manager_menu, lambda c: c.data == "dev_users_by_manager")
     dp.callback_query.register(developer_users_manager_selected, lambda c: c.data and c.data.startswith("dev_u_mgr:"))
+
+    # Type filter
+    dp.callback_query.register(developer_users_by_type_menu, lambda c: c.data == "dev_users_by_type")
+    dp.callback_query.register(developer_users_filter_type, lambda c: c.data and c.data.startswith("dev_users_filter_type:"))
 
     # User profile card
     dp.callback_query.register(developer_user_card_handler, lambda c: c.data and c.data.startswith("dev_u_card:"))
