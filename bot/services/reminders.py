@@ -295,10 +295,59 @@ async def auto_reminder_loop(bot: Bot) -> None:
         
         now = datetime.now(tz)
 
-        # 0. Автоматичне видалення ВИМКНЕНО:
-        # Раніше бот безповоротно видаляв стажерів після 3 днів неактивності (наприклад, вихідні/офлайн),
-        # що викликало втрату даних і збої прогресу. Тепер видалення виконує тільки керівник/HR вручну.
-        
+        # 0. Автоматичне видалення стажерів після 3 робочих днів неактивності:
+        # У вихідні (субота=5, неділя=6) видалення ставиться на паузу
+        if now.weekday() not in (5, 6):
+            inactive_to_delete = await get_inactive_interns_for_auto_delete(days=3)
+            for intern in inactive_to_delete:
+                intern_id = intern["user_id"]
+                if await is_privileged_user(intern_id):
+                    continue
+
+                full_name = intern.get("full_name") or intern.get("username") or f"ID {intern_id}"
+                username = intern.get("username") or ""
+                role = intern.get("role") or "Стажер"
+                city = intern.get("city") or "Не вказано"
+                shop = intern.get("shop") or "Не вказано"
+                manager_id = intern.get("manager_id")
+                last_activity = intern.get("last_activity") or "—"
+
+                try:
+                    # 1. Логуємо подію в training_events
+                    await log_training_event(
+                        user_id=intern_id,
+                        event_type="auto_deleted_inactive",
+                        actor_id=None,
+                        full_name=full_name,
+                        username=username,
+                        city=city,
+                        shop=shop,
+                        role=role,
+                        manager_id=manager_id,
+                    )
+                    # 2. Видаляємо користувача
+                    await delete_user(intern_id)
+                    logger.info(f"Auto-deleted inactive intern {intern_id} ({full_name}) after 3 business days of inactivity")
+
+                    # 3. Сповіщаємо керівника
+                    if manager_id:
+                        username_part = f" (@{username})" if username else ""
+                        msg_text = (
+                            "⚠️ <b>Стажера видалено через неактивність</b>\n\n"
+                            f"👤 <b>{full_name}</b>{username_part}\n"
+                            f"💼 Посада: <b>{role}</b>\n"
+                            f"🏪 Магазин: <b>{shop}</b> ({city})\n"
+                            f"🕒 Остання активність: <b>{last_activity}</b>\n\n"
+                            "<i>Стажер був неактивний понад 3 робочі дні (субота та неділя не враховувалися) "
+                            "і був автоматично відрахований з навчальної програми.</i>"
+                        )
+                        try:
+                            await bot.send_message(manager_id, msg_text, parse_mode="HTML")
+                        except Exception as mgr_err:
+                            logger.warning(f"Could not notify manager {manager_id} about auto-deleted intern {intern_id}: {mgr_err}")
+                except Exception as del_err:
+                    logger.error(f"Error during auto-deletion of intern {intern_id}: {del_err}", exc_info=True)
+
         # 1. Автоматичні нагадування неактивним (тільки стажерам)
         interns = await get_interns_for_auto_reminder(now)
         for intern in interns:

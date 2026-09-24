@@ -9,6 +9,39 @@ from database.managers import MANAGERS_DB_PATH, get_manager_by_uid
 def _now_str() -> str:
     return datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
 
+def get_business_days_cutoff(now: Optional[datetime] = None, business_days: int = 3) -> datetime:
+    """
+    Повертає пороговий момент часу (datetime), віднімаючи вказану кількість робочих днів (business_days).
+    Субота та неділя ігноруються (не враховуються як дні неактивності).
+    
+    Якщо now припадає на суботу або неділю, лічильник заморожується на кінець п'ятниці відповідного часу.
+    """
+    tz = pytz.timezone(TIMEZONE)
+    if now is None:
+        now = datetime.now(tz)
+    elif now.tzinfo is None:
+        now = tz.localize(now)
+    else:
+        now = now.astimezone(tz)
+
+    current = now
+    # Якщо зараз субота (5) або неділя (6) - откатуємо до п'ятниці відповідного часу
+    if current.weekday() == 5:  # Субота
+        current = current - timedelta(days=1)
+    elif current.weekday() == 6:  # Неділя
+        current = current - timedelta(days=2)
+
+    # Тепер current гарантовано пн-пт. Віднімаємо business_days повних робочих днів:
+    remaining_days = business_days
+    while remaining_days > 0:
+        current -= timedelta(days=1)
+        # Якщо current припав на вихідні, відкочуємо назад до п'ятниці
+        while current.weekday() in (5, 6):
+            current -= timedelta(days=1)
+        remaining_days -= 1
+
+    return current
+
 async def register_user(user_id, username=None, full_name=None):
     """Реєструє нового користувача або оновлює дані існуючого"""
     now = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
@@ -548,10 +581,10 @@ async def get_all_workers() -> list:
 async def get_interns_in_progress_for_manager(manager_id, active_only=True):
     """
     Отримує список стажерів, які не завершили навчання.
-    Якщо active_only=True, повертає лише тих, хто був активний останні 3 дні.
+    Якщо active_only=True, повертає лише тих, хто був активний останні 3 робочі дні (без сб/нд).
     """
     from bot.config import DAYS_TOTAL
-    cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    cutoff_date = get_business_days_cutoff(business_days=3).strftime("%Y-%m-%d %H:%M:%S")
     
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -588,8 +621,8 @@ async def get_interns_in_progress_for_manager(manager_id, active_only=True):
         return in_progress
 
 async def get_inactive_interns_for_manager(manager_id, days=3):
-    """Отримує список стажерів, які не завершили навчання ТА не були активні вказану кількість днів"""
-    cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    """Отримує список стажерів, які не завершили навчання ТА не були активні вказану кількість робочих днів (без сб/нд)"""
+    cutoff_date = get_business_days_cutoff(business_days=days).strftime("%Y-%m-%d %H:%M:%S")
     
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -622,10 +655,10 @@ async def get_inactive_interns_for_manager(manager_id, days=3):
 async def get_inactive_interns_for_auto_delete(days: int = 3) -> list[dict]:
     """
     Повертає стажерів для автоматичного видалення:
-    неактивні >= days, не є Працівниками, мають керівника, не завершили навчання.
+    неактивні >= days робочих днів (без сб/нд), не є Працівниками, мають керівника, не завершили навчання.
     """
     from database.positions import get_days_count_for_role
-    cutoff_date = (datetime.now(pytz.timezone(TIMEZONE)) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    cutoff_date = get_business_days_cutoff(business_days=days).strftime("%Y-%m-%d %H:%M:%S")
     privileged_ids = await _get_privileged_user_ids()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -736,7 +769,7 @@ async def get_inactive_interns_for_auto_reminder(now: datetime, inactive_days: i
     """Повертає стажерів, які відповідають критеріям для автоматичного нагадування."""
     from database.positions import get_days_count_for_role
     
-    inactive_cutoff = now - timedelta(days=inactive_days)
+    inactive_cutoff = get_business_days_cutoff(now, business_days=inactive_days)
     cooldown_cutoff = now - timedelta(hours=cooldown_hours)
     privileged_ids = await _get_privileged_user_ids()
     
