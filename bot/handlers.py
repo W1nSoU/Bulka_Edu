@@ -19,6 +19,9 @@ import json
 import asyncio
 import re
 import html
+import logging
+
+logger = logging.getLogger(__name__)
 from database.users import (
     register_user, update_progress, get_user_progress, set_intern_extra,
     get_user_details, get_manager_interns, get_inactive_interns_for_manager, get_interns_in_progress_for_manager,
@@ -2315,6 +2318,7 @@ async def _get_active_interns(user_id: int) -> List[dict]:
     active: List[dict] = []
     for intern in all_interns:
         progress_data = await get_user_progress(intern['user_id'])
+        completed_days = len([p for p in progress_data if p.get("completed")])
         role = intern.get("role")
         from database.positions import get_days_count_for_role
         role_days = await get_days_count_for_role(role) if role else DAYS_TOTAL
