@@ -361,6 +361,12 @@ def step4_verify_columns_and_tables():
                 if col_name not in rec_cols:
                     conn.execute(f"ALTER TABLE survey_recipients ADD COLUMN {col_name} {col_def}")
 
+            # Унікальні індекси для ON CONFLICT
+            conn.execute("DELETE FROM survey_questions WHERE id NOT IN (SELECT MIN(id) FROM survey_questions GROUP BY survey_id, question_idx)")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_survey_questions_unique ON survey_questions (survey_id, question_idx)")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_survey_answers_unique ON survey_answers (survey_id, user_id, question_idx)")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_survey_recipients_unique ON survey_recipients (survey_id, user_id)")
+
         # Міграція старих записів де role='Працівник' -> status='Працівник'
         conn.execute("UPDATE users SET status = 'Працівник' WHERE role = 'Працівник' AND (status IS NULL OR status = '')")
         conn.commit()

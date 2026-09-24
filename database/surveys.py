@@ -44,7 +44,8 @@ async def init_surveys_db(db_path: str = DB_PATH) -> None:
             text TEXT NOT NULL,
             question_type TEXT NOT NULL,          -- choice | text
             options_json TEXT,                    -- JSON-масив: ["а. ...", "б. ..."]
-            FOREIGN KEY (survey_id) REFERENCES surveys(id) ON DELETE CASCADE
+            FOREIGN KEY (survey_id) REFERENCES surveys(id) ON DELETE CASCADE,
+            UNIQUE(survey_id, question_idx)
         )
         ''')
 
@@ -110,6 +111,28 @@ async def init_surveys_db(db_path: str = DB_PATH) -> None:
             if col_name not in rec_cols:
                 await db.execute(f"ALTER TABLE survey_recipients ADD COLUMN {col_name} {col_def}")
 
+        # Гарантуємо наявність унікальних індексів для ON CONFLICT
+        await db.execute('''
+        DELETE FROM survey_questions 
+        WHERE id NOT IN (
+            SELECT MIN(id) FROM survey_questions GROUP BY survey_id, question_idx
+        )
+        ''')
+        await db.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_survey_questions_unique 
+        ON survey_questions (survey_id, question_idx)
+        ''')
+
+        await db.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_survey_answers_unique 
+        ON survey_answers (survey_id, user_id, question_idx)
+        ''')
+
+        await db.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_survey_recipients_unique 
+        ON survey_recipients (survey_id, user_id)
+        ''')
+
         await db.commit()
 
 
@@ -172,17 +195,39 @@ async def add_survey_question(
     """Додає питання до опитування."""
     async with aiosqlite.connect(db_path) as db:
         options_json = json.dumps(options, ensure_ascii=False) if options else None
-        await db.execute(
-            """
-            INSERT INTO survey_questions (survey_id, question_idx, text, question_type, options_json)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(survey_id, question_idx) DO UPDATE SET
-                text=excluded.text,
-                question_type=excluded.question_type,
-                options_json=excluded.options_json
-            """,
-            (survey_id, question_idx, text, question_type, options_json)
-        )
+        try:
+            await db.execute(
+                """
+                INSERT INTO survey_questions (survey_id, question_idx, text, question_type, options_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(survey_id, question_idx) DO UPDATE SET
+                    text=excluded.text,
+                    question_type=excluded.question_type,
+                    options_json=excluded.options_json
+                """,
+                (survey_id, question_idx, text, question_type, options_json)
+            )
+        except aiosqlite.OperationalError as e:
+            if "ON CONFLICT clause does not match" in str(e):
+                await db.execute(
+                    "DELETE FROM survey_questions WHERE id NOT IN (SELECT MIN(id) FROM survey_questions GROUP BY survey_id, question_idx)"
+                )
+                await db.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_survey_questions_unique ON survey_questions (survey_id, question_idx)"
+                )
+                await db.execute(
+                    """
+                    INSERT INTO survey_questions (survey_id, question_idx, text, question_type, options_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(survey_id, question_idx) DO UPDATE SET
+                        text=excluded.text,
+                        question_type=excluded.question_type,
+                        options_json=excluded.options_json
+                    """,
+                    (survey_id, question_idx, text, question_type, options_json)
+                )
+            else:
+                raise
         await db.commit()
 
 
@@ -565,16 +610,37 @@ async def save_survey_answer(
     """Зберігає відповідь користувача на конкретне питання."""
     now_str = get_current_kyiv_time_str()
     async with aiosqlite.connect(db_path) as db:
-        await db.execute(
-            """
-            INSERT INTO survey_answers (survey_id, user_id, question_idx, answer_text, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(survey_id, user_id, question_idx) DO UPDATE SET
-                answer_text=excluded.answer_text,
-                created_at=excluded.created_at
-            """,
-            (survey_id, user_id, question_idx, answer_text, now_str)
-        )
+        try:
+            await db.execute(
+                """
+                INSERT INTO survey_answers (survey_id, user_id, question_idx, answer_text, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(survey_id, user_id, question_idx) DO UPDATE SET
+                    answer_text=excluded.answer_text,
+                    created_at=excluded.created_at
+                """,
+                (survey_id, user_id, question_idx, answer_text, now_str)
+            )
+        except aiosqlite.OperationalError as e:
+            if "ON CONFLICT clause does not match" in str(e):
+                await db.execute(
+                    "DELETE FROM survey_answers WHERE id NOT IN (SELECT MIN(id) FROM survey_answers GROUP BY survey_id, user_id, question_idx)"
+                )
+                await db.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_survey_answers_unique ON survey_answers (survey_id, user_id, question_idx)"
+                )
+                await db.execute(
+                    """
+                    INSERT INTO survey_answers (survey_id, user_id, question_idx, answer_text, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(survey_id, user_id, question_idx) DO UPDATE SET
+                        answer_text=excluded.answer_text,
+                        created_at=excluded.created_at
+                    """,
+                    (survey_id, user_id, question_idx, answer_text, now_str)
+                )
+            else:
+                raise
         await db.commit()
 
 

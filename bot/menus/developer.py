@@ -36,6 +36,7 @@ from database.shops import (
     delete_shop_and_transfer_users,
 )
 from bot.services.logger import get_logger
+logger = get_logger()
 from bot.services.semantic_search import build_and_reset_embeddings
 from database.users import (
     get_all_users,
