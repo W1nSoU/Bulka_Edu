@@ -2831,6 +2831,64 @@ async def global_error_handler(event: ErrorEvent):
     )
 
 
+async def news_reaction_handler(callback: CallbackQuery):
+    """
+    Обробник кліку по інлайн-кнопці реакції під новиною.
+    Формат callback_data: news_react:{news_id}:{emoji}
+    """
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer()
+        return
+
+    try:
+        news_id = int(parts[1])
+        emoji = parts[2]
+    except ValueError:
+        await callback.answer()
+        return
+
+    user_id = callback.from_user.id
+    from database.news import upsert_news_reaction, NEWS_REACTIONS
+    from bot.services.news_broadcaster import get_news_reaction_keyboard
+
+    if emoji not in NEWS_REACTIONS:
+        await callback.answer("Невідома реакція.", show_alert=True)
+        return
+
+    success = await upsert_news_reaction(news_id, user_id, emoji)
+    if not success:
+        await callback.answer("Помилка збереження реакції.", show_alert=True)
+        return
+
+    await callback.answer("✅ Вашу реакцію успішно надіслано!")
+
+    reaction_line = f"Ваша анонімна реакція: {emoji}"
+    new_kb = get_news_reaction_keyboard(news_id, current_reaction=emoji)
+
+    msg = callback.message
+    if not msg:
+        return
+
+    caption_or_text = msg.caption if msg.photo else msg.text
+    if not caption_or_text:
+        return
+
+    import re
+    if re.search(r"Ваша анонімна реакція:\s*.+", caption_or_text):
+        new_text = re.sub(r"Ваша анонімна реакція:\s*.+", reaction_line, caption_or_text)
+    else:
+        new_text = f"{caption_or_text.rstrip()}\n\n{reaction_line}"
+
+    try:
+        if msg.photo:
+            await msg.edit_caption(caption=new_text, reply_markup=new_kb, parse_mode="HTML")
+        else:
+            await msg.edit_text(text=new_text, reply_markup=new_kb, parse_mode="HTML")
+    except Exception as e:
+        logger.debug(f"[News Reaction] Failed to edit message: {e}")
+
+
 def register_handlers(dp: Dispatcher):
     # Register global error handler
     dp.error.register(global_error_handler)
@@ -2845,6 +2903,7 @@ def register_handlers(dp: Dispatcher):
     # 2. Main handlers
     dp.message.register(start_menu, Command("start"))
     dp.message.register(process_registration_full_name, RegistrationStates.waiting_for_full_name)
+    dp.callback_query.register(news_reaction_handler, lambda c: c.data and c.data.startswith("news_react:"))
     dp.callback_query.register(menu_days, lambda c: c.data == "continue_learning")
     dp.callback_query.register(locked_day, lambda c: c.data.startswith("locked_"))
     dp.callback_query.register(day_content, lambda c: c.data.startswith("day_"))

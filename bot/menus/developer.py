@@ -7140,6 +7140,7 @@ async def dev_news_menu_handler(callback: CallbackQuery, state: FSMContext = Non
     )
     buttons = [
         [InlineKeyboardButton(text="📢 Опублікувати новину", callback_data="dev_news_create_start")],
+        [InlineKeyboardButton(text="📚 Історія новин", callback_data="dev_news_history:1")],
         [InlineKeyboardButton(text="🏷 Керування категоріями", callback_data="dev_news_categories_menu")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_broadcasts_menu")]
     ]
@@ -7639,7 +7640,7 @@ async def dev_news_launch_handler(callback: CallbackQuery, state: FSMContext):
         await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
         return
 
-    from database.news import get_matching_news_recipients
+    from database.news import get_matching_news_recipients, create_news
     from bot.services.news_broadcaster import start_news_wave_broadcast
 
     data = await state.get_data()
@@ -7658,6 +7659,17 @@ async def dev_news_launch_handler(callback: CallbackQuery, state: FSMContext):
 
     roles_str = ", ".join(selected_roles)
     city_str = "Усі міста" if selected_city == "all" else selected_city
+
+    total_waves = len(range(0, len(recipients), 50))
+    news_id = await create_news(
+        text=full_text,
+        photo_file_id=photo_file_id,
+        selected_roles=selected_roles,
+        selected_city=selected_city,
+        total_recipients=len(recipients),
+        total_waves=total_waves,
+        created_by=callback.from_user.id
+    )
 
     try:
         if callback.message.photo:
@@ -7690,8 +7702,190 @@ async def dev_news_launch_handler(callback: CallbackQuery, state: FSMContext):
         recipient_uids=recipients,
         text=full_text,
         photo_file_id=photo_file_id,
-        admin_chat_id=callback.message.chat.id
+        admin_chat_id=callback.message.chat.id,
+        news_id=news_id
     )
+
+
+async def dev_news_history_handler(callback: CallbackQuery):
+    """Відображає список новин за останні 6 місяців з пагінацією."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+
+    from database.news import get_news_history_last_6_months
+    import math
+    import re
+
+    parts = callback.data.split(":")
+    page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
+
+    news_list = await get_news_history_last_6_months()
+    if not news_list:
+        text = (
+            "📚 <b>Історія новин</b>\n"
+            "───────────────────\n\n"
+            "За останні 6 місяців немає збережених новин."
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_menu")]
+        ])
+        await _show_admin_photo_menu(callback, "img/admin/admin_broadcasts.jpg", text, kb)
+        await callback.answer()
+        return
+
+    per_page = 6
+    total_pages = max(1, math.ceil(len(news_list) / per_page))
+    page = max(1, min(page, total_pages))
+
+    start_idx = (page - 1) * per_page
+    page_items = news_list[start_idx : start_idx + per_page]
+
+    buttons = []
+    for item in page_items:
+        created_at = item.get("created_at") or ""
+        date_display = created_at[:10]
+        if "-" in date_display:
+            parts_d = date_display.split("-")
+            if len(parts_d) == 3:
+                date_display = f"{parts_d[2]}.{parts_d[1]}.{parts_d[0]}"
+
+        clean_text = re.sub(r"<[^>]+>", "", item.get("text", "")).strip()
+        clean_text = clean_text.replace("\n", " ")
+        if len(clean_text) > 28:
+            clean_text = clean_text[:25] + "..."
+        if not clean_text:
+            clean_text = f"Новина #{item['id']}"
+
+        btn_text = f"📅 {date_display} · {clean_text}"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"dev_news_view:{item['id']}:{page}")])
+
+    # Пагінація
+    if total_pages > 1:
+        pag_row = []
+        if page > 1:
+            pag_row.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"dev_news_history:{page - 1}"))
+        pag_row.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="ignore"))
+        if page < total_pages:
+            pag_row.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"dev_news_history:{page + 1}"))
+        buttons.append(pag_row)
+
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_menu")])
+
+    text = (
+        "📚 <b>Історія новин (останні 6 місяців)</b>\n"
+        "───────────────────\n\n"
+        f"Знайдено новин: <b>{len(news_list)}</b>\n"
+        "Оберіть публікацію для перегляду аналітики та вивантаження звіту:"
+    )
+    await _show_admin_photo_menu(callback, "img/admin/admin_broadcasts.jpg", text, InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_news_view_handler(callback: CallbackQuery):
+    """Детальний перегляд новини зі статистикою та кнопкою звіту."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+
+    from database.news import get_news_by_id, get_news_reactions_summary
+
+    parts = callback.data.split(":")
+    news_id = int(parts[1])
+    back_page = parts[2] if len(parts) > 2 else "1"
+
+    news = await get_news_by_id(news_id)
+    if not news:
+        await callback.answer("Новину не знайдено!", show_alert=True)
+        return
+
+    summary = await get_news_reactions_summary(news_id)
+
+    total = news.get("total_recipients") or 0
+    sent = news.get("sent_count") or 0
+    failed = news.get("failed_count") or 0
+    total_reactions = summary.get("total", 0)
+
+    sent_pct = round((sent / total * 100), 1) if total > 0 else 0
+    failed_pct = round((failed / total * 100), 1) if total > 0 else 0
+    reaction_pct = round((total_reactions / sent * 100), 1) if sent > 0 else 0
+
+    breakdown = summary.get("breakdown", {})
+    r_bad = breakdown.get("👎", 0)
+    r_think = breakdown.get("🤔", 0)
+    r_love = breakdown.get("❤️", 0)
+    r_fire = breakdown.get("🔥", 0)
+
+    created_at = news.get("created_at") or "—"
+    roles_list = news.get("selected_roles") or []
+    roles_str = ", ".join(roles_list) if roles_list else "Всі"
+    city = news.get("selected_city") or "all"
+    city_str = "Усі міста" if city == "all" else city
+
+    text = (
+        f"📰 <b>Новина #{news_id}</b>\n"
+        f"───────────────────\n"
+        f"{news.get('text', '')}\n\n"
+        f"📊 <b>Статистика новини:</b>\n"
+        f"📅 Дата публікації: <b>{created_at}</b>\n"
+        f"👥 Аудиторія: <b>{roles_str} ({city_str})</b>\n"
+        f"📬 Всього отримувачів: <b>{total}</b>\n"
+        f"✅ Успішно доставлено: <b>{sent}</b> ({sent_pct}%)\n"
+        f"❌ Не вдалося доставити: <b>{failed}</b> ({failed_pct}%)\n"
+        f"💬 Отримано реакцій: <b>{total_reactions}</b> ({reaction_pct}%)\n\n"
+        f"<b>Емоції:</b>\n"
+        f"👎 {r_bad}  |  🤔 {r_think}  |  ❤️ {r_love}  |  🔥 {r_fire}"
+    )
+
+    buttons = [
+        [InlineKeyboardButton(text="📊 Завантажити звіт (Excel)", callback_data=f"dev_news_report:{news_id}")],
+        [InlineKeyboardButton(text="🔙 До списку новин", callback_data=f"dev_news_history:{back_page}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    photo_id = news.get("photo_file_id")
+    if photo_id:
+        try:
+            if callback.message:
+                await callback.message.delete()
+        except Exception:
+            pass
+        await callback.message.answer_photo(photo=photo_id, caption=text, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        await _edit_or_answer(callback.message, text, reply_markup=reply_markup)
+
+    await callback.answer()
+
+
+async def dev_news_report_handler(callback: CallbackQuery):
+    """Генерує та відправляє Excel-звіт за новиною."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+
+    from bot.services.news_excel import generate_news_report_xlsx
+    from aiogram.types import BufferedInputFile
+
+    news_id = int(callback.data.split(":")[1])
+    await callback.answer("⏳ Формую Excel-звіт...", show_alert=False)
+
+    try:
+        stream = await generate_news_report_xlsx(news_id)
+        now_tag = datetime.now().strftime("%Y%m%d_%H%M")
+        doc = BufferedInputFile(stream.getvalue(), filename=f"news_report_{news_id}_{now_tag}.xlsx")
+        await callback.message.answer_document(
+            document=doc,
+            caption=(
+                f"📊 <b>Excel-звіт за розсилкою новини #{news_id}</b>\n\n"
+                f"• <b>Аркуш 1:</b> Загальна статистика та реакції\n"
+                f"• <b>Аркуш 2:</b> Список не доставлених з причинами\n"
+                f"• <b>Аркуш 3:</b> Персональні реакції співробітників"
+            ),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.exception(f"Error generating news report: {e}")
+        await callback.message.answer(f"❌ Помилка при генерації звіту: {e}")
 
 
 # ==================== Tokens Management ====================
@@ -11210,6 +11404,9 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(dev_news_ai_improve_handler, lambda c: c.data == "dev_news_ai_improve")
     dp.callback_query.register(dev_news_revert_orig_handler, lambda c: c.data == "dev_news_revert_orig")
     dp.callback_query.register(dev_news_launch_handler, NewsCreationStates.confirm_dispatch, lambda c: c.data == "dev_news_launch")
+    dp.callback_query.register(dev_news_history_handler, lambda c: c.data and (c.data == "dev_news_history" or c.data.startswith("dev_news_history:")))
+    dp.callback_query.register(dev_news_view_handler, lambda c: c.data and c.data.startswith("dev_news_view:"))
+    dp.callback_query.register(dev_news_report_handler, lambda c: c.data and c.data.startswith("dev_news_report:"))
 
     # Attestation Handlers
     from bot.menus.attestation import register_attestation_handlers
