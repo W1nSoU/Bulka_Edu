@@ -569,8 +569,9 @@ async def get_interns_in_progress_for_manager(manager_id, active_only=True):
         
         in_progress = []
         from database.positions import get_days_count_for_role
-        for intern in interns:
-            if intern["role"] in MANAGEMENT_ROLES:
+        for intern_row in interns:
+            intern = dict(intern_row)
+            if intern.get("role") in MANAGEMENT_ROLES:
                 continue
             # Перевіряємо чи завершено навчання
             cursor = await db.execute(
@@ -582,7 +583,7 @@ async def get_interns_in_progress_for_manager(manager_id, active_only=True):
             required_days = await get_days_count_for_role(role)
             
             if completed_days < required_days:
-                in_progress.append(dict(intern))
+                in_progress.append(intern)
         
         return in_progress
 
@@ -601,8 +602,9 @@ async def get_inactive_interns_for_manager(manager_id, days=3):
         
         inactive = []
         from database.positions import get_days_count_for_role
-        for intern in interns:
-            if intern["role"] in MANAGEMENT_ROLES:
+        for intern_row in interns:
+            intern = dict(intern_row)
+            if intern.get("role") in MANAGEMENT_ROLES:
                 continue
             cursor = await db.execute(
                 "SELECT COUNT(*) FROM progress WHERE user_id = ? AND completed = 1",
@@ -613,7 +615,7 @@ async def get_inactive_interns_for_manager(manager_id, days=3):
             required_days = await get_days_count_for_role(role)
             
             if completed_days < required_days:
-                inactive.append(dict(intern))
+                inactive.append(intern)
         
         return inactive
 
