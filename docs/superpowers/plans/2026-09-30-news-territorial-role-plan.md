@@ -5,7 +5,7 @@
 ---
 
 ### Крок 1. Логіка вибірки отримувачів у базі даних (`database/surveys.py`)
-- [ ] Оновити функцію `get_matching_survey_recipients`:
+- [x] Оновити функцію `get_matching_survey_recipients`:
   - Додати обробку блоку `if "Територіал" in target_roles:`:
     - Вибірка з `MANAGERS_DB_PATH` (`managers.db`):
       `SELECT uid FROM managers WHERE process = 'Територіал' AND (status = 'active' OR status IS NULL)`
@@ -18,27 +18,27 @@
 ---
 
 ### Крок 2. Інтерфейс вибору аудиторії для новин (`bot/menus/developer.py`)
-- [ ] Оновити `_show_news_roles_selection`:
+- [x] Оновити `_show_news_roles_selection`:
   - Розширити список `all_roles` до `["Працівник", "Стажер", "Керівник", "Територіал", "Наглядач"]`.
   - Залишити `ALL_SURVEY_ROLES` для опитувань без змін.
 
 ---
 
 ### Крок 3. Модульні тести (`tests/test_news_territorial_recipients.py`)
-- [ ] Створити тестовий набір для перевірки:
+- [x] Створити тестовий набір для перевірки:
   - Територіал у `managers.db` знаходиться при виборі ролі "Територіал".
   - Територіал зі статусом `fired` відфільтровується у `get_matching_news_recipients`.
   - Фільтрація по місту працює коректно: повертається тільки територіал зазначеного міста.
   - При виборі "all" повертаються всі активні територіали.
-- [ ] Запустити тести через `./venv/bin/python -m unittest tests/test_news_territorial_recipients.py`.
+- [x] Запустити тести через `./venv/bin/python -m unittest tests/test_news_territorial_recipients.py`.
 
 ---
 
 ### Крок 4. Валідація та перевірка компіляції
-- [ ] Запустити компіляцію Python (`python -m py_compile ...`).
-- [ ] Запустити повний тестовий набір `python -m unittest discover tests`.
+- [x] Запустити компіляцію Python (`python -m py_compile ...`).
+- [x] Запустити повний тестовий набір `python -m unittest discover tests`.
 
 ---
 
 ### Крок 5. Фіксація змін (Git Commit)
-- [ ] Зберегти та закомітити зміни з описом додавання ролі «Територіал» до новин.
+- [x] Зберегти та закомітити зміни з описом додавання ролі «Територіал» до новин.
