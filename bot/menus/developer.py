@@ -7462,7 +7462,7 @@ async def _show_news_roles_selection(callback: CallbackQuery, state: FSMContext)
     data = await state.get_data()
     selected_roles = set(data.get("selected_roles", ["Працівник", "Стажер"]))
 
-    all_roles = ["Працівник", "Стажер", "Керівник", "Наглядач"]
+    all_roles = ["Працівник", "Стажер", "Керівник", "Територіал", "Наглядач"]
     buttons = []
     for r in all_roles:
         mark = "✅ " if r in selected_roles else "⬜️ "
@@ -7472,7 +7472,7 @@ async def _show_news_roles_selection(callback: CallbackQuery, state: FSMContext)
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_back_to_cats")])
 
     text = (
-        "👥 <b>Створення новини — Крок 3/4: Аудиторія (Ролі)</b>\n"
+        "👥 <b>Створення новини - Крок 3/4: Аудиторія (Ролі)</b>\n"
         "───────────────────\n\n"
         "Оберіть ролі співробітників, які мають отримати новину:\n\n"
         "<i>Оберіть хоча б одну роль за допомогою позначок.</i>"

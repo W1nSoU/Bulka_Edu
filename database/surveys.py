@@ -259,7 +259,7 @@ async def get_matching_survey_recipients(
 ) -> List[int]:
     """
     Повертає список Telegram user_id діючих користувачів, які підпадають під умови опитування:
-    - target_roles: підмножина ['Працівник', 'Стажер', 'Керівник', 'Наглядач']
+    - target_roles: підмножина ['Працівник', 'Стажер', 'Керівник', 'Територіал', 'Наглядач']
     - target_city: назва міста або None / 'ALL' (для всіх міст)
     """
     matched_uids = set()
@@ -344,6 +344,32 @@ async def get_matching_survey_recipients(
             try:
                 async with aiosqlite.connect(MANAGERS_DB_PATH) as m_db:
                     query = "SELECT uid FROM managers WHERE process = 'Наглядач' AND (status = 'active' OR status IS NULL)"
+                    params = []
+                    if city_filter:
+                        query += " AND city = ?"
+                        params.append(target_city)
+                    cursor = await m_db.execute(query, tuple(params))
+                    for row in await cursor.fetchall():
+                        if row[0]:
+                            matched_uids.add(row[0])
+            except Exception:
+                pass
+
+        # 5. Територіали: managers.db WHERE process = 'Територіал' або users WHERE role = 'Територіал'
+        if "Територіал" in target_roles:
+            query = "SELECT user_id FROM users WHERE role = 'Територіал'"
+            params = []
+            if city_filter:
+                query += " AND city = ?"
+                params.append(target_city)
+            cursor = await db.execute(query, tuple(params))
+            for row in await cursor.fetchall():
+                matched_uids.add(row[0])
+
+            from database.managers import MANAGERS_DB_PATH
+            try:
+                async with aiosqlite.connect(MANAGERS_DB_PATH) as m_db:
+                    query = "SELECT uid FROM managers WHERE process = 'Територіал' AND (status = 'active' OR status IS NULL)"
                     params = []
                     if city_filter:
                         query += " AND city = ?"
