@@ -2580,7 +2580,6 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
         if token:
             await use_token(token, user_id)
         await message.answer(f"Вітаємо, {full_name}! Реєстрацію Наглядача успішно завершено. 👁✅")
-        from bot.menus.developer import show_observer_main_menu
         await show_observer_main_menu(message, allow_edit=False, force_new_message=True)
         await state.clear()
         return
