@@ -48,7 +48,9 @@ async def send_news_batch(
     recipient_uids: List[int],
     text: str,
     photo_file_id: Optional[str] = None,
-    news_id: Optional[int] = None
+    news_id: Optional[int] = None,
+    video_file_id: Optional[str] = None,
+    media_type: Optional[str] = None
 ) -> Tuple[int, int]:
     """
     Надсилає новину одній пачці (хвилі) користувачів (до 50 осіб)
@@ -61,13 +63,28 @@ async def send_news_batch(
 
     reply_markup = get_news_reaction_keyboard(news_id) if news_id else None
 
+    effective_media_type = media_type
+    if not effective_media_type:
+        if video_file_id:
+            effective_media_type = "video"
+        elif photo_file_id:
+            effective_media_type = "photo"
+
     for user_id in recipient_uids:
         try:
-            if photo_file_id:
-                sent_msg = await bot.send_photo(
+            if effective_media_type == "video" and video_file_id:
+                await bot.send_video(chat_id=user_id, video=video_file_id)
+                sent_msg = await bot.send_message(
                     chat_id=user_id,
-                    photo=photo_file_id,
-                    caption=text,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+            elif effective_media_type == "photo" and photo_file_id:
+                await bot.send_photo(chat_id=user_id, photo=photo_file_id)
+                sent_msg = await bot.send_message(
+                    chat_id=user_id,
+                    text=text,
                     reply_markup=reply_markup,
                     parse_mode="HTML"
                 )
@@ -122,7 +139,9 @@ async def dispatch_news_waves(
     admin_chat_id: Optional[int] = None,
     news_id: Optional[int] = None,
     min_wave_delay: int = 300,
-    max_wave_delay: int = 600
+    max_wave_delay: int = 600,
+    video_file_id: Optional[str] = None,
+    media_type: Optional[str] = None
 ) -> Tuple[int, int]:
     """
     Фонова задача хвильової розсилки новини:
@@ -150,7 +169,15 @@ async def dispatch_news_waves(
 
     for wave_idx, wave_uids in enumerate(waves, start=1):
         logger.info(f"[News Broadcaster] Dispatching wave {wave_idx}/{total_waves} ({len(wave_uids)} users)...")
-        sent, failed = await send_news_batch(bot, wave_uids, text, photo_file_id, news_id=news_id)
+        sent, failed = await send_news_batch(
+            bot,
+            wave_uids,
+            text,
+            photo_file_id,
+            news_id=news_id,
+            video_file_id=video_file_id,
+            media_type=media_type
+        )
         total_sent += sent
         total_failed += failed
         logger.info(f"[News Broadcaster] Wave {wave_idx} finished: {sent} sent, {failed} failed.")
@@ -212,7 +239,9 @@ def start_news_wave_broadcast(
     admin_chat_id: Optional[int] = None,
     news_id: Optional[int] = None,
     min_wave_delay: int = 300,
-    max_wave_delay: int = 600
+    max_wave_delay: int = 600,
+    video_file_id: Optional[str] = None,
+    media_type: Optional[str] = None
 ) -> asyncio.Task:
     """Запускає фонову похвильову розсилку новини."""
     return asyncio.create_task(
@@ -224,6 +253,8 @@ def start_news_wave_broadcast(
             admin_chat_id=admin_chat_id,
             news_id=news_id,
             min_wave_delay=min_wave_delay,
-            max_wave_delay=max_wave_delay
+            max_wave_delay=max_wave_delay,
+            video_file_id=video_file_id,
+            media_type=media_type
         )
     )

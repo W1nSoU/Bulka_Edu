@@ -56,6 +56,8 @@ async def init_news_db(db_path: str = DB_PATH) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             text TEXT NOT NULL,
             photo_file_id TEXT,
+            video_file_id TEXT,
+            media_type TEXT,
             selected_roles TEXT,
             selected_city TEXT,
             total_recipients INTEGER DEFAULT 0,
@@ -67,6 +69,14 @@ async def init_news_db(db_path: str = DB_PATH) -> None:
             created_by INTEGER
         )
         """)
+        # Автоматична міграція колонок video_file_id та media_type для існуючих БД
+        cursor = await db.execute("PRAGMA table_info(news)")
+        news_cols = {row[1] for row in await cursor.fetchall()}
+        if "video_file_id" not in news_cols:
+            await db.execute("ALTER TABLE news ADD COLUMN video_file_id TEXT")
+        if "media_type" not in news_cols:
+            await db.execute("ALTER TABLE news ADD COLUMN media_type TEXT")
+
         await db.execute("""
         CREATE TABLE IF NOT EXISTS news_deliveries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -209,21 +219,29 @@ async def create_news(
     total_recipients: int = 0,
     total_waves: int = 0,
     created_by: int = 0,
+    video_file_id: Optional[str] = None,
+    media_type: Optional[str] = None,
     db_path: str = DB_PATH
 ) -> int:
     """Створює запис про нову публікацію в таблиці news та повертає її ID."""
     roles_json = json.dumps(selected_roles or [], ensure_ascii=False)
     now_str = get_current_kyiv_time_str()
 
+    if not media_type:
+        if video_file_id:
+            media_type = "video"
+        elif photo_file_id:
+            media_type = "photo"
+
     async with aiosqlite.connect(db_path) as db:
         cursor = await db.execute(
             """
             INSERT INTO news (
-                text, photo_file_id, selected_roles, selected_city,
+                text, photo_file_id, video_file_id, media_type, selected_roles, selected_city,
                 total_recipients, total_waves, status, created_at, created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?)
             """,
-            (text, photo_file_id, roles_json, selected_city, total_recipients, total_waves, now_str, created_by)
+            (text, photo_file_id, video_file_id, media_type, roles_json, selected_city, total_recipients, total_waves, now_str, created_by)
         )
         news_id = cursor.lastrowid
         await db.commit()

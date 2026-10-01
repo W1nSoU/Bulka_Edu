@@ -7344,7 +7344,7 @@ async def dev_news_cat_delete_handler(callback: CallbackQuery):
 
 
 async def dev_news_create_start(callback: CallbackQuery, state: FSMContext):
-    """Початок майстра створення новини — Крок 1: Контент."""
+    """Початок майстра створення новини - Крок 1: Контент."""
     if not await _check_news_access(callback):
         await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
         return
@@ -7356,16 +7356,21 @@ async def dev_news_create_start(callback: CallbackQuery, state: FSMContext):
         selected_roles=["Працівник", "Стажер"],
         selected_city="all",
         photo_file_id=None,
+        video_file_id=None,
+        media_type=None,
         text_content="",
         original_text_content="",
         is_ai_improved=False
     )
 
     text = (
-        "📢 <b>Створення новини — Крок 1/4: Контент</b>\n"
+        "📢 <b>Створення новини - Крок 1/4: Контент</b>\n"
         "───────────────────\n\n"
-        "Надішліть повідомлення з текстом новини.\n\n"
-        "🖼 <i>Ви можете відправити як простий текст, так і фото з описом (caption) в одному повідомленні.</i>\n\n"
+        "Надішліть повідомлення з текстом або медіа (фото чи відео).\n\n"
+        "📸 <b>Можливі варіанти відправки:</b>\n"
+        "1. Лише текст.\n"
+        "2. Фото або відео разом з текстом (в описі / caption).\n"
+        "3. Спочатку фото або відео окремо, а потім текст наступним повідомленням.\n\n"
         "💡 <i>Підтримується стандартне HTML-форматування Telegram (жирний, курсив, посилання тощо).</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -7393,7 +7398,7 @@ async def _show_news_categories_selection(event: Message | CallbackQuery, state:
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_menu")])
 
     text = (
-        "🏷 <b>Створення новини — Крок 2/4: Категорії</b>\n"
+        "🏷 <b>Створення новини - Крок 2/4: Категорії</b>\n"
         "───────────────────\n\n"
         "Оберіть категорії (хештеги), які будуть автоматично додані в кінці публікації.\n\n"
         "<i>Натискайте на кнопки категорій, щоб обрати або скасувати. Якщо категорії не потрібні, просто натисніть «Продовжити».</i>"
@@ -7407,35 +7412,99 @@ async def _show_news_categories_selection(event: Message | CallbackQuery, state:
 
 
 async def dev_news_process_content(message: Message, state: FSMContext):
-    """Обробка надісланого контенту новини (текст або фото з описом)."""
+    """Обробка надісланого контенту новини (текст, фото або відео)."""
     if not await _check_news_access(message):
         await message.answer("⛔️ Доступ заборонено.")
         return
 
-    photo_file_id = None
-    text_content = ""
+    data = await state.get_data()
+    stored_photo_id = data.get("photo_file_id")
+    stored_video_id = data.get("video_file_id")
+    stored_media_type = data.get("media_type")
+
+    if message.video:
+        video_file_id = message.video.file_id
+        caption = (message.caption or "").strip()
+        if caption:
+            await state.update_data(
+                photo_file_id=None,
+                video_file_id=video_file_id,
+                media_type="video",
+                text_content=caption,
+                original_text_content=caption,
+                is_ai_improved=False
+            )
+            await state.set_state(NewsCreationStates.selecting_categories)
+            await _show_news_categories_selection(message, state)
+        else:
+            await state.update_data(
+                photo_file_id=None,
+                video_file_id=video_file_id,
+                media_type="video"
+            )
+            await message.answer(
+                "✅ Медіа збережено! Тепер надішліть текст новини:"
+            )
+        return
 
     if message.photo:
         photo_file_id = message.photo[-1].file_id
-        text_content = message.caption or ""
-    elif message.text:
-        text_content = message.text
-    else:
-        await message.answer("⚠️ Будь ласка, надішліть текст або фото з описом.")
+        caption = (message.caption or "").strip()
+        if caption:
+            await state.update_data(
+                photo_file_id=photo_file_id,
+                video_file_id=None,
+                media_type="photo",
+                text_content=caption,
+                original_text_content=caption,
+                is_ai_improved=False
+            )
+            await state.set_state(NewsCreationStates.selecting_categories)
+            await _show_news_categories_selection(message, state)
+        else:
+            await state.update_data(
+                photo_file_id=photo_file_id,
+                video_file_id=None,
+                media_type="photo"
+            )
+            await message.answer(
+                "✅ Медіа збережено! Тепер надішліть текст новини:"
+            )
         return
 
-    if not text_content.strip() and not photo_file_id:
-        await message.answer("⚠️ Текст новини не може бути порожнім. Надішліть повідомлення ще раз.")
+    if message.text:
+        text_content = message.text.strip()
+        if not text_content:
+            await message.answer("⚠️ Текст новини не може бути порожнім. Надішліть повідомлення ще раз.")
+            return
+
+        if stored_video_id and stored_media_type == "video":
+            await state.update_data(
+                text_content=text_content,
+                original_text_content=text_content,
+                is_ai_improved=False
+            )
+        elif stored_photo_id and stored_media_type == "photo":
+            await state.update_data(
+                text_content=text_content,
+                original_text_content=text_content,
+                is_ai_improved=False
+            )
+        else:
+            await state.update_data(
+                photo_file_id=None,
+                video_file_id=None,
+                media_type=None,
+                text_content=text_content,
+                original_text_content=text_content,
+                is_ai_improved=False
+            )
+
+        await state.set_state(NewsCreationStates.selecting_categories)
+        await _show_news_categories_selection(message, state)
         return
 
-    await state.update_data(
-        photo_file_id=photo_file_id,
-        text_content=text_content,
-        original_text_content=text_content,
-        is_ai_improved=False
-    )
-    await state.set_state(NewsCreationStates.selecting_categories)
-    await _show_news_categories_selection(message, state)
+    await message.answer("⚠️ Будь ласка, надішліть текст, фото або відео.")
 
 
 async def dev_news_toggle_cat_handler(callback: CallbackQuery, state: FSMContext):
@@ -7573,6 +7642,8 @@ async def _show_news_preview(callback: CallbackQuery, state: FSMContext):
 
     data = await state.get_data()
     photo_file_id = data.get("photo_file_id")
+    video_file_id = data.get("video_file_id")
+    media_type = data.get("media_type")
     text_content = data.get("text_content", "")
     selected_cat_ids = data.get("selected_cat_ids", [])
     selected_roles = data.get("selected_roles", ["Працівник", "Стажер"])
@@ -7615,7 +7686,14 @@ async def _show_news_preview(callback: CallbackQuery, state: FSMContext):
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_to_city")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    if photo_file_id:
+    effective_media_type = media_type
+    if not effective_media_type:
+        if video_file_id:
+            effective_media_type = "video"
+        elif photo_file_id:
+            effective_media_type = "photo"
+
+    if effective_media_type == "video" and video_file_id:
         preview_meta = (
             f"👁 <b>Попередній перегляд новини</b>\n"
             f"👥 <b>Аудиторія:</b> {roles_str} ({city_str}) | 📬 <b>{recipients_count} ос.</b>\n"
@@ -7623,6 +7701,40 @@ async def _show_news_preview(callback: CallbackQuery, state: FSMContext):
         )
         caption = preview_meta + full_text
         if len(caption) > 1024:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.answer(preview_meta, parse_mode="HTML")
+            await callback.message.answer_video(
+                video=video_file_id,
+                caption=full_text[:1024],
+                reply_markup=kb,
+                parse_mode="HTML"
+            )
+        else:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.answer_video(
+                video=video_file_id,
+                caption=caption,
+                reply_markup=kb,
+                parse_mode="HTML"
+            )
+    elif effective_media_type == "photo" and photo_file_id:
+        preview_meta = (
+            f"👁 <b>Попередній перегляд новини</b>\n"
+            f"👥 <b>Аудиторія:</b> {roles_str} ({city_str}) | 📬 <b>{recipients_count} ос.</b>\n"
+            f"───────────────────\n\n"
+        )
+        caption = preview_meta + full_text
+        if len(caption) > 1024:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
             await callback.message.answer(preview_meta, parse_mode="HTML")
             await callback.message.answer_photo(
                 photo=photo_file_id,
@@ -7632,22 +7744,15 @@ async def _show_news_preview(callback: CallbackQuery, state: FSMContext):
             )
         else:
             try:
-                await callback.message.edit_caption(
-                    caption=caption,
-                    reply_markup=kb,
-                    parse_mode="HTML"
-                )
+                await callback.message.delete()
             except Exception:
-                try:
-                    await callback.message.delete()
-                except Exception:
-                    pass
-                await callback.message.answer_photo(
-                    photo=photo_file_id,
-                    caption=caption,
-                    reply_markup=kb,
-                    parse_mode="HTML"
-                )
+                pass
+            await callback.message.answer_photo(
+                photo=photo_file_id,
+                caption=caption,
+                reply_markup=kb,
+                parse_mode="HTML"
+            )
     else:
         text = (
             f"👁 <b>Попередній перегляд новини</b>\n"
@@ -7730,6 +7835,8 @@ async def dev_news_launch_handler(callback: CallbackQuery, state: FSMContext):
 
     data = await state.get_data()
     photo_file_id = data.get("photo_file_id")
+    video_file_id = data.get("video_file_id")
+    media_type = data.get("media_type")
     full_text = data.get("full_text", "")
     selected_roles = data.get("selected_roles", ["Працівник", "Стажер"])
     selected_city = data.get("selected_city", "all")
@@ -7753,11 +7860,13 @@ async def dev_news_launch_handler(callback: CallbackQuery, state: FSMContext):
         selected_city=selected_city,
         total_recipients=len(recipients),
         total_waves=total_waves,
-        created_by=callback.from_user.id
+        created_by=callback.from_user.id,
+        video_file_id=video_file_id,
+        media_type=media_type
     )
 
     try:
-        if callback.message.photo:
+        if callback.message.photo or callback.message.video:
             await callback.message.edit_caption(
                 caption=f"🚀 <b>Розсилку запущено для {len(recipients)} осіб!</b>\n\nПублікація розсилається хвилями.",
                 reply_markup=None,
@@ -7788,7 +7897,9 @@ async def dev_news_launch_handler(callback: CallbackQuery, state: FSMContext):
         text=full_text,
         photo_file_id=photo_file_id,
         admin_chat_id=callback.message.chat.id,
-        news_id=news_id
+        news_id=news_id,
+        video_file_id=video_file_id,
+        media_type=media_type
     )
 
 
@@ -7929,13 +8040,25 @@ async def dev_news_view_handler(callback: CallbackQuery):
     reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     photo_id = news.get("photo_file_id")
-    if photo_id:
+    video_id = news.get("video_file_id")
+    media_type = news.get("media_type")
+
+    if (media_type == "video" and video_id) or video_id:
         try:
             if callback.message:
                 await callback.message.delete()
         except Exception:
             pass
-        await callback.message.answer_photo(photo=photo_id, caption=text, reply_markup=reply_markup, parse_mode="HTML")
+        caption = text if len(text) <= 1024 else text[:1020] + "..."
+        await callback.message.answer_video(video=video_id, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+    elif photo_id:
+        try:
+            if callback.message:
+                await callback.message.delete()
+        except Exception:
+            pass
+        caption = text if len(text) <= 1024 else text[:1020] + "..."
+        await callback.message.answer_photo(photo=photo_id, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
     else:
         await _edit_or_answer(callback.message, text, reply_markup=reply_markup)
 
