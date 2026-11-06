@@ -37,6 +37,7 @@ private_server/activation_log.db
 *.sql
 data/
 backups/
+AI/
 
 # ==========================================
 # Temporary, Dump & Text Files
@@ -55,10 +56,55 @@ exports/
 *.csv
 
 # ==========================================
-# AI Agents & Assistant Configs
+# Private Life, Personal AI & Memory
 # ==========================================
+AI/
 .agents/
 .agent/
+private_server/
+*danik*
+*Danik*
+
+# ==========================================
+# Contracts, Legal & Commercial Agreements
+# ==========================================
+*Договір*
+*договір*
+*contract*
+*Contract*
+*agreement*
+*Agreement*
+*.docx
+*.pdf
+
+# ==========================================
+# Career, Tests & Resumes
+# ==========================================
+*Manimama*
+*manimama*
+*Resume*
+*resume*
+*CV*
+*cv*
+
+# ==========================================
+# YouTube Production & Creative Media
+# ==========================================
+*youtube*
+*YouTube*
+*Richard*
+*richard*
+docs/superpowers/plans/*episode*
+docs/superpowers/specs/*youtube*
+*.mp3
+*.wav
+*.ogg
+*.mp4
+*.mov
+
+# ==========================================
+# AI Agents & Assistant Configs
+# ==========================================
 .github/
 
 # ==========================================
