@@ -1858,12 +1858,10 @@ async def manager_support(callback: CallbackQuery, state: FSMContext):
         return
 
     welcome_text = (
-        "🌟 <b>Привіт, Булка-котик!</b> 🌟\n\n"
-        "Я твій керівник — провідник у світ знань і можливостей. "
-        "Завжди готовий підтримати тебе на шляху навчання!\n\n"
-        "Напиши своє запитання або думку, і я обов'язково відповім! "
-        "Кожен крок твого навчання важливий. 🍞✨\n\n"
-        "Введи повідомлення зараз або натисни кнопку 'Скасувати'."
+        "💬 <b>Зв'язок з керівником</b> 💬\n\n"
+        "Твій керівник та наставники завжди поруч, щоб підтримати тебе та допомогти на кожному етапі навчання.\n\n"
+        "Напиши своє запитання або коментар, і керівник обов'язково відповість!\n\n"
+        "Введи повідомлення або натисни кнопку нижче, щоб повернутися."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_support")]
@@ -1922,22 +1920,14 @@ async def manager_reply_callback(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_manager_reply")]
     ])
+    reply_prompt = "<b>✍️ Введіть відповідь для стажера. Ваша відповідь буде надіслана особисто стажеру:</b>"
     if callback.message and not callback.message.text:
-        await callback.message.answer(
-            "<b>✍️ Введіть відповідь для стажера. Ваша відповідь буде надіслана особисто цьому Булка-котику.</b>",
-            reply_markup=kb
-        )
+        await callback.message.answer(reply_prompt, reply_markup=kb)
     elif callback.message:
         try:
-            await callback.message.edit_text(
-                "<b>✍️ Введіть відповідь для стажера. Ваша відповідь буде надіслана особисто цьому Булка-котику.</b>",
-                reply_markup=kb
-            )
+            await callback.message.edit_text(reply_prompt, reply_markup=kb)
         except Exception:
-            await callback.message.answer(
-                "<b>✍️ Введіть відповідь для стажера. Ваша відповідь буде надіслана особисто цьому Булка-котику.</b>",
-                reply_markup=kb
-            )
+            await callback.message.answer(reply_prompt, reply_markup=kb)
     await state.update_data(intern_id=intern_id)
     await state.set_state(ManagerReplyStates.waiting_for_reply)
 
@@ -2579,6 +2569,21 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
         await add_observer(user_id, full_name, username, responsible_uid=manager_id)
         if token:
             await use_token(token, user_id)
+        if manager_id:
+            try:
+                is_multi = bool(extra_data.get("multi_use"))
+                invite_type_label = "Спільне посилання для офісу" if is_multi else "Персональне одноразове"
+                uname_str = f" (@{html.escape(username)})" if username else ""
+                report_text = (
+                    f"👁 <b>Новий Наглядач приєднався!</b>\n\n"
+                    f"👤 <b>ПІБ:</b> {html.escape(full_name)}{uname_str}\n"
+                    f"🆔 <b>Telegram ID:</b> <code>{user_id}</code>\n"
+                    f"🔗 <b>Тип запрошення:</b> {invite_type_label}"
+                )
+                await message.bot.send_message(manager_id, report_text, parse_mode="HTML")
+            except Exception as exc:
+                from bot.services.logger import get_logger
+                get_logger().warning(f"Could not notify admin {manager_id} about observer registration: {exc}")
         await message.answer(f"Вітаємо, {full_name}! Реєстрацію Наглядача успішно завершено. 👁✅")
         await show_observer_main_menu(message, allow_edit=False, force_new_message=True)
         await state.clear()

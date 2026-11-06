@@ -108,7 +108,7 @@ from database.materials import (
     get_material_by_id, # NEW IMPORT
     toggle_test_status,
 )
-from database.tokens import get_token_stats, cleanup_expired_tokens, generate_token
+from database.tokens import get_token_stats, cleanup_expired_tokens, generate_token, get_active_multi_use_token, revoke_token
 from database.analytics import (
     get_daily_stats,
     get_dropout_funnel,
@@ -1565,6 +1565,32 @@ async def developer_workers_export_xlsx(callback: CallbackQuery):
     )
     await callback.answer()
 
+async def _get_active_city_names() -> list[str]:
+    cities_data = await get_all_cities()
+    if cities_data:
+        names = [c["name"] for c in cities_data if c.get("name")]
+        if names:
+            return names
+    return list(AVAILABLE_CITIES)
+
+
+async def _resolve_city_from_callback_val(raw_val: str) -> Optional[str]:
+    """Розпізнає місто за індексом, ID або текстовою назвою (захист від BUTTON_DATA_INVALID > 64 байти)."""
+    if not raw_val:
+        return None
+    if raw_val.isdigit():
+        idx = int(raw_val)
+        active_names = await _get_active_city_names()
+        if 0 <= idx < len(active_names):
+            return active_names[idx]
+        if 0 <= idx < len(AVAILABLE_CITIES):
+            return AVAILABLE_CITIES[idx]
+        city_by_id = await get_city_by_id(idx)
+        if city_by_id and city_by_id.get("name"):
+            return city_by_id["name"]
+    return raw_val
+
+
 async def developer_users_by_city_menu(callback: CallbackQuery):
     has_access, is_admin, is_territorial = await _check_access(callback)
     if not has_access:
@@ -1579,9 +1605,10 @@ async def developer_users_by_city_menu(callback: CallbackQuery):
         await _developer_show_users_list(callback, users, f"🏙️ <b>Стажери: {city}</b>", f"city:{city}", 0)
         return
 
+    active_cities = await _get_active_city_names()
     buttons = []
-    for city in AVAILABLE_CITIES:
-        buttons.append([InlineKeyboardButton(text=city, callback_data=f"dev_users_filter_city:{city}")])
+    for idx, city in enumerate(active_cities):
+        buttons.append([InlineKeyboardButton(text=city, callback_data=f"dev_users_filter_city:{idx}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_filters")])
     
     await _send_text_screen(
@@ -1598,8 +1625,11 @@ async def developer_users_filter_city(callback: CallbackQuery):
     if not has_access:
         return
     try:
-        city = callback.data.split(":")[1]
+        raw_city = callback.data.split(":", 1)[1]
     except IndexError:
+        return
+    city = await _resolve_city_from_callback_val(raw_city)
+    if not city:
         return
     users = await get_users_by_city(city)
     if is_territorial and not is_admin:
@@ -2186,12 +2216,11 @@ async def developer_users_add_start(callback: CallbackQuery, state: FSMContext):
 
     await state.clear()
     
-    cities_data = await get_all_cities()
-    cities = [c["name"] for c in cities_data] if cities_data else AVAILABLE_CITIES
+    cities = await _get_active_city_names()
 
     buttons = []
-    for city in cities:
-        buttons.append([InlineKeyboardButton(text=city, callback_data=f"dev_users_add_city:{city}")])
+    for idx, city in enumerate(cities):
+        buttons.append([InlineKeyboardButton(text=city, callback_data=f"dev_users_add_city:{idx}")])
     buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_users_menu")])
 
     await _edit_or_answer(
@@ -2226,8 +2255,12 @@ async def _get_shops_for_city(city: Optional[str]) -> list:
 async def developer_users_add_city(callback: CallbackQuery, state: FSMContext):
     """Обробляє вибір міста та відображає магазини або переходить до посади."""
     try:
-        city = callback.data.split(":", 1)[1]
+        raw_city = callback.data.split(":", 1)[1]
     except IndexError:
+        return await callback.answer("Помилка даних міста.", show_alert=True)
+
+    city = await _resolve_city_from_callback_val(raw_city)
+    if not city:
         return await callback.answer("Помилка даних міста.", show_alert=True)
 
     await state.update_data(dev_add_city=city)
@@ -2331,7 +2364,9 @@ async def _show_dev_users_add_supervisor(callback: CallbackQuery, state: FSMCont
     buttons.append([InlineKeyboardButton(text="⚡️ Автоматично за магазином", callback_data="dev_users_add_sup:auto")])
 
     # 5. Назад
-    back_cb = f"dev_users_add_city:{city}" if shop else "dev_users_add"
+    active_cities_for_back = await _get_active_city_names()
+    city_back_param = str(active_cities_for_back.index(city)) if city in active_cities_for_back else "0"
+    back_cb = f"dev_users_add_city:{city_back_param}" if shop else "dev_users_add"
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)])
 
     shop_text = f"\n🏪 Магазин: <b>{shop}</b>" if shop else ""
@@ -2819,12 +2854,11 @@ async def developer_request_add_manager(callback: CallbackQuery, state: FSMConte
 
     # Для Адміністратора показуємо вибір міста
     await state.clear()
-    cities_data = await get_all_cities()
-    active_cities = [c["name"] for c in cities_data] if cities_data else AVAILABLE_CITIES
+    active_cities = await _get_active_city_names()
 
     buttons = []
-    for c in active_cities:
-        buttons.append([InlineKeyboardButton(text=c, callback_data=f"dev_mgr_city_select:{c}")])
+    for idx, c in enumerate(active_cities):
+        buttons.append([InlineKeyboardButton(text=c, callback_data=f"dev_mgr_city_select:{idx}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_manage_managers")])
 
     await _edit_or_answer(
@@ -2838,8 +2872,12 @@ async def developer_request_add_manager(callback: CallbackQuery, state: FSMConte
 async def developer_process_add_manager_city(callback: CallbackQuery, state: FSMContext):
     """Обробляє вибір міста адміністратором та відкриває меню вибору магазинів."""
     try:
-        city = callback.data.split(":", 1)[1]
+        raw_city = callback.data.split(":", 1)[1]
     except IndexError:
+        return await callback.answer("Помилка даних міста.", show_alert=True)
+
+    city = await _resolve_city_from_callback_val(raw_city)
+    if not city:
         return await callback.answer("Помилка даних міста.", show_alert=True)
         
     await state.update_data(manager_city=city, selected_shops=[])
@@ -6832,9 +6870,9 @@ async def dev_survey_to_city(callback: CallbackQuery, state: FSMContext):
     ]
 
     city_row = []
-    for c in cities:
+    for idx, c in enumerate(cities):
         city_name = c["name"]
-        city_row.append(InlineKeyboardButton(text=f"🏙 {city_name}", callback_data=f"dev_survey_select_city:{city_name}"))
+        city_row.append(InlineKeyboardButton(text=f"🏙 {city_name}", callback_data=f"dev_survey_select_city:{idx}"))
         if len(city_row) == 2:
             buttons.append(city_row)
             city_row = []
@@ -6856,8 +6894,11 @@ async def dev_survey_select_city(callback: CallbackQuery, state: FSMContext):
     """Обробка вибору міста, підрахунок аудиторії та перехід до підтвердження запуску."""
     from database.surveys import get_matching_survey_recipients
 
-    raw_city = callback.data.split(":")[1]
-    target_city = None if raw_city == "all" else raw_city
+    raw_city = callback.data.split(":", 1)[1]
+    if raw_city == "all":
+        target_city = None
+    else:
+        target_city = await _resolve_city_from_callback_val(raw_city)
 
     data = await state.get_data()
     title = data.get("title", "Опитування")
@@ -7600,9 +7641,10 @@ async def _show_news_city_selection(callback: CallbackQuery, state: FSMContext):
     buttons.append([InlineKeyboardButton(text=f"{mark_all}🌐 Усі міста", callback_data="dev_news_select_city:all")])
 
     city_row = []
-    for c in AVAILABLE_CITIES:
+    active_news_cities = await _get_active_city_names()
+    for idx, c in enumerate(active_news_cities):
         mark = "✅ " if selected_city == c else ""
-        city_row.append(InlineKeyboardButton(text=f"{mark}{c}", callback_data=f"dev_news_select_city:{c}"))
+        city_row.append(InlineKeyboardButton(text=f"{mark}{c}", callback_data=f"dev_news_select_city:{idx}"))
         if len(city_row) == 2:
             buttons.append(city_row)
             city_row = []
@@ -7817,7 +7859,8 @@ async def dev_news_select_city_handler(callback: CallbackQuery, state: FSMContex
         await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
         return
 
-    city = callback.data.split(":", 1)[1]
+    raw_city = callback.data.split(":", 1)[1]
+    city = "all" if raw_city == "all" else (await _resolve_city_from_callback_val(raw_city) or raw_city)
     await state.update_data(selected_city=city)
     await state.set_state(NewsCreationStates.confirm_dispatch)
     await _show_news_preview(callback, state)
@@ -10279,7 +10322,7 @@ async def dev_shop_change_city_menu(callback: CallbackQuery):
     buttons = []
     for c in all_cities:
         if c["name"] != shop["city"]:
-            buttons.append([InlineKeyboardButton(text=f"🏙 {c['name']}", callback_data=f"dev_shop_set_city:{shop_id}:{c['name']}")])
+            buttons.append([InlineKeyboardButton(text=f"🏙 {c['name']}", callback_data=f"dev_shop_set_city:{shop_id}:{c['id']}")])
 
     buttons.append([InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"dev_shop_view:{shop_id}")])
 
@@ -10295,8 +10338,9 @@ async def dev_shop_set_city_handler(callback: CallbackQuery):
     if await is_observer_user(callback.from_user.id):
         await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
         return
-    _, shop_id_str, new_city = callback.data.split(":", 2)
+    _, shop_id_str, raw_city = callback.data.split(":", 2)
     shop_id = int(shop_id_str)
+    new_city = await _resolve_city_from_callback_val(raw_city) or raw_city
     success, msg = await change_shop_city(shop_id, new_city)
     if success:
         await callback.answer(msg, show_alert=True)
@@ -10482,7 +10526,7 @@ async def dev_shop_add(callback: CallbackQuery, state: FSMContext):
         cities = await get_all_cities()
         buttons = []
         for c in cities:
-            buttons.append([InlineKeyboardButton(text=f"🏙 {c['name']}", callback_data=f"dev_shop_add_city:{c['name']}")])
+            buttons.append([InlineKeyboardButton(text=f"🏙 {c['name']}", callback_data=f"dev_shop_add_city:{c['id']}")])
         buttons.append([InlineKeyboardButton(text="🔙 Скасувати", callback_data="dev_shops_menu")])
 
         await _edit_or_answer(
@@ -10493,7 +10537,8 @@ async def dev_shop_add(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    city = callback.data.split(":", 1)[1]
+    raw_city = callback.data.split(":", 1)[1]
+    city = await _resolve_city_from_callback_val(raw_city) or raw_city
     await state.update_data(add_shop_city=city)
     await state.set_state(DeveloperStates.waiting_add_shop_name)
 
@@ -11012,7 +11057,8 @@ async def _build_observers_menu_view(page: int = 0, bot: Optional[Bot] = None, i
         buttons.append(nav_row)
         
     if not is_observer:
-        buttons.append([InlineKeyboardButton(text="➕ Створити запрошення", callback_data="dev_obs_create_invite")])
+        buttons.append([InlineKeyboardButton(text="➕ Додати одного (одноразове)", callback_data="dev_obs_create_invite")])
+        buttons.append([InlineKeyboardButton(text="🏢 Спільне посилання для офісу (24 год)", callback_data="dev_obs_office_invite")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_main_team")])
     
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -11035,7 +11081,7 @@ async def developer_observers_menu(callback: CallbackQuery):
 
 
 async def developer_observer_create_invite(callback: CallbackQuery):
-    """Генерує токен та посилання для нового наглядача."""
+    """Генерує одноразовий токен та посилання для нового наглядача."""
     if not await _ensure_developer(callback):
         return
     
@@ -11046,10 +11092,10 @@ async def developer_observer_create_invite(callback: CallbackQuery):
     invite_link = f"https://t.me/{bot_username}?start={admin_uid}-{token}"
     
     text = (
-        "👁 <b>Запрошення для Наглядача</b>\n\n"
+        "👁 <b>Персональне запрошення для Наглядача</b>\n\n"
         "🔗 <b>Одноразове посилання:</b>\n"
         f"<code>{invite_link}</code>\n\n"
-        "⏳ <b>Термін дії:</b> 24 години.\n"
+        "⏳ <b>Термін дії:</b> 24 години (на 1 людину).\n"
         "👤 Надішліть це посилання людині, яку призначаєте Наглядачем.\n"
         "Після переходу за посиланням користувач введе своє ПІБ та автоматично отримає роль <b>Наглядач</b>."
     )
@@ -11059,6 +11105,81 @@ async def developer_observer_create_invite(callback: CallbackQuery):
     ]
     
     await _show_admin_photo_menu(callback, "admin_spus.jpg", text, InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+async def developer_observer_office_invite(callback: CallbackQuery):
+    """Показує активне або генерує нове багаторазове (офісне) посилання для наглядачів на 24 години."""
+    if not await _ensure_developer(callback):
+        return
+
+    admin_uid = callback.from_user.id
+    force_regen = callback.data == "dev_obs_regen_office_invite"
+
+    active_tok = await get_active_multi_use_token(role="Наглядач")
+    if force_regen and active_tok:
+        await revoke_token(active_tok["token"])
+        active_tok = None
+
+    if active_tok:
+        token = active_tok["token"]
+        inviter_uid = active_tok.get("manager_id") or admin_uid
+        expires_at_str = active_tok.get("expires_at") or "24 години"
+        used_count = active_tok.get("used_count", 0)
+        if force_regen:
+            await callback.answer("🔄 Створено нове спільне посилання!", show_alert=False)
+    else:
+        token = await generate_token(
+            manager_id=admin_uid,
+            role="Наглядач",
+            expires_in_hours=24,
+            extra_data={"multi_use": True, "used_by_list": []}
+        )
+        inviter_uid = admin_uid
+        active_tok_new = await get_active_multi_use_token(role="Наглядач")
+        expires_at_str = active_tok_new.get("expires_at") if active_tok_new else "24 години"
+        used_count = 0
+        if force_regen:
+            await callback.answer("🔄 Попереднє посилання деактивовано, створено нове!", show_alert=False)
+
+    bot_info = await callback.bot.get_me()
+    bot_username = bot_info.username
+    invite_link = f"https://t.me/{bot_username}?start={inviter_uid}-{token}"
+
+    text = (
+        "🏢 <b>Спільне посилання для офісу (Наглядачі)</b>\n\n"
+        "🔗 <b>Багаторазове посилання:</b>\n"
+        f"<code>{invite_link}</code>\n\n"
+        f"⏳ <b>Діє до:</b> {expires_at_str} (24 год)\n"
+        f"👥 <b>Вже приєдналося за цим посиланням:</b> {used_count} осіб\n"
+        "♾ <b>Ліміт переходів:</b> Без обмежень (для всього офісу)\n\n"
+        "📌 Надішліть це посилання у робочий чат офісу. Кожен співробітник, який перейде за ним і введе своє ПІБ, автоматично отримає роль <b>Наглядач</b>.\n"
+        "Ви можете будь-коли зупинити дію посилання кнопкою нижче."
+    )
+
+    buttons = [
+        [InlineKeyboardButton(text="🛑 Деактивувати посилання", callback_data=f"dev_obs_revoke_office_invite:{token}")],
+        [InlineKeyboardButton(text="🔄 Перегенерувати нове", callback_data="dev_obs_regen_office_invite")],
+        [InlineKeyboardButton(text="⬅️ До списку наглядачів", callback_data="dev_observers_menu")]
+    ]
+
+    await _show_admin_photo_menu(callback, "admin_spus.jpg", text, InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+async def developer_observer_revoke_office_invite(callback: CallbackQuery):
+    """Ручна деактивація спільного офісного посилання наглядачів."""
+    if not await _ensure_developer(callback):
+        return
+
+    try:
+        token = callback.data.split(":", 1)[1]
+    except IndexError:
+        await callback.answer("Помилка токена.", show_alert=True)
+        return
+
+    await revoke_token(token)
+    await callback.answer("🛑 Спільне посилання для офісу успішно деактивовано!", show_alert=True)
+    text, kb = await _build_observers_menu_view(page=0, bot=callback.bot, is_observer=False)
+    await _show_admin_photo_menu(callback, "admin_spus.jpg", text, kb)
 
 
 async def developer_observer_view(callback: CallbackQuery):
@@ -11245,6 +11366,8 @@ def register_developer_menu_handlers(dp: Dispatcher):
     # Observers (Пункт 6)
     dp.callback_query.register(developer_observers_menu, lambda c: c.data == "dev_observers_menu" or (c.data and c.data.startswith("dev_obs_page:")))
     dp.callback_query.register(developer_observer_create_invite, lambda c: c.data == "dev_obs_create_invite")
+    dp.callback_query.register(developer_observer_office_invite, lambda c: c.data in ("dev_obs_office_invite", "dev_obs_regen_office_invite"))
+    dp.callback_query.register(developer_observer_revoke_office_invite, lambda c: c.data and c.data.startswith("dev_obs_revoke_office_invite:"))
     dp.callback_query.register(developer_observer_view, lambda c: c.data and c.data.startswith("dev_obs_view:"))
     dp.callback_query.register(developer_observer_delete_confirm, lambda c: c.data and c.data.startswith("dev_obs_del_confirm:"))
     dp.callback_query.register(developer_observer_delete_do, lambda c: c.data and c.data.startswith("dev_obs_del_do:"))

@@ -725,7 +725,7 @@ async def get_observer_by_uid(uid: int) -> dict | None:
     return None
 
 async def add_observer(uid: int, full_name: str, username: str | None, responsible_uid: int | None = None) -> bool:
-    """Додає або оновлює наглядача в базі managers."""
+    """Додає або оновлює наглядача в базі managers та синхронізує роль у таблиці users."""
     await add_manager(
         uid=uid,
         username=username or "",
@@ -733,6 +733,15 @@ async def add_observer(uid: int, full_name: str, username: str | None, responsib
         process="Наглядач",
         responsible_uid=responsible_uid
     )
+    try:
+        async with aiosqlite.connect(DB_PATH) as u_db:
+            await u_db.execute(
+                "UPDATE users SET role = 'Наглядач', manager_id = COALESCE(?, manager_id) WHERE user_id = ?",
+                (responsible_uid, uid)
+            )
+            await u_db.commit()
+    except Exception as e:
+        print(f"Error syncing observer role to users.db: {e}")
     return True
 
 async def delete_observer_by_uid(uid: int) -> bool:

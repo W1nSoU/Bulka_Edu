@@ -1,3 +1,4 @@
+from __future__ import annotations
 import aiosqlite
 import json
 import time
@@ -163,8 +164,20 @@ async def get_token_data(token):
         # Перетворюємо в словник
         token_data = dict(token_data)
         
-        # Якщо токен вже використаний
-        if token_data.get("used_by") is not None:
+        # Розбираємо extra_data заздалегідь для перевірки multi_use / revoked
+        extra = {}
+        if token_data.get("extra_data"):
+            try:
+                extra = json.loads(token_data["extra_data"])
+            except Exception:
+                extra = {}
+                
+        is_multi_use = bool(extra.get("multi_use"))
+        if extra.get("revoked"):
+            return {"status": "expired"}
+        
+        # Якщо одноразовий токен вже використаний
+        if not is_multi_use and token_data.get("used_by") is not None:
             return {"status": "already_used"}
             
         # Перевіряємо термін дії
@@ -178,14 +191,6 @@ async def get_token_data(token):
                     return {"status": "expired"}
         except (ValueError, TypeError) as e:
             print(f"⚠️ Помилка при розборі дати закінчення токена {token}: {e}")
-            
-        # Розбираємо extra_data
-        extra = {}
-        if token_data.get("extra_data"):
-            try:
-                extra = json.loads(token_data["extra_data"])
-            except Exception:
-                extra = {}
 
         # Розбираємо shops
         shop_raw = token_data.get("shop")
@@ -220,21 +225,22 @@ async def get_token_data(token):
 
 async def use_token(token, user_id):
     """
-    Позначає токен як використаний
+    Позначає токен як використаний.
+    Якщо токен багаторазовий (extra_data.multi_use == True), додає user_id до used_by_list
+    і залишає токен активним для наступних переходів.
     
     Args:
         token: Токен для позначення
         user_id: ID користувача, який використав токен
         
     Returns:
-        bool: True, якщо токен успішно позначено, False в інакше
+        bool: True, якщо токен успішно позначено, False інакше
     """
     now = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
     
     async with aiosqlite.connect(TOKENS_DB_PATH) as db:
-        # Перевіряємо, чи токен ще не використаний
         cursor = await db.execute(
-            "SELECT used_by FROM tokens WHERE token = ?", 
+            "SELECT used_by, extra_data FROM tokens WHERE token = ?", 
             (token,)
         )
         token_data = await cursor.fetchone()
@@ -242,13 +248,95 @@ async def use_token(token, user_id):
         if not token_data:
             return False  # Токен не існує
             
-        if token_data[0] is not None:
+        used_by, extra_raw = token_data[0], token_data[1]
+        extra = {}
+        if extra_raw:
+            try:
+                extra = json.loads(extra_raw)
+            except Exception:
+                extra = {}
+                
+        if extra.get("multi_use"):
+            if extra.get("revoked"):
+                return False
+            used_list = extra.get("used_by_list")
+            if not isinstance(used_list, list):
+                used_list = []
+            if user_id not in used_list:
+                used_list.append(user_id)
+            extra["used_by_list"] = used_list
+            await db.execute(
+                "UPDATE tokens SET extra_data = ?, used_at = ? WHERE token = ?",
+                (json.dumps(extra, ensure_ascii=False), now, token)
+            )
+            await db.commit()
+            return True
+            
+        if used_by is not None:
             return False  # Токен вже використаний
             
-        # Позначаємо токен як використаний
+        # Позначаємо одноразовий токен як використаний
         await db.execute(
             "UPDATE tokens SET used_by = ?, used_at = ? WHERE token = ?",
             (user_id, now, token)
+        )
+        await db.commit()
+        return True
+
+
+async def get_active_multi_use_token(role: str = "Наглядач") -> dict | None:
+    """
+    Шукає активний багаторазовий (офісний) токен для вказаної ролі.
+    Повертає словник із даними токена або None, якщо активного немає.
+    """
+    now = datetime.now(pytz.timezone(TIMEZONE))
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    
+    async with aiosqlite.connect(TOKENS_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM tokens WHERE role = ? AND used_by IS NULL AND expires_at > ? ORDER BY id DESC",
+            (role, now_str)
+        )
+        rows = await cursor.fetchall()
+        for row in rows:
+            data = dict(row)
+            extra = {}
+            if data.get("extra_data"):
+                try:
+                    extra = json.loads(data["extra_data"])
+                except Exception:
+                    extra = {}
+            if extra.get("multi_use") and not extra.get("revoked"):
+                used_list = extra.get("used_by_list")
+                if not isinstance(used_list, list):
+                    used_list = []
+                data["extra_data"] = extra
+                data["used_count"] = len(used_list)
+                return data
+    return None
+
+
+async def revoke_token(token: str) -> bool:
+    """
+    Деактивує токен вручну (встановлює revoked=True в extra_data та оновлює expires_at на поточний час).
+    """
+    now_str = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(TOKENS_DB_PATH) as db:
+        cursor = await db.execute("SELECT extra_data FROM tokens WHERE token = ?", (token,))
+        row = await cursor.fetchone()
+        if not row:
+            return False
+        extra = {}
+        if row[0]:
+            try:
+                extra = json.loads(row[0])
+            except Exception:
+                extra = {}
+        extra["revoked"] = True
+        await db.execute(
+            "UPDATE tokens SET extra_data = ?, expires_at = ? WHERE token = ?",
+            (json.dumps(extra, ensure_ascii=False), now_str, token)
         )
         await db.commit()
         return True
