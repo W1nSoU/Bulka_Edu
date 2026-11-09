@@ -1222,25 +1222,31 @@ async def _handle_pagination(callback: CallbackQuery):
                 is_photo_message = bool(callback.message.photo)
                 is_text_message = bool(callback.message.text)
                 
-                if photo:
-                    if is_photo_message:
-                        media = types.InputMediaPhoto(media=photo, caption=text)
-                        await callback.message.edit_media(media=media, reply_markup=keyboard)
+                try:
+                    if photo:
+                        if is_photo_message:
+                            media = types.InputMediaPhoto(media=photo, caption=text)
+                            await callback.message.edit_media(media=media, reply_markup=keyboard)
+                        else:
+                            try:
+                                await callback.message.delete()
+                            except Exception:
+                                pass
+                            await callback.message.answer_photo(photo, caption=text, reply_markup=keyboard)
                     else:
-                        try:
-                            await callback.message.delete()
-                        except Exception:
-                            pass
-                        await callback.message.answer_photo(photo, caption=text, reply_markup=keyboard)
-                else:
-                    if is_text_message:
-                        await callback.message.edit_text(text, reply_markup=keyboard)
+                        if is_text_message:
+                            await callback.message.edit_text(text, reply_markup=keyboard)
+                        else:
+                            try:
+                                await callback.message.delete()
+                            except Exception:
+                                pass
+                            await callback.message.answer(text, reply_markup=keyboard)
+                except TelegramBadRequest as e:
+                    if "canceled by new edit" in str(e) or "message is not modified" in str(e):
+                        pass
                     else:
-                        try:
-                            await callback.message.delete()
-                        except Exception:
-                            pass
-                        await callback.message.answer(text, reply_markup=keyboard)
+                        raise
         else:
             await callback.answer("Помилка: сторінка не знайдена.")
         return
@@ -1253,7 +1259,13 @@ async def _handle_pagination(callback: CallbackQuery):
     if 0 <= page < len(pages):
         keyboard = get_pagination_keyboard(page, len(pages), str(material_id), day, final_button)
         if isinstance(callback.message, Message):
-            await callback.message.edit_text(pages[page], reply_markup=keyboard)
+            try:
+                await callback.message.edit_text(pages[page], reply_markup=keyboard)
+            except TelegramBadRequest as e:
+                if "canceled by new edit" in str(e) or "message is not modified" in str(e):
+                    pass
+                else:
+                    raise
     else:
         await callback.answer("Помилка: сторінка не знайдена.")
 
