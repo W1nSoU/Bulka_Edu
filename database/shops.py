@@ -310,11 +310,49 @@ async def set_shop_manager(shop_name: str, new_manager_uid: Optional[int]) -> bo
         return False
 
 
+def _normalize_city_name(name: Optional[str]) -> str:
+    if not name:
+        return ""
+    return name.strip().replace("’", "'").replace("ʼ", "'")
+
+
+def _get_base_city(name: str) -> str:
+    norm = _normalize_city_name(name)
+    for prefix in ["вц - ", "вц ", "цех - ", "цех "]:
+        if norm.lower().startswith(prefix):
+            return norm[len(prefix):].strip()
+    return norm
+
+
+def _is_manager_city_match(target_city: str, manager_city: Optional[str]) -> bool:
+    norm_target = _normalize_city_name(target_city)
+    base_target = _get_base_city(norm_target)
+
+    norm_mgr = _normalize_city_name(manager_city)
+    base_mgr = _get_base_city(norm_mgr)
+
+    if not norm_mgr:
+        # Керівник без закріпленого міста (наприклад, новостворений) може призначатися будь-куди
+        return True
+
+    if norm_target.lower() == norm_mgr.lower():
+        return True
+    if base_target.lower() == base_mgr.lower():
+        return True
+    if base_target.lower() == norm_mgr.lower():
+        return True
+    if norm_target.lower() == base_mgr.lower():
+        return True
+    return False
+
+
 async def get_active_managers_for_city(city: str) -> List[Dict[str, Any]]:
     """
-    Повертає список активних керівників у вказаному місті.
+    Повертає список активних керівників (виключно 'Керівник', 'Керівник Стажер' тощо) у вказаному місті.
+    Виключає наглядачів ('Наглядач'), розробників ('Developer'), адміністраторів та територіалів.
+    Підтримує гнучке співставлення міст (наприклад, 'ВЦ Хмельницький' <-> 'Хмельницький', різні апострофи).
     """
-    clean_city = city.strip()
+    clean_city = (city or "").strip()
     managers: List[Dict[str, Any]] = []
     try:
         async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
@@ -323,13 +361,31 @@ async def get_active_managers_for_city(city: str) -> List[Dict[str, Any]]:
                 """
                 SELECT uid, username, full_name, process, city, status
                 FROM managers
-                WHERE status = 'active' AND (city = ? OR city IS NULL OR city = '')
+                WHERE (status = 'active' OR status IS NULL)
                 ORDER BY full_name
-                """,
-                (clean_city,)
+                """
             )
             rows = await cursor.fetchall()
-            managers = [dict(r) for r in rows]
+            for r in rows:
+                m = dict(r)
+                proc = (m.get("process") or "").strip()
+                proc_lower = proc.lower()
+
+                # Суворий фільтр посади: виключаємо наглядачів, девелоперів, адмінів, територіалів
+                if "наглядач" in proc_lower or proc in ("Developer", "Адміністратор", "Територіал"):
+                    continue
+
+                # Дозволяємо тільки посади керівників
+                is_manager_role = (
+                    proc in ("Керівник", "Керівник Стажер", "Керівник-стажер", "manager")
+                    or "керівник" in proc_lower
+                )
+                if not is_manager_role:
+                    continue
+
+                # Перевірка сумісності міста
+                if _is_manager_city_match(clean_city, m.get("city")):
+                    managers.append(m)
     except Exception as e:
         logger.error(f"Помилка отримання керівників для міста {clean_city}: {e}")
 

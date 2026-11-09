@@ -5,12 +5,14 @@ import random
 from typing import Optional, List, Tuple
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
 
 from database.news import (
     NEWS_REACTIONS,
     record_deliveries_batch,
     update_news_stats
 )
+from bot.utils.message_utils import sanitize_telegram_html
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,7 @@ async def send_news_batch(
     failed_count = 0
     deliveries = []
 
+    clean_text = sanitize_telegram_html(text)
     reply_markup = get_news_reaction_keyboard(news_id) if news_id else None
 
     effective_media_type = media_type
@@ -72,29 +75,39 @@ async def send_news_batch(
 
     for user_id in recipient_uids:
         try:
+            # 1. Відправка медіа (за наявності) з захистом від падіння
             if effective_media_type == "video" and video_file_id:
-                await bot.send_video(chat_id=user_id, video=video_file_id)
-                sent_msg = await bot.send_message(
-                    chat_id=user_id,
-                    text=text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML"
-                )
+                try:
+                    await bot.send_video(chat_id=user_id, video=video_file_id)
+                except Exception as me:
+                    logger.warning(f"[News Broadcaster] Video send warning for user {user_id}: {me}")
             elif effective_media_type == "photo" and photo_file_id:
-                await bot.send_photo(chat_id=user_id, photo=photo_file_id)
+                try:
+                    await bot.send_photo(chat_id=user_id, photo=photo_file_id)
+                except Exception as me:
+                    logger.warning(f"[News Broadcaster] Photo send warning for user {user_id}: {me}")
+
+            # 2. Відправка тексту новини з автоматичним fallback при збоях HTML
+            try:
                 sent_msg = await bot.send_message(
                     chat_id=user_id,
-                    text=text,
+                    text=clean_text,
                     reply_markup=reply_markup,
                     parse_mode="HTML"
                 )
-            else:
-                sent_msg = await bot.send_message(
-                    chat_id=user_id,
-                    text=text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML"
-                )
+            except TelegramBadRequest as tbe:
+                err_msg = str(tbe).lower()
+                if "can't parse entities" in err_msg or "tag" in err_msg or "entity" in err_msg:
+                    logger.warning(f"[News Broadcaster] HTML parse error for user {user_id}, falling back to plain text: {tbe}")
+                    sent_msg = await bot.send_message(
+                        chat_id=user_id,
+                        text=clean_text,
+                        reply_markup=reply_markup,
+                        parse_mode=None
+                    )
+                else:
+                    raise
+
             sent_count += 1
             if news_id:
                 deliveries.append({

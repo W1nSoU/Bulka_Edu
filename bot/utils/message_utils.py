@@ -1,12 +1,126 @@
 """
-Утиліта для безпечної відправки довгих повідомлень в Telegram
+Утиліта для безпечної відправки довгих повідомлень в Telegram та санітизації HTML
 """
+import re
+import html
 from aiogram.types import Message, InlineKeyboardMarkup
 from typing import Optional
 
 # Telegram ліміт: 4096 символів
 TELEGRAM_MAX_LENGTH = 4096
 SAFE_MESSAGE_LENGTH = 4000  # З запасом
+
+
+def sanitize_telegram_html(text: str) -> str:
+    """
+    Санітизує текст для безпечної відправки в Telegram з parse_mode='HTML':
+    - Перетворює списки <ul>, <ol>, <li> на зрозумілі текстові буліти ('• item').
+    - Перетворює <p>, <div>, <br> на відповідні переноси рядків.
+    - Перетворює заголовки <h1>...<h6> на <b>...</b>.
+    - Залишає виключно підтримувані Telegram HTML-теги:
+      <b>, <strong>, <i>, <em>, <u>, <ins>, <s>, <strike>, <del>,
+      <code>, <pre>, <blockquote>, <tg-spoiler>, <tg-emoji>, <a href="...">.
+    - Стрипає будь-які заборонені теги (span без tg-spoiler, table тощо), зберігаючи текст всередині.
+    - Автоматично закриває незакриті теги та прибирає осиротілі закриваючі теги.
+    - Екранує непарні/сирі символи '<' та '&', що не є частиною валідних тегів/сутностей.
+    """
+    if not text:
+        return ""
+
+    raw = str(text)
+
+    # 1. Заміна блочних та спискових елементів на читабельний текст
+    raw = re.sub(r"(?i)<br\s*/?>", "\n", raw)
+    raw = re.sub(r"(?i)</p>", "\n\n", raw)
+    raw = re.sub(r"(?i)<p[^>]*>", "", raw)
+    raw = re.sub(r"(?i)<li[^>]*>", "• ", raw)
+    raw = re.sub(r"(?i)</li>", "\n", raw)
+    raw = re.sub(r"(?i)</?[uo]l[^>]*>", "\n", raw)
+    raw = re.sub(r"(?i)<h[1-6][^>]*>(.*?)</h[1-6]>", r"<b>\1</b>\n", raw)
+    raw = re.sub(r"(?i)</?div[^>]*>", "\n", raw)
+
+    # Підтримувані прості теги
+    simple_tags = {
+        "b": "b", "strong": "strong",
+        "i": "i", "em": "em",
+        "u": "u", "ins": "ins",
+        "s": "s", "strike": "strike", "del": "del",
+        "code": "code", "pre": "pre",
+        "blockquote": "blockquote",
+        "tg-spoiler": "tg-spoiler",
+        "tg-emoji": "tg-emoji"
+    }
+
+    # Обробка спойлерів через span
+    raw = re.sub(r'(?i)<span[^>]*class=["\']tg-spoiler["\'][^>]*>(.*?)</span>', r'<tg-spoiler>\1</tg-spoiler>', raw)
+    raw = re.sub(r'(?i)</?span[^>]*>', '', raw)
+
+    # 2. Парсинг тегів зі стеком для збалансованості
+    tag_regex = re.compile(r'</?([a-zA-Z0-9_-]+)([^>]*)>')
+    result = []
+    stack = []
+    last_idx = 0
+
+    for m in tag_regex.finditer(raw):
+        start, end = m.span()
+        tag_str = m.group(0)
+        tag_name = m.group(1).lower()
+        attrs = m.group(2)
+        is_closing = tag_str.startswith("</")
+
+        # Текст між тегами: екрануємо сирі '<' та '&'
+        chunk = raw[last_idx:start]
+        if chunk:
+            # Екрануємо & що не є частиною сутностей
+            chunk = re.sub(r'&(?!(?:amp|lt|gt|quot|#\d+|#x[0-9a-fA-F]+);)', '&amp;', chunk)
+            # Екрануємо непарні <
+            chunk = chunk.replace("<", "&lt;")
+            result.append(chunk)
+        last_idx = end
+
+        if is_closing:
+            if tag_name in stack:
+                while stack and stack[-1] != tag_name:
+                    unclosed = stack.pop()
+                    result.append(f"</{unclosed}>")
+                if stack and stack[-1] == tag_name:
+                    stack.pop()
+                    result.append(f"</{tag_name}>")
+            # Якщо закриваючий тег не відкривався — ігноруємо
+        else:
+            if tag_name in simple_tags:
+                canonical = simple_tags[tag_name]
+                if canonical == "blockquote" and "expandable" in attrs.lower():
+                    result.append("<blockquote expandable>")
+                else:
+                    result.append(f"<{canonical}>")
+                stack.append(canonical)
+            elif tag_name == "a":
+                href_m = re.search(r'href=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+                if href_m:
+                    href = href_m.group(1)
+                    result.append(f'<a href="{href}">')
+                    stack.append("a")
+            # Інші заборонені теги ігноруються
+
+    # Залишок тексту
+    tail = raw[last_idx:]
+    if tail:
+        tail = re.sub(r'&(?!(?:amp|lt|gt|quot|#\d+|#x[0-9a-fA-F]+);)', '&amp;', tail)
+        tail = tail.replace("<", "&lt;")
+        result.append(tail)
+
+    # Закриваємо незакриті теги зі стеку
+    while stack:
+        unclosed = stack.pop()
+        result.append(f"</{unclosed}>")
+
+    clean = "".join(result)
+    clean = re.sub(r"[ \t]+\n", "\n", clean)
+    clean = re.sub(r"[ \t]{2,}", " ", clean)
+    clean = re.sub(r"\n{3,}", "\n\n", clean)
+    return clean.strip()
+
 
 
 async def send_long_message(

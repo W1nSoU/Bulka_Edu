@@ -38,6 +38,7 @@ from database.shops import (
 from bot.services.logger import get_logger
 logger = get_logger()
 from bot.services.semantic_search import build_and_reset_embeddings
+from bot.utils.message_utils import sanitize_telegram_html
 from database.users import (
     get_all_users,
     get_user_details,
@@ -583,30 +584,50 @@ async def _edit_or_answer(message: Message, text: str, reply_markup=None):
     """
     Helper: намагається оновити поточне повідомлення, а якщо не виходить — надсилає нове.
     Якщо текст занадто довгий для медіа-підпису (>1024), автоматично переходить на текст.
+    Захищений від збоїв валідації HTML-розмітки Telegram.
     """
+    clean_text = sanitize_telegram_html(text)
+
     # Якщо текст довший за ліміт підпису (з невеликим запасом), 
     # або якщо ми хочемо гарантувати доставку великого списку
-    if len(text) > 1000:
+    if len(clean_text) > 1000:
         try:
             await message.delete()
         except:
             pass
-        return await message.answer(text, reply_markup=reply_markup)
+        try:
+            return await message.answer(clean_text, reply_markup=reply_markup, parse_mode="HTML")
+        except TelegramBadRequest as e:
+            if "can't parse entities" in str(e).lower() or "tag" in str(e).lower():
+                return await message.answer(clean_text, reply_markup=reply_markup, parse_mode=None)
+            raise
 
     try:
         if message.photo:
-            await message.edit_caption(caption=text, reply_markup=reply_markup)
+            await message.edit_caption(caption=clean_text, reply_markup=reply_markup, parse_mode="HTML")
             return message
-        await message.edit_text(text, reply_markup=reply_markup)
+        await message.edit_text(clean_text, reply_markup=reply_markup, parse_mode="HTML")
         return message
     except TelegramBadRequest as e:
         error_message = str(e).lower()
+        if "can't parse entities" in error_message or "tag" in error_message:
+            try:
+                if message.photo:
+                    await message.edit_caption(caption=clean_text, reply_markup=reply_markup, parse_mode=None)
+                else:
+                    await message.edit_text(clean_text, reply_markup=reply_markup, parse_mode=None)
+                return message
+            except Exception:
+                pass
         if "message to edit not found" in error_message or "there is no text in the message to edit" in error_message:
             try:
                 await message.delete()
             except:
                 pass
-            return await message.answer(text, reply_markup=reply_markup)
+            try:
+                return await message.answer(clean_text, reply_markup=reply_markup, parse_mode="HTML")
+            except TelegramBadRequest:
+                return await message.answer(clean_text, reply_markup=reply_markup, parse_mode=None)
         elif "message is not modified" in error_message:
             return message
         else:
@@ -616,13 +637,19 @@ async def _edit_or_answer(message: Message, text: str, reply_markup=None):
                 await message.delete()
             except:
                 pass
-            return await message.answer(text, reply_markup=reply_markup)
+            try:
+                return await message.answer(clean_text, reply_markup=reply_markup, parse_mode="HTML")
+            except TelegramBadRequest:
+                return await message.answer(clean_text, reply_markup=reply_markup, parse_mode=None)
     except Exception:
         try:
             await message.delete()
         except:
             pass
-        return await message.answer(text, reply_markup=reply_markup)
+        try:
+            return await message.answer(clean_text, reply_markup=reply_markup, parse_mode="HTML")
+        except TelegramBadRequest:
+            return await message.answer(clean_text, reply_markup=reply_markup, parse_mode=None)
 
 
 async def _send_text_screen(callback: CallbackQuery, text: str, reply_markup=None):
@@ -7707,6 +7734,7 @@ async def _show_news_preview(callback: CallbackQuery, state: FSMContext):
         body_parts.append(hashtags_str)
 
     full_text = "\n\n".join(body_parts)
+    full_text = sanitize_telegram_html(full_text)
 
     recipients = await get_matching_news_recipients(selected_roles, selected_city)
     recipients_count = len(recipients)
@@ -8060,11 +8088,12 @@ async def dev_news_view_handler(callback: CallbackQuery):
     roles_str = ", ".join(roles_list) if roles_list else "Всі"
     city = news.get("selected_city") or "all"
     city_str = "Усі міста" if city == "all" else city
+    clean_news_body = sanitize_telegram_html(news.get('text', ''))
 
     text = (
         f"📰 <b>Новина #{news_id}</b>\n"
         f"───────────────────\n"
-        f"{news.get('text', '')}\n\n"
+        f"{clean_news_body}\n\n"
         f"📊 <b>Статистика новини:</b>\n"
         f"📅 Дата публікації: <b>{created_at}</b>\n"
         f"👥 Аудиторія: <b>{roles_str} ({city_str})</b>\n"

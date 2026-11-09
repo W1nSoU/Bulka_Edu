@@ -347,7 +347,7 @@ async def improve_news_text_with_gpt(original_text: str) -> Optional[str]:
         "1. Збережи абсолютно всі факти, дати, цифри, терміни та суть оригінального повідомлення.\n"
         "2. Зроби формулювання чіткими, приємними, надихаючими та структурованими (використовуй абзаци або пункти списку).\n"
         "3. Додай доречні емодзі для візуальних акцентів (🍞, 🥐, ✨, 📢, 💡, 📍 тощо).\n"
-        "4. Використовуй тільки валідні Telegram HTML-теги: <b>жирний</b>, <i>курсив</i>, <code>код</code>. Не використовуй Markdown (** або *).\n"
+        "4. Використовуй тільки валідні Telegram HTML-теги: <b>жирний</b>, <i>курсив</i>, <code>код</code>. Категорично заборонено використовувати <ul>, <ol>, <li>, <p>, <br>, <h1>-<h6> або Markdown (** чи *). Для списків використовуй звичайні емодзі або текстовий буліт '• ' на новому рядку.\n"
         "5. НЕ додавай жодних хештегів (вони прикріплюються системою автоматично).\n"
         "6. Відповідай ВИКЛЮЧНО готовим покращеним текстом публікації. Без жодних вступів на зразок 'Ось покращений варіант:' чи коментарів у кінці."
     )
@@ -365,7 +365,8 @@ async def improve_news_text_with_gpt(original_text: str) -> Optional[str]:
         )
         improved = response.choices[0].message.content
         if improved:
-            return improved.strip()
+            from bot.utils.message_utils import sanitize_telegram_html
+            return sanitize_telegram_html(improved)
     except Exception as e:
         logger.error(f"Error improving news text with GPT: {e}")
 
