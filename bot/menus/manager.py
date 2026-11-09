@@ -1186,7 +1186,7 @@ async def manager_process_add_city_callback(callback: CallbackQuery, state: FSMC
 
         await _edit_menu_message(
             callback.message,
-            f"🏙️ Місто: <b>{city}</b>\n(Магазини не знайдено)\n\n💼 <b>Яка посада у стажера?</b>",
+            f"🏙️ Місто: <b>{city}</b>\n(Підрозділи / магазини не знайдено)\n\n💼 <b>Яка посада у стажера?</b>",
             kb,
             photo_path=PHOTO_MGR_TEAM
         )
@@ -1195,7 +1195,7 @@ async def manager_process_add_city_callback(callback: CallbackQuery, state: FSMC
         buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_add")])
         await _edit_menu_message(
             callback.message,
-            f"🏙️ Місто: <b>{city}</b>\n\n🏪 <b>Оберіть магазин:</b>",
+            f"🏙️ Місто: <b>{city}</b>\n\n🏪 <b>Оберіть підрозділ / магазин:</b>",
             InlineKeyboardMarkup(inline_keyboard=buttons),
             photo_path=PHOTO_MGR_TEAM
         )
@@ -1243,7 +1243,7 @@ async def manager_process_add_shop_callback(callback: CallbackQuery, state: FSMC
 
     await _edit_menu_message(
         callback.message,
-        f"🏙️ Місто: <b>{city}</b>\n🏪 Магазин: <b>{shop}</b>\n\n💼 <b>Яка посада у стажера?</b>",
+        f"🏙️ Місто: <b>{city}</b>\n🏪 Підрозділ / Магазин: <b>{shop}</b>\n\n💼 <b>Яка посада у стажера?</b>",
         kb,
         photo_path=PHOTO_MGR_TEAM
     )
@@ -1264,7 +1264,7 @@ async def manager_process_add_role_page_callback(callback: CallbackQuery, state:
     await state.update_data(add_role_page=page)
     kb = _render_add_roles_keyboard(roles, page=page, back_target="mgr_add")
 
-    shop_text = f"🏪 Магазин: <b>{shop}</b>\n" if shop else ""
+    shop_text = f"🏪 Підрозділ / Магазин: <b>{shop}</b>\n" if shop else ""
     await _edit_menu_message(
         callback.message,
         f"🏙️ Місто: <b>{city}</b>\n{shop_text}\n💼 <b>Яка посада у стажера?</b>",
@@ -1316,7 +1316,7 @@ async def manager_process_add_role_callback(callback: CallbackQuery, state: FSMC
 
     link = f"https://t.me/{bot_username}?start={manager_id}-{token}"
     
-    shop_text = f"\n🏪 Магазин: <b>{shop}</b>" if shop else ""
+    shop_text = f"\n🏪 Підрозділ / Магазин: <b>{shop}</b>" if shop else ""
     
     await _edit_menu_message(
         callback.message,

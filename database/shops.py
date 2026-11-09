@@ -141,14 +141,23 @@ async def get_cities_with_shops() -> List[Dict[str, Any]]:
 
 
 async def get_shops_by_city(city: Optional[str]) -> List[Dict[str, Any]]:
-    """Повертає список магазинів для вказаного міста."""
+    """Повертає список магазинів/підрозділів для вказаного міста з підтримкою апострофів та регістру."""
     if not city or not isinstance(city, str) or not city.strip():
         return []
+    clean_city = city.strip()
+    variants = list({
+        clean_city,
+        clean_city.replace("'", "ʼ"),
+        clean_city.replace("’", "ʼ"),
+        clean_city.replace("ʼ", "'"),
+        clean_city.replace("ʼ", "’"),
+    })
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        placeholders = ",".join("?" for _ in variants)
         cursor = await db.execute(
-            "SELECT id, name, city, created_at FROM shops WHERE city = ? ORDER BY name",
-            (city.strip(),)
+            f"SELECT id, name, city, created_at FROM shops WHERE city IN ({placeholders}) COLLATE NOCASE ORDER BY name",
+            tuple(variants)
         )
         rows = await cursor.fetchall()
     return [dict(r) for r in rows]
