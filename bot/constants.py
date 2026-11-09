@@ -89,10 +89,22 @@ VALID_POSITION_TYPES = tuple(POSITION_TYPES.keys())
 
 def is_valid_role(role: Optional[str]) -> bool:
     """
-    Синхронна перевірка посади — використовує AVAILABLE_ROLES як fallback.
+    Синхронна перевірка посади — використовує AVAILABLE_ROLES та таблицю positions у БД.
     Для асинхронної перевірки через БД використовуй get_position_by_name().
     """
-    return bool(role) and role in AVAILABLE_ROLES
+    if not role:
+        return False
+    if role in AVAILABLE_ROLES:
+        return True
+    try:
+        import sqlite3
+        from database import DB_PATH
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM positions WHERE name = ?", (role,))
+            return cur.fetchone() is not None
+    except Exception:
+        return False
 
 
 def is_valid_city(city: Optional[str]) -> bool:

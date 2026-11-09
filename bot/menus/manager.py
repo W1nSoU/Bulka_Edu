@@ -710,14 +710,91 @@ async def manager_filter_city(callback: CallbackQuery):
         ret_code=f"city_{city_idx}"
     )
 
+async def _get_manager_add_roles() -> list[str]:
+    """
+    Повертає список доступних для вибору посад (без Керівника).
+    Джерело правди: таблиця positions у БД.
+    Якщо в БД порожньо або виникла помилка — fallback до AVAILABLE_ROLES.
+    """
+    try:
+        from database.positions import get_all_positions
+        positions = await get_all_positions()
+        db_roles = [
+            p["name"].strip() for p in positions
+            if p.get("name") and p["name"].strip() not in ("Керівник", "Керівник Стажер")
+        ]
+        if db_roles:
+            seen = set()
+            unique_roles = []
+            for r in db_roles:
+                if r not in seen:
+                    seen.add(r)
+                    unique_roles.append(r)
+            return unique_roles
+    except Exception:
+        pass
+    return [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
+
+
+def _render_add_roles_keyboard(
+    roles: list[str],
+    page: int = 0,
+    page_size: int = 8,
+    back_target: str = "mgr_add"
+) -> InlineKeyboardMarkup:
+    total_pages = max(1, (len(roles) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+
+    start_idx = page * page_size
+    page_roles = roles[start_idx:start_idx + page_size]
+
+    buttons = []
+    i = 0
+    while i < len(page_roles):
+        r1 = page_roles[i]
+        idx1 = start_idx + i
+        label1 = r1[:30] + "..." if len(r1) > 30 else r1
+
+        if len(r1) > 22 or (i + 1 >= len(page_roles)):
+            buttons.append([InlineKeyboardButton(text=f"💼 {label1}", callback_data=f"add_role:{idx1}")])
+            i += 1
+        else:
+            r2 = page_roles[i + 1]
+            idx2 = start_idx + i + 1
+            if len(r2) > 22:
+                buttons.append([InlineKeyboardButton(text=f"💼 {label1}", callback_data=f"add_role:{idx1}")])
+                i += 1
+            else:
+                label2 = r2[:30] + "..." if len(r2) > 30 else r2
+                buttons.append([
+                    InlineKeyboardButton(text=f"💼 {label1}", callback_data=f"add_role:{idx1}"),
+                    InlineKeyboardButton(text=f"💼 {label2}", callback_data=f"add_role:{idx2}")
+                ])
+                i += 2
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️ Попередня", callback_data=f"add_role_page:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {page + 1}/{total_pages}", callback_data="add_role_noop"))
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton(text="Наступна ➡️", callback_data=f"add_role_page:{page + 1}"))
+        buttons.append(nav_row)
+
+    back_text = "⬅️ Назад (до міст)" if back_target == "mgr_add" else "⬅️ Назад"
+    buttons.append([InlineKeyboardButton(text=back_text, callback_data=back_target)])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 async def manager_by_role_menu(callback: CallbackQuery):
     if not await _ensure_manager(callback):
         return
     team = await get_manager_team_users(callback.from_user.id)
     roles_in_db = set(i.get('role') for i in team if i.get('role'))
-    
+    all_roles = await _get_manager_add_roles()
+
     buttons = []
-    for i, role in enumerate(AVAILABLE_ROLES):
+    for i, role in enumerate(all_roles):
         if role in roles_in_db:
             label = role[:30] + "..." if len(role) > 30 else role
             buttons.append([InlineKeyboardButton(text=f"💼 {label}", callback_data=f"mgr_filter_role:{i}")])
@@ -741,7 +818,8 @@ async def manager_filter_role(callback: CallbackQuery):
         return
     try:
         role_idx = int(callback.data.split(":", 1)[1])
-        role = AVAILABLE_ROLES[role_idx]
+        all_roles = await _get_manager_add_roles()
+        role = all_roles[role_idx]
     except (ValueError, IndexError):
         await callback.answer("Помилка вибору посади.", show_alert=True)
         return
@@ -849,7 +927,7 @@ async def manager_training_day_view(callback: CallbackQuery):
 async def manager_materials_catalog(callback: CallbackQuery):
     if not await _ensure_manager(callback):
         return
-    filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
+    filtered_roles = await _get_manager_add_roles()
 
     text = (
         "📚 <b>Матеріали навчання за посадами</b>\n\n"
@@ -876,7 +954,7 @@ async def manager_materials_role_days(callback: CallbackQuery):
         return
     try:
         role_idx = int(callback.data.split(":")[1])
-        filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
+        filtered_roles = await _get_manager_add_roles()
         role = filtered_roles[role_idx]
     except (ValueError, IndexError):
         await callback.answer("Некоректна посада.", show_alert=True)
@@ -914,7 +992,7 @@ async def manager_material_view_day(callback: CallbackQuery):
     role_idx = int(parts[1])
     day = int(parts[2])
 
-    filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
+    filtered_roles = await _get_manager_add_roles()
     if role_idx >= len(filtered_roles):
         await callback.answer("Роль не знайдено.", show_alert=True)
         return
@@ -1001,8 +1079,9 @@ async def manager_report(callback: CallbackQuery):
 async def manager_remind_menu(callback: CallbackQuery):
     if not await _ensure_manager(callback):
         return
+    all_roles = await _get_manager_add_roles()
     buttons = []
-    for i, role in enumerate(AVAILABLE_ROLES):
+    for i, role in enumerate(all_roles):
         label = role[:30] + "..." if len(role) > 30 else role
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"mgr_remind_role:{i}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_study_root")])
@@ -1019,7 +1098,8 @@ async def manager_process_remind_role(callback: CallbackQuery, state: FSMContext
         return
     try:
         role_idx = int(callback.data.split(":")[1])
-        role = AVAILABLE_ROLES[role_idx]
+        all_roles = await _get_manager_add_roles()
+        role = all_roles[role_idx]
     except (ValueError, IndexError):
         await callback.answer("Некоректна посада.", show_alert=True)
         return
@@ -1086,18 +1166,15 @@ async def manager_process_add_city_callback(callback: CallbackQuery, state: FSMC
             buttons.append(row)
     
     if not buttons:
-         # Fallback to roles if no shops defined
-        filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
-        buttons = []
-        for i, role in enumerate(filtered_roles):
-            label = role[:30] + "..." if len(role) > 30 else role
-            buttons.append([InlineKeyboardButton(text=label, callback_data=f"add_role:{i}")])
-        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_add")])
-        
+        # Fallback to roles if no shops defined
+        filtered_roles = await _get_manager_add_roles()
+        await state.update_data(add_roles=filtered_roles, add_role_page=0, add_shop=None)
+        kb = _render_add_roles_keyboard(filtered_roles, page=0, back_target="mgr_add")
+
         await _edit_menu_message(
             callback.message,
             f"🏙️ Місто: <b>{city}</b>\n(Магазини не знайдено)\n\n💼 <b>Яка посада у стажера?</b>",
-            InlineKeyboardMarkup(inline_keyboard=buttons),
+            kb,
             photo_path=PHOTO_MGR_TEAM
         )
         await state.set_state(ManagerStates.waiting_add_intern_role)
@@ -1110,14 +1187,14 @@ async def manager_process_add_city_callback(callback: CallbackQuery, state: FSMC
             photo_path=PHOTO_MGR_TEAM
         )
         await state.set_state(ManagerStates.waiting_add_intern_shop)
-    
+
     await callback.answer()
 
 async def manager_process_add_shop_callback(callback: CallbackQuery, state: FSMContext):
     try:
         _, shop_idx_str = callback.data.split(":", 1)
         shop_idx = int(shop_idx_str)
-        
+
         data = await state.get_data()
         city = data.get("add_city")
         db_shops = await get_shops_by_city(city)
@@ -1131,29 +1208,53 @@ async def manager_process_add_shop_callback(callback: CallbackQuery, state: FSMC
         return
 
     await state.update_data(add_shop=shop)
-    
-    filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
-    buttons = []
-    for i, role in enumerate(filtered_roles):
-        label = role[:30] + "..." if len(role) > 30 else role
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"add_role:{i}")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад (до міст)", callback_data="mgr_add")])
-    
+
+    filtered_roles = await _get_manager_add_roles()
+    await state.update_data(add_roles=filtered_roles, add_role_page=0)
+    kb = _render_add_roles_keyboard(filtered_roles, page=0, back_target="mgr_add")
+
     await _edit_menu_message(
         callback.message,
         f"🏙️ Місто: <b>{city}</b>\n🏪 Магазин: <b>{shop}</b>\n\n💼 <b>Яка посада у стажера?</b>",
-        InlineKeyboardMarkup(inline_keyboard=buttons),
+        kb,
         photo_path=PHOTO_MGR_TEAM
     )
     await state.set_state(ManagerStates.waiting_add_intern_role)
+    await callback.answer()
+
+async def manager_process_add_role_page_callback(callback: CallbackQuery, state: FSMContext):
+    if not await _ensure_manager(callback):
+        return
+    try:
+        page = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        page = 0
+    data = await state.get_data()
+    city = data.get("add_city", "")
+    shop = data.get("add_shop")
+    roles = data.get("add_roles") or await _get_manager_add_roles()
+    await state.update_data(add_role_page=page)
+    kb = _render_add_roles_keyboard(roles, page=page, back_target="mgr_add")
+
+    shop_text = f"🏪 Магазин: <b>{shop}</b>\n" if shop else ""
+    await _edit_menu_message(
+        callback.message,
+        f"🏙️ Місто: <b>{city}</b>\n{shop_text}\n💼 <b>Яка посада у стажера?</b>",
+        kb,
+        photo_path=PHOTO_MGR_TEAM
+    )
+    await callback.answer()
+
+async def manager_add_role_noop(callback: CallbackQuery):
     await callback.answer()
 
 async def manager_process_add_role_callback(callback: CallbackQuery, state: FSMContext):
     try:
         _, role_idx_str = callback.data.split(":", 1)
         role_idx = int(role_idx_str)
-        filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
-        role = filtered_roles[role_idx]
+        data = await state.get_data()
+        roles = data.get("add_roles") or await _get_manager_add_roles()
+        role = roles[role_idx]
     except (ValueError, IndexError):
         await callback.answer("Помилка даних посади.", show_alert=True)
         return
@@ -1621,6 +1722,8 @@ def register_manager_handlers(dp: Dispatcher):
     dp.callback_query.register(manager_add_intern, lambda c: c.data == "mgr_add")
     dp.callback_query.register(manager_process_add_city_callback, lambda c: c.data and c.data.startswith("add_city:"))
     dp.callback_query.register(manager_process_add_shop_callback, lambda c: c.data and c.data.startswith("add_shop:"))
+    dp.callback_query.register(manager_add_role_noop, lambda c: c.data == "add_role_noop")
+    dp.callback_query.register(manager_process_add_role_page_callback, lambda c: c.data and c.data.startswith("add_role_page:"))
     dp.callback_query.register(manager_process_add_role_callback, lambda c: c.data and c.data.startswith("add_role:"))
     
     # Remove Intern
