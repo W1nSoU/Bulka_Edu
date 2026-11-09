@@ -1282,7 +1282,7 @@ async def manager_process_add_role_callback(callback: CallbackQuery, state: FSMC
         f"🏙️ Місто: <b>{city}</b>{shop_text}\n"
         f"💼 Посада: <b>{role}</b>\n\n"
         f"🔗 <b>Посилання для стажера:</b>\n"
-        f"<code>{link}</code>\n\n"
+        f"{link}\n\n"
         f"⚠️ Посилання діє 24 години і лише для одного користувача.",
         InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👔 До панелі", callback_data="manager_menu")]]),
         photo_path=PHOTO_MGR_TEAM
