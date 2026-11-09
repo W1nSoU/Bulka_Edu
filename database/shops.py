@@ -140,8 +140,10 @@ async def get_cities_with_shops() -> List[Dict[str, Any]]:
     return result
 
 
-async def get_shops_by_city(city: str) -> List[Dict[str, Any]]:
+async def get_shops_by_city(city: Optional[str]) -> List[Dict[str, Any]]:
     """Повертає список магазинів для вказаного міста."""
+    if not city or not isinstance(city, str) or not city.strip():
+        return []
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(

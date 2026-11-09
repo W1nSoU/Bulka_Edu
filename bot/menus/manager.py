@@ -1191,20 +1191,35 @@ async def manager_process_add_city_callback(callback: CallbackQuery, state: FSMC
     await callback.answer()
 
 async def manager_process_add_shop_callback(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    city = data.get("add_city")
+    if not city:
+        mgr = await get_user_details(callback.from_user.id)
+        if mgr and mgr.get("city"):
+            city = mgr["city"]
+            await state.update_data(add_city=city)
+        else:
+            await callback.answer("Сесію скинуто після перезапуску бота. Будь ласка, оберіть місто знову.", show_alert=True)
+            await manager_add_intern(callback, state)
+            return
+
     try:
         _, shop_idx_str = callback.data.split(":", 1)
         shop_idx = int(shop_idx_str)
 
-        data = await state.get_data()
-        city = data.get("add_city")
         db_shops = await get_shops_by_city(city)
         if not db_shops:
             norm = city.replace("'", "ʼ") if "'" in city else city.replace("ʼ", "'")
             db_shops = await get_shops_by_city(norm)
         shops = [s["name"] for s in db_shops] if db_shops else AVAILABLE_SHOPS.get(city, [])
+        if not (0 <= shop_idx < len(shops)):
+            await callback.answer("Магазин не знайдено або список оновлено.", show_alert=True)
+            await manager_add_intern(callback, state)
+            return
         shop = shops[shop_idx]
     except (ValueError, IndexError):
         await callback.answer("Помилка даних магазину.", show_alert=True)
+        await manager_add_intern(callback, state)
         return
 
     await state.update_data(add_shop=shop)
@@ -1249,11 +1264,25 @@ async def manager_add_role_noop(callback: CallbackQuery):
     await callback.answer()
 
 async def manager_process_add_role_callback(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    city = data.get("add_city")
+    if not city:
+        mgr = await get_user_details(callback.from_user.id)
+        if mgr and mgr.get("city"):
+            city = mgr["city"]
+            await state.update_data(add_city=city)
+        else:
+            await callback.answer("Сесію скинуто. Будь ласка, оберіть місто знову.", show_alert=True)
+            await manager_add_intern(callback, state)
+            return
+
     try:
         _, role_idx_str = callback.data.split(":", 1)
         role_idx = int(role_idx_str)
-        data = await state.get_data()
         roles = data.get("add_roles") or await _get_manager_add_roles()
+        if not (0 <= role_idx < len(roles)):
+            await callback.answer("Помилка вибору посади. Спробуйте ще раз.", show_alert=True)
+            return
         role = roles[role_idx]
     except (ValueError, IndexError):
         await callback.answer("Помилка даних посади.", show_alert=True)
