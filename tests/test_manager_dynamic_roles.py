@@ -4,9 +4,9 @@ import aiosqlite
 
 from database import DB_PATH
 from database.positions import add_position, delete_position, get_position_by_name
-from bot.constants import is_valid_role
+from bot.constants import is_valid_role, is_valid_city
 from bot.handlers import _validate_invite_payload
-from bot.menus.manager import _get_manager_add_roles, _render_add_roles_keyboard
+from bot.menus.manager import _get_manager_add_roles, _render_add_roles_keyboard, _get_manager_add_cities
 
 class TestManagerDynamicRoles(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -57,6 +57,37 @@ class TestManagerDynamicRoles(unittest.IsolatedAsyncioTestCase):
         self.assertIn("add_role:8", cbs_p1)
         self.assertIn("add_role:14", cbs_p1)
         self.assertIn("add_role_page:0", cbs_p1)
+
+    def test_is_valid_city_handles_apostrophes_and_whitespace(self):
+        self.assertTrue(is_valid_city("Хмельницький"))
+        self.assertTrue(is_valid_city("Камʼянець-Подільський"))
+        self.assertTrue(is_valid_city("Кам'янець-Подільський"))
+        self.assertTrue(is_valid_city("Кам’янець-Подільський"))
+        self.assertTrue(is_valid_city("  Хмельницький  "))
+        self.assertTrue(is_valid_city("хмельницький"))
+        self.assertFalse(is_valid_city(None))
+        self.assertFalse(is_valid_city(""))
+        self.assertFalse(is_valid_city("НеіснуючеМісто"))
+
+    async def test_is_valid_city_accepts_db_city(self):
+        test_city = "ТестовеМістоРегресія"
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("INSERT OR IGNORE INTO cities (name) VALUES (?)", (test_city,))
+            await db.commit()
+
+        try:
+            self.assertTrue(is_valid_city(test_city))
+            valid, err = _validate_invite_payload(self.test_role_name, test_city)
+            self.assertTrue(valid)
+            self.assertIsNone(err)
+        finally:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM cities WHERE name = ?", (test_city,))
+                await db.commit()
+
+    async def test_get_manager_add_cities_returns_cities(self):
+        cities = await _get_manager_add_cities()
+        self.assertIn("Хмельницький", cities)
 
 if __name__ == "__main__":
     unittest.main()

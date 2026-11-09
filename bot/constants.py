@@ -108,8 +108,56 @@ def is_valid_role(role: Optional[str]) -> bool:
 
 
 def is_valid_city(city: Optional[str]) -> bool:
-    """Return True if the city exists in the directory."""
-    return bool(city) and city in AVAILABLE_CITIES
+    """
+    Синхронна перевірка міста — використовує AVAILABLE_CITIES та таблиці cities/shops у БД.
+    Нормалізує апострофи ('ʼ’), пробіли та регістр.
+    """
+    if not city or not isinstance(city, str) or not city.strip():
+        return False
+
+    clean_city = city.strip()
+
+    # Створюємо набір варіантів з різними типами апострофів
+    variants = {
+        clean_city,
+        clean_city.replace("'", "ʼ"),
+        clean_city.replace("’", "ʼ"),
+        clean_city.replace("ʼ", "'"),
+        clean_city.replace("ʼ", "’"),
+    }
+
+    # 1. Швидка перевірка у fallback-списку AVAILABLE_CITIES
+    for c in AVAILABLE_CITIES:
+        c_clean = c.strip()
+        c_variants = {
+            c_clean,
+            c_clean.replace("'", "ʼ"),
+            c_clean.replace("’", "ʼ"),
+            c_clean.replace("ʼ", "'"),
+            c_clean.replace("ʼ", "’"),
+        }
+        if variants & c_variants or clean_city.lower() == c_clean.lower():
+            return True
+
+    # 2. Перевірка у базі даних (таблиці cities та shops)
+    try:
+        import sqlite3
+        from database import DB_PATH
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            for v in variants:
+                # Перевіряємо в таблиці cities
+                cur.execute("SELECT 1 FROM cities WHERE name = ? COLLATE NOCASE", (v,))
+                if cur.fetchone() is not None:
+                    return True
+                # Перевіряємо в таблиці shops (якщо місто є в магазинах)
+                cur.execute("SELECT 1 FROM shops WHERE city = ? COLLATE NOCASE", (v,))
+                if cur.fetchone() is not None:
+                    return True
+    except Exception:
+        pass
+
+    return False
 
 
 __all__ = [

@@ -1116,13 +1116,26 @@ async def manager_process_remind_role(callback: CallbackQuery, state: FSMContext
     await callback.answer()
 
 # --- Add Intern (New Logic) ---
+async def _get_manager_add_cities() -> list[str]:
+    try:
+        from database.shops import get_cities_with_shops
+        cities_with_shops = await get_cities_with_shops()
+        if cities_with_shops:
+            names = [c["city"] for c in cities_with_shops if c.get("city")]
+            if names:
+                return names
+    except Exception:
+        pass
+    return AVAILABLE_CITIES
+
 async def manager_add_intern(callback: CallbackQuery, state: FSMContext):
     if not await _ensure_manager(callback):
         return
     await state.clear()
     
+    cities = await _get_manager_add_cities()
     buttons = []
-    for city in AVAILABLE_CITIES:
+    for city in cities:
         buttons.append([InlineKeyboardButton(text=city, callback_data=f"add_city:{city}")])
     buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="mgr_my_team")])
     
