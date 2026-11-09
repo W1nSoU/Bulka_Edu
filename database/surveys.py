@@ -360,7 +360,7 @@ async def get_matching_survey_recipients(
             query = "SELECT user_id FROM users WHERE role = 'Територіал'"
             params = []
             if city_filter:
-                query += " AND city = ?"
+                query += " AND (city = ? OR city IN ('Всі міста', 'all', 'Мережа', 'Вся мережа'))"
                 params.append(target_city)
             cursor = await db.execute(query, tuple(params))
             for row in await cursor.fetchall():
@@ -372,7 +372,7 @@ async def get_matching_survey_recipients(
                     query = "SELECT uid FROM managers WHERE process = 'Територіал' AND (status = 'active' OR status IS NULL)"
                     params = []
                     if city_filter:
-                        query += " AND city = ?"
+                        query += " AND (city = ? OR city IN ('Всі міста', 'all', 'Мережа', 'Вся мережа'))"
                         params.append(target_city)
                     cursor = await m_db.execute(query, tuple(params))
                     for row in await cursor.fetchall():

@@ -2606,7 +2606,11 @@ async def process_registration_full_name(message: types.Message, state: FSMConte
             
         transferred_count = 0
         if transfer_on_reg:
-            transferred_count = await reassign_city_managers_to_territorial(city, user_id)
+            if city in ("Всі міста", "all", "Мережа", "Вся мережа") or t_type == "ВВ":
+                from database.managers import reassign_direction_managers_to_territorial
+                transferred_count, _ = await reassign_direction_managers_to_territorial(user_id)
+            else:
+                transferred_count = await reassign_city_managers_to_territorial(city, user_id)
             
         # Сповіщення адміністратору, який створив посилання
         if manager_id:

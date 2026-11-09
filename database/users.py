@@ -932,13 +932,16 @@ async def get_reminder_history(limit: int = 50, offset: int = 0) -> list[dict]:
         return history_records
 
 async def get_users_by_city(city: str) -> list[dict]:
-    """Retrieves a list of users filtered by city."""
+    """Retrieves a list of users filtered by city. If 'Всі міста' or 'all', returns all users."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT * FROM users WHERE city = ? ORDER BY last_activity DESC",
-            (city,)
-        )
+        if not city or city in ('Всі міста', 'all', 'Мережа', 'Вся мережа'):
+            cursor = await db.execute("SELECT * FROM users ORDER BY last_activity DESC")
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM users WHERE city = ? ORDER BY last_activity DESC",
+                (city,)
+            )
         users = await cursor.fetchall()
         return [dict(user) for user in users]
 

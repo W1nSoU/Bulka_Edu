@@ -74,7 +74,7 @@ async def send_intern_reminder(
     if intern.get("status") == "Працівник" or intern.get("role") in MANAGEMENT_ROLES:
         return False
 
-    full_name = intern.get("full_name") or "Булка-котик"
+    full_name = intern.get("full_name") or "Стажер"
     role = intern.get("role") or "посада не вказана"
     city = intern.get("city") or "місто не вказано"
     manager_name = await _resolve_manager_name(sender_id if source == "manager" else None, intern)

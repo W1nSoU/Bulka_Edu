@@ -350,12 +350,89 @@ async def get_managers_by_responsible(territorial_uid: int) -> list[dict]:
         return managers
 
 async def get_territorials_by_city(city: str) -> list[dict]:
-    """Отримує список активних Територіалів певного міста."""
+    """Отримує список активних Територіалів певного міста, включаючи мережевих (Всі міста)."""
     managers = await get_all_managers()
+    target_city = (city or "").strip()
     return [
         m for m in managers
-        if m.get('process') == 'Територіал' and m.get('city') == city and (m.get('status') == 'active' or m.get('status') is None)
+        if (m.get('process') == 'Територіал' or m.get('territorial_type') is not None)
+        and (
+            m.get('city') == target_city
+            or m.get('city') in ('Всі міста', 'all', 'Мережа', 'Вся мережа')
+            or target_city in ('Всі міста', 'all', 'Мережа', 'Вся мережа')
+        )
+        and (m.get('status') == 'active' or m.get('status') is None)
     ]
+
+
+async def get_potential_managers_to_reassign(territorial_uid: int) -> list[dict]:
+    """
+    Повертає список керівників, які можуть бути перепідпорядковані цьому Територіалу:
+    - Якщо територіал типу 'ВВ' (або місто 'Всі міста'):
+      шукає всіх керівників цехів, ВЦ, кондитерських цехів, кав'ярень/кави, догерів
+      або тих, у кого немає відповідального / інший відповідальний.
+    - Якщо звичайний територіал міста:
+      шукає керівників магазинів цього міста.
+    """
+    manager = await get_manager_by_uid(territorial_uid)
+    if not manager:
+        return []
+
+    t_type = manager.get("territorial_type") or "ТЗ"
+    t_city = (manager.get("city") or "").strip()
+    is_network = t_city in ("Всі міста", "all", "Мережа", "Вся мережа") or t_type == "ВВ"
+
+    all_managers = await get_all_kerivnyky()
+    matching = []
+
+    for m in all_managers:
+        if m.get("uid") == territorial_uid:
+            continue
+        m_city = (m.get("city") or "").strip()
+        m_shops = m.get("shops") or []
+        if isinstance(m_shops, str):
+            try:
+                m_shops = json.loads(m_shops)
+            except Exception:
+                m_shops = [m_shops]
+        shops_str = " ".join(m_shops).lower()
+        city_str = m_city.lower()
+
+        # Перевірка належності до напрямку ВВ (виробничі цехи, кава, догер тощо)
+        is_vv_mgr = (
+            "вц" in city_str or "цех" in city_str or "кава" in city_str or "догер" in city_str or "виробництв" in city_str
+            or "вц" in shops_str or "цех" in shops_str or "кава" in shops_str or "догер" in shops_str
+        )
+
+        if is_network:
+            if t_type == "ВВ" and is_vv_mgr:
+                matching.append(m)
+            elif t_type == "ТЗ" and not is_vv_mgr and (t_city in ("Всі міста", "all") or t_city == m_city):
+                matching.append(m)
+        else:
+            if m_city == t_city:
+                matching.append(m)
+
+    return matching
+
+
+async def reassign_direction_managers_to_territorial(territorial_uid: int) -> tuple[int, list[str]]:
+    """
+    Призначає територіала відповідальним (responsible_uid) за всіх відповідних керівників його напрямку.
+    Повертає кількість перенесених та їхні імена.
+    """
+    to_reassign = await get_potential_managers_to_reassign(territorial_uid)
+    if not to_reassign:
+        return 0, []
+
+    names = []
+    async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+        for m in to_reassign:
+            await db.execute("UPDATE managers SET responsible_uid = ? WHERE uid = ?", (territorial_uid, m["uid"]))
+            names.append(m.get("full_name") or f"UID {m['uid']}")
+        await db.commit()
+
+    return len(names), names
 
 async def update_manager_name(uid: int, new_name: str) -> bool:
     """Оновлює ПІБ керівника в таблиці managers та таблиці users."""

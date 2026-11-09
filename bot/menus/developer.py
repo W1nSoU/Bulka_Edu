@@ -10707,24 +10707,32 @@ async def developer_territorial_view(callback: CallbackQuery):
                 shops_set.add(s)
     shops_count = len(shops_set)
 
-    # Рахуємо стажерів та працівників по місту з урахуванням типу посади (ВВ або ТЗ)
-    from database.users import get_users_by_city
+    # Рахуємо стажерів та працівників з урахуванням типу посади (ВВ або ТЗ)
+    from database.users import get_users_by_city, get_users_by_position_type
     from bot.services.positions import get_all_positions
-    
-    positions = await get_all_positions()
-    pos_type_map = {p["name"]: p.get("territorial_type", "ТЗ") for p in positions}
-    
-    city_users = await get_users_by_city(city) if city else []
-    workers_count = 0
-    trainees_count = 0
-    for u in city_users:
-        u_pos = u.get("role") or u.get("position") or ""
-        u_type = pos_type_map.get(u_pos, "ТЗ")
-        if u_type == t_type:
-            if u.get("status") == "Працівник":
-                workers_count += 1
-            else:
-                trainees_count += 1
+
+    is_all_cities = city in ('Всі міста', 'all', 'Мережа', 'Вся мережа')
+    if is_all_cities:
+        city_display = "🌐 Вся мережа (Всі міста)"
+        all_type_users = await get_users_by_position_type(t_type)
+        workers_count = sum(1 for u in all_type_users if u.get("status") == "Працівник")
+        trainees_count = sum(1 for u in all_type_users if u.get("status") != "Працівник")
+    else:
+        city_display = html.escape(city or 'не вказано')
+        positions = await get_all_positions()
+        pos_type_map = {p["name"]: p.get("territorial_type", "ТЗ") for p in positions}
+
+        city_users = await get_users_by_city(city) if city else []
+        workers_count = 0
+        trainees_count = 0
+        for u in city_users:
+            u_pos = u.get("role") or u.get("position") or ""
+            u_type = pos_type_map.get(u_pos, "ТЗ")
+            if u_type == t_type:
+                if u.get("status") == "Працівник":
+                    workers_count += 1
+                else:
+                    trainees_count += 1
 
     total_subordinates = managers_count + workers_count + trainees_count
 
@@ -10732,9 +10740,9 @@ async def developer_territorial_view(callback: CallbackQuery):
         f"🗺 <b>Територіал:</b> {html.escape(name)}\n"
         f"👤 <b>Username:</b> {html.escape(username)}\n"
         f"🆔 <b>Telegram ID:</b> <code>{manager.get('uid')}</code>\n"
-        f"🏙 <b>Місто:</b> {html.escape(city or 'не вказано')}\n"
+        f"🏙 <b>Місто:</b> {city_display}\n"
         f"🏷 <b>Тип:</b> {type_label} ({t_type})\n\n"
-        f"📊 <b>Статистика по напрямку ({t_type} — {html.escape(city)}):</b>\n"
+        f"📊 <b>Статистика по напрямку ({t_type} - {city_display}):</b>\n"
         f"• 👔 Підлеглих керівників: {managers_count}\n"
         f"• 🏪 Закріплених магазинів: {shops_count}\n"
         f"• 🎓 Стажерів ({t_type}): {trainees_count}\n"
@@ -10747,6 +10755,7 @@ async def developer_territorial_view(callback: CallbackQuery):
         [InlineKeyboardButton(text="👔 Керівники Територіала", callback_data=f"dev_territorial_managers:{t_uid}:0")],
     ]
     if not is_obs:
+        buttons.append([InlineKeyboardButton(text="🔄 Перенести керівників", callback_data=f"dev_territorial_reassign_prompt:{t_uid}")])
         buttons.append([InlineKeyboardButton(text="🗑 Видалити", callback_data=f"dev_territorial_del:{t_uid}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_territorials_menu")])
 
@@ -10757,6 +10766,72 @@ async def developer_territorial_view(callback: CallbackQuery):
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
+
+async def developer_territorial_reassign_prompt(callback: CallbackQuery):
+    """Показує попередній перегляд керівників перед перенесенням під цього Територіала."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    t_uid = int(callback.data.split(":")[1])
+    manager = await get_manager_by_uid(t_uid)
+    if not manager:
+        await callback.answer("Територіала не знайдено!", show_alert=True)
+        return
+
+    from database.managers import get_potential_managers_to_reassign
+    potential = await get_potential_managers_to_reassign(t_uid)
+    t_name = manager.get("full_name") or f"UID {t_uid}"
+    t_type = manager.get("territorial_type") or "ТЗ"
+
+    if not potential:
+        await _edit_or_answer(
+            callback.message,
+            f"ℹ️ <b>Перенесення керівників ({t_type})</b>\n\n"
+            f"Для Територіала <b>{html.escape(t_name)}</b> не знайдено керівників, яких можна перепідпорядкувати.\n"
+            f"Усі керівники цього напрямку вже закріплені за нею або відсутні у базі.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад до картки", callback_data=f"dev_territorial_view:{t_uid}")]
+            ])
+        )
+        await callback.answer()
+        return
+
+    mgr_lines = []
+    for m in potential[:15]:
+        city_lbl = m.get("city") or "Без міста"
+        mgr_lines.append(f"• <b>{html.escape(m.get('full_name') or 'Керівник')}</b> ({html.escape(city_lbl)})")
+    if len(potential) > 15:
+        mgr_lines.append(f"<i>...та ще {len(potential) - 15} керівників</i>")
+
+    text = (
+        f"🔄 <b>Перенесення керівників під Територіала</b>\n\n"
+        f"Територіал: <b>{html.escape(t_name)}</b> ({t_type})\n"
+        f"Знайдено кандидатів на перепідпорядкування ({len(potential)} осіб):\n\n"
+        + "\n".join(mgr_lines) +
+        f"\n\n❓ Закріпити цих керівників за Територіалом {html.escape(t_name)}?"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Підтвердити перенесення", callback_data=f"dev_territorial_reassign_confirm:{t_uid}")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_territorial_view:{t_uid}")]
+    ])
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await callback.answer()
+
+async def developer_territorial_reassign_confirm(callback: CallbackQuery):
+    """Виконує перенесення керівників під цього Територіала."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    t_uid = int(callback.data.split(":")[1])
+    manager = await get_manager_by_uid(t_uid)
+    if not manager:
+        await callback.answer("Територіала не знайдено!", show_alert=True)
+        return
+
+    from database.managers import reassign_direction_managers_to_territorial
+    count, names = await reassign_direction_managers_to_territorial(t_uid)
+
+    await callback.answer(f"✅ Успішно перенесено {count} керівників!", show_alert=True)
+    await developer_territorial_view(callback)
 
 async def developer_territorial_managers(callback: CallbackQuery):
     """Список керівників конкретного Територіала з пагінацією."""
@@ -10872,7 +10947,9 @@ async def developer_add_territorial_start(callback: CallbackQuery, state: FSMCon
         await callback.answer("У базі немає міст. Додайте міста спочатку.", show_alert=True)
         return
 
-    buttons = []
+    buttons = [
+        [InlineKeyboardButton(text="🌐 Всі міста (Вся мережа)", callback_data="dev_t_city:all")]
+    ]
     for c in cities:
         buttons.append([InlineKeyboardButton(text=c['name'], callback_data=f"dev_t_city:{c['id']}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_territorials_menu")])
@@ -10892,9 +10969,13 @@ async def developer_add_territorial_city(callback: CallbackQuery, state: FSMCont
         await callback.answer("Ця дія доступна лише Адміністратору.", show_alert=True)
         return
 
-    city_id = int(callback.data.split(":")[1])
-    city_data = await get_city_by_id(city_id)
-    city_name = city_data['name']
+    raw_city = callback.data.split(":")[1]
+    if raw_city == "all":
+        city_name = "Всі міста"
+    else:
+        city_id = int(raw_city)
+        city_data = await get_city_by_id(city_id)
+        city_name = city_data['name']
 
     await state.update_data(t_city=city_name)
 
@@ -11377,6 +11458,8 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_list_territorials, lambda c: c.data == "dev_territorials_list")
     dp.callback_query.register(developer_territorial_view, lambda c: c.data and c.data.startswith("dev_territorial_view:"))
     dp.callback_query.register(developer_territorial_managers, lambda c: c.data and c.data.startswith("dev_territorial_managers:"))
+    dp.callback_query.register(developer_territorial_reassign_prompt, lambda c: c.data and c.data.startswith("dev_territorial_reassign_prompt:"))
+    dp.callback_query.register(developer_territorial_reassign_confirm, lambda c: c.data and c.data.startswith("dev_territorial_reassign_confirm:"))
     dp.callback_query.register(developer_territorial_del, lambda c: c.data and c.data.startswith("dev_territorial_del:") and not c.data.startswith("dev_territorial_del_confirm:"))
     dp.callback_query.register(developer_territorial_del_confirm, lambda c: c.data and c.data.startswith("dev_territorial_del_confirm:"))
 
