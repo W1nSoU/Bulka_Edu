@@ -3222,6 +3222,7 @@ async def _build_manager_card(manager_uid: int, is_admin: bool, is_territorial: 
 
     buttons = []
     if mgr.get("process") == "Керівник Стажер" and mgr.get("status") != "fired" and not is_observer:
+        buttons.append([InlineKeyboardButton(text="🎓 Перевести на Керівника", callback_data=f"dev_mgr_promote_ask:{manager_uid}")])
         buttons.append([InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{manager_uid}:mgr_team")])
     if mgr.get("status") != "fired" and not is_observer:
         buttons.append([InlineKeyboardButton(text="✏️ Змінити", callback_data=f"dev_mgr_edit_menu:{manager_uid}")])
@@ -3272,6 +3273,80 @@ async def dev_mgr_view(callback: CallbackQuery, state: FSMContext):
     text, kb = card_data
     photo_input = await get_user_avatar_input(callback.bot, manager_uid)
     await _send_or_edit_card_photo(callback, photo_input, text, reply_markup=kb)
+
+
+async def dev_mgr_promote_ask(callback: CallbackQuery, state: FSMContext):
+    """Підтвердження переведення керівника-стажера в статус повноцінного керівника."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    try:
+        manager_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        return await callback.answer("Помилка ідентифікатора.", show_alert=True)
+
+    mgr = await get_manager_by_uid(manager_uid)
+    if not mgr:
+        return await callback.answer("Керівника не знайдено!", show_alert=True)
+
+    if mgr.get("process") != "Керівник Стажер":
+        return await callback.answer("Керівник уже переведений або не є стажером.", show_alert=True)
+
+    full_name = mgr.get("full_name") or str(manager_uid)
+    text = (
+        f"🎓 <b>Підтвердження переведення на Керівника</b>\n\n"
+        f"Ви дійсно бажаєте перевести співробітника <b>{html.escape(full_name)}</b> у статус повноцінного Керівника?\n\n"
+        f"• Навчальні дні стажера будуть офіційно завершені.\n"
+        f"• Статус у системі зміниться на «Керівник».\n"
+        f"• Співробітник отримає сповіщення про успішне завершення стажування."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Так, перевести", callback_data=f"dev_mgr_promote_confirm:{manager_uid}")],
+        [InlineKeyboardButton(text="⬅️ Скасувати", callback_data=f"dev_mgr_view:{manager_uid}")]
+    ])
+    await _edit_or_answer(callback.message, text, reply_markup=kb)
+    await callback.answer()
+
+
+async def dev_mgr_promote_confirm(callback: CallbackQuery, state: FSMContext):
+    """Обробник остаточного переведення керівника-стажера."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    try:
+        manager_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        return await callback.answer("Помилка ідентифікатора.", show_alert=True)
+
+    mgr = await get_manager_by_uid(manager_uid)
+    if not mgr:
+        return await callback.answer("Керівника не знайдено!", show_alert=True)
+
+    if mgr.get("process") != "Керівник Стажер":
+        await callback.answer("Керівник вже має статус повноцінного Керівника.", show_alert=True)
+    else:
+        from database.managers import promote_manager_trainee
+        promoted = await promote_manager_trainee(manager_uid)
+        if promoted:
+            try:
+                congrat_text = (
+                    "🎉 <b>Вітаємо!</b>\n\n"
+                    "Ваше навчання та стажування на посаду Керівника успішно завершено!\n"
+                    "Вам надано повний доступ до функціоналу Керівника в системі Bulka Education."
+                )
+                await callback.bot.send_message(chat_id=manager_uid, text=congrat_text, parse_mode="HTML")
+            except Exception:
+                pass
+            await callback.answer("🎓 Керівника успішно переведено!", show_alert=True)
+        else:
+            await callback.answer("Не вдалося оновити статус.", show_alert=True)
+
+    is_obs = await is_observer_user(callback.from_user.id)
+    card_data = await _build_manager_card(manager_uid, is_admin, is_territorial, is_observer=is_obs, bot=callback.bot)
+    if card_data:
+        text, kb = card_data
+        photo_input = await get_user_avatar_input(callback.bot, manager_uid)
+        await _send_or_edit_card_photo(callback, photo_input, text, reply_markup=kb)
 
 
 async def dev_mgr_search_start(callback: CallbackQuery, state: FSMContext):
@@ -3353,9 +3428,14 @@ async def dev_mgr_edit_menu(callback: CallbackQuery, state: FSMContext):
     
     text = f"✏️ <b>Редагування керівника {html.escape(mgr.get('full_name') or str(manager_uid))}</b>\nОберіть дію:"
     buttons = [
-        [InlineKeyboardButton(text="🏪 Змінити магазин", callback_data=f"dev_mgr_ch_shops:{manager_uid}")],
-        [InlineKeyboardButton(text="👤 Змінити ПІБ", callback_data=f"dev_mgr_ch_name:{manager_uid}")],
-        [InlineKeyboardButton(text="🚫 Звільнити", callback_data=f"dev_mgr_fire_ask:{manager_uid}")],
+        [
+            InlineKeyboardButton(text="🏪 Змінити магазин", callback_data=f"dev_mgr_ch_shops:{manager_uid}"),
+            InlineKeyboardButton(text="🏙️ Змінити місто", callback_data=f"dev_mgr_ch_city:{manager_uid}")
+        ],
+        [
+            InlineKeyboardButton(text="👤 Змінити ПІБ", callback_data=f"dev_mgr_ch_name:{manager_uid}"),
+            InlineKeyboardButton(text="🚫 Звільнити", callback_data=f"dev_mgr_fire_ask:{manager_uid}")
+        ],
         [InlineKeyboardButton(text="⬅️ Назад до картки", callback_data=f"dev_mgr_view:{manager_uid}")]
     ]
     await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -3437,14 +3517,108 @@ async def dev_mgr_change_shops_start(callback: CallbackQuery, state: FSMContext)
     await state.set_state(DeveloperStates.waiting_edit_manager_shops)
     
     kb = await _build_edit_shops_keyboard(city, current_shops, manager_uid)
+    shops_in_city = await _get_shops_for_city(city)
+    empty_hint = ""
+    if not shops_in_city:
+        empty_hint = "\n\n⚠️ <i>У цьому місті ще немає доданих магазинів. Ви можете додати їх у меню «Керування магазинами» або зберегти без привʼязки точок.</i>"
     await _edit_or_answer(
         callback.message,
         f"🏪 Зміна магазинів для керівника <b>{html.escape(mgr.get('full_name') or '')}</b> (місто {city}):\n\n"
         f"Оберіть магазини (до 5):\n"
-        f"<i>💡 Працівники відкріплених магазинів будуть автоматично передані Територіалу після збереження.</i>",
+        f"<i>💡 Працівники відкріплених магазинів будуть автоматично передані Територіалу після збереження.</i>"
+        f"{empty_hint}",
         reply_markup=kb
     )
     await callback.answer()
+
+
+async def dev_mgr_change_city_start(callback: CallbackQuery, state: FSMContext):
+    """Початок зміни міста для керівника: вибір зі списку активних міст."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    try:
+        manager_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        return await callback.answer("Помилка ідентифікатора.", show_alert=True)
+
+    mgr = await get_manager_by_uid(manager_uid)
+    if not mgr:
+        return await callback.answer("Керівника не знайдено!", show_alert=True)
+
+    current_city = (mgr.get("city") or "").strip()
+    active_cities = await _get_active_city_names()
+
+    buttons = []
+    for idx, c in enumerate(active_cities):
+        label = f"🏙️ {c} (поточне)" if c.lower() == current_city.lower() else c
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"dev_mgr_city_set:{manager_uid}:{idx}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Скасувати", callback_data=f"dev_mgr_edit_menu:{manager_uid}")])
+
+    await _edit_or_answer(
+        callback.message,
+        f"🏙️ <b>Зміна міста для керівника {html.escape(mgr.get('full_name') or str(manager_uid))}</b>\n\n"
+        f"Поточне місто: <b>{html.escape(current_city or 'Не вказано')}</b>\n\n"
+        f"Оберіть нове місто зі списку нижче:\n"
+        f"<i>💡 Зверніть увагу: при зміні міста поточні магазини будуть відкріплені, "
+        f"а їхні працівники автоматично передані Територіалу. "
+        f"Після зміни міста ви одразу зможете закріпити магазини у новому місті.</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+
+async def dev_mgr_process_city_set(callback: CallbackQuery, state: FSMContext):
+    """Обробляє вибір нового міста для керівника."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    try:
+        parts = callback.data.split(":")
+        manager_uid = int(parts[1])
+        raw_city = parts[2]
+    except (ValueError, IndexError):
+        return await callback.answer("Помилка ідентифікатора.", show_alert=True)
+
+    mgr = await get_manager_by_uid(manager_uid)
+    if not mgr:
+        return await callback.answer("Керівника не знайдено!", show_alert=True)
+
+    new_city = await _resolve_city_from_callback_val(raw_city)
+    if not new_city:
+        return await callback.answer("Помилка розпізнавання міста.", show_alert=True)
+
+    current_city = (mgr.get("city") or "").strip()
+    if new_city.lower() == current_city.lower():
+        return await callback.answer("Керівник уже закріплений за цим містом.", show_alert=True)
+
+    from database.managers import update_manager_city
+    await update_manager_city(manager_uid, new_city)
+
+    # Встановлюємо FSM стан для вибору магазинів у новому місті
+    await state.update_data(
+        edit_mgr_uid=manager_uid,
+        manager_city=new_city,
+        original_shops=[],
+        selected_shops=[]
+    )
+    await state.set_state(DeveloperStates.waiting_edit_manager_shops)
+
+    kb = await _build_edit_shops_keyboard(new_city, [], manager_uid)
+    shops_in_city = await _get_shops_for_city(new_city)
+    empty_hint = ""
+    if not shops_in_city:
+        empty_hint = "\n\n⚠️ <i>У цьому місті ще немає доданих магазинів. Ви можете додати їх у меню «Керування магазинами» або зберегти без привʼязки точок.</i>"
+
+    await _edit_or_answer(
+        callback.message,
+        f"✅ Місто змінено на <b>{html.escape(new_city)}</b>!\n\n"
+        f"🏪 Тепер оберіть магазини для керівника <b>{html.escape(mgr.get('full_name') or '')}</b> (до 5):\n"
+        f"<i>💡 Працівники відкріплених магазинів минулого міста автоматично передані Територіалу.</i>"
+        f"{empty_hint}",
+        reply_markup=kb
+    )
+    await callback.answer("Місто успішно змінено!", show_alert=False)
 
 
 async def dev_mgr_edit_shop_toggle(callback: CallbackQuery, state: FSMContext):
@@ -11629,10 +11803,14 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(dev_mgr_search_start, lambda c: c.data == "dev_mgr_search_start")
     dp.message.register(dev_mgr_search_process, DeveloperStates.waiting_search_manager)
     dp.callback_query.register(dev_mgr_view, lambda c: c.data and c.data.startswith("dev_mgr_view:"))
+    dp.callback_query.register(dev_mgr_promote_ask, lambda c: c.data and c.data.startswith("dev_mgr_promote_ask:"))
+    dp.callback_query.register(dev_mgr_promote_confirm, lambda c: c.data and c.data.startswith("dev_mgr_promote_confirm:"))
     dp.callback_query.register(dev_mgr_edit_menu, lambda c: c.data and c.data.startswith("dev_mgr_edit_menu:"))
     dp.callback_query.register(dev_mgr_change_name_start, lambda c: c.data and c.data.startswith("dev_mgr_ch_name:"))
     dp.message.register(dev_mgr_change_name_process, DeveloperStates.waiting_edit_manager_name)
     dp.callback_query.register(dev_mgr_change_shops_start, lambda c: c.data and c.data.startswith("dev_mgr_ch_shops:"))
+    dp.callback_query.register(dev_mgr_change_city_start, lambda c: c.data and c.data.startswith("dev_mgr_ch_city:"))
+    dp.callback_query.register(dev_mgr_process_city_set, lambda c: c.data and c.data.startswith("dev_mgr_city_set:"))
     dp.callback_query.register(dev_mgr_edit_shop_toggle, DeveloperStates.waiting_edit_manager_shops, lambda c: c.data and c.data.startswith("dev_mgr_eshop_toggle:"))
     dp.callback_query.register(dev_mgr_edit_shop_done, DeveloperStates.waiting_edit_manager_shops, lambda c: c.data and c.data.startswith("dev_mgr_eshop_done:"))
     dp.callback_query.register(dev_mgr_transfer_shops_yes, lambda c: c.data and c.data.startswith("dev_mgr_tr_yes:"))

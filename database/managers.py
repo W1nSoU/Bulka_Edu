@@ -268,12 +268,15 @@ async def is_manager_trainee(user_id: int) -> bool:
 
 async def promote_manager_trainee(uid: int) -> bool:
     """Переводить керівника-стажера в статус повноцінного 'Керівник'."""
+    updated = False
     async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
-        await db.execute(
+        cursor = await db.execute(
             "UPDATE managers SET process = 'Керівник' WHERE uid = ? AND process = 'Керівник Стажер'",
             (uid,)
         )
         await db.commit()
+        if cursor.rowcount > 0:
+            updated = True
         
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -281,6 +284,50 @@ async def promote_manager_trainee(uid: int) -> bool:
             (uid,)
         )
         await db.commit()
+    return updated
+
+async def update_manager_city(uid: int, new_city: str) -> bool:
+    """
+    Оновлює місто для керівника, скидає його поточні магазини та
+    безпечно переводить підлеглих відкріплених магазинів до Територіала старого міста.
+    Також синхронізує поле city у таблиці users.
+    """
+    mgr = await get_manager_by_uid(uid)
+    if not mgr:
+        return False
+    
+    old_city = mgr.get("city") or ""
+    if old_city == new_city:
+        return True
+    
+    old_shops = mgr.get("shops") or []
+    if isinstance(old_shops, str):
+        try:
+            old_shops = json.loads(old_shops)
+        except Exception:
+            old_shops = [old_shops] if old_shops else []
+    old_shops = list(old_shops)
+
+    # 1. Безпечно переводимо підлеглих відкріплених магазинів до Територіала
+    if old_shops and old_city:
+        await reassign_removed_shops_users_to_territorial(old_city, old_shops, uid)
+
+    # 2. Оновлюємо таблицю managers: нове місто та порожній список магазинів
+    async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+        await db.execute(
+            "UPDATE managers SET city = ?, shops = '[]' WHERE uid = ?",
+            (new_city, uid)
+        )
+        await db.commit()
+
+    # 3. Синхронізуємо таблицю users
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET city = ? WHERE user_id = ?",
+            (new_city, uid)
+        )
+        await db.commit()
+
     return True
 
 async def get_manager_trainees_by_territorial(territorial_uid: int) -> list[dict]:
