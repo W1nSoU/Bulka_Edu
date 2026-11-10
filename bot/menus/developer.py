@@ -10896,8 +10896,18 @@ async def developer_territorial_view(callback: CallbackQuery):
     subordinate_managers = await get_managers_by_responsible(t_uid)
     managers_count = len(subordinate_managers)
 
-    # Збираємо унікальні магазини серед підлеглих керівників
+    # Збираємо унікальні магазини серед підлеглих керівників та власні магазини територіала
     shops_set = set()
+    own_shops = manager.get('shops') or []
+    if isinstance(own_shops, str):
+        try:
+            own_shops = json.loads(own_shops)
+        except Exception:
+            own_shops = []
+    for s in own_shops:
+        if s and s != "[]":
+            shops_set.add(s)
+
     for m in subordinate_managers:
         m_shops = m.get('shops') or []
         if isinstance(m_shops, str):
@@ -10906,7 +10916,7 @@ async def developer_territorial_view(callback: CallbackQuery):
             except Exception:
                 m_shops = []
         for s in m_shops:
-            if s:
+            if s and s != "[]":
                 shops_set.add(s)
     shops_count = len(shops_set)
 
