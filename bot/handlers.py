@@ -1353,9 +1353,12 @@ async def day_material_detail(callback: CallbackQuery):
             ]
         )
         if callback.message:
-            await callback.message.edit_text(
+            await _show_text_menu(
+                callback.message,
                 "Цей формат ще не містить матеріалів. Будь ласка, оберіть інший.",
-                reply_markup=kb
+                kb,
+                allow_edit=True,
+                allow_caption_edit=True,
             )
         await callback.answer()
         return
@@ -1384,7 +1387,7 @@ async def show_syllabus(callback: CallbackQuery):
         ])
         msg = "Зміст для вашої посади ще не додано або він тимчасово вимкнений."
         if callback.message:
-            await callback.message.edit_text(msg, reply_markup=kb)
+            await _show_text_menu(callback.message, msg, kb, allow_edit=True, allow_caption_edit=True)
         await callback.answer()
         return
 
