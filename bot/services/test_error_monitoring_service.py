@@ -65,13 +65,25 @@ async def perform_monthly_reset_if_due():
 async def get_intern_incomplete_open_test_days() -> list[tuple[int, int]]:
     """
     Знаходить усіх стажерів, які мають відкритий день, але не пройшли тест за цей день.
+    Виключає наглядачів, керівників, працівників та привілейованих користувачів.
     Повертає список кортежів (user_id, day_num).
     """
+    from database.users import MANAGEMENT_ROLES, _get_privileged_user_ids
+
     all_users = await get_all_users()
+    privileged_ids = await _get_privileged_user_ids()
     incomplete_tests = []
 
     for user in all_users:
         user_id = user["user_id"]
+        role = user.get("role")
+        user_status = user.get("status")
+
+        if user_id in privileged_ids or role in MANAGEMENT_ROLES or not role:
+            continue
+        if user_status in ("Працівник", "Завершено", "fired"):
+            continue
+
         days_overview = await get_days_overview(user_id)
         user_progress = await get_user_progress(user_id)
 

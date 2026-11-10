@@ -569,14 +569,19 @@ async def get_all_interns() -> list:
         ]
 
 async def get_all_workers() -> list:
-    """Повертає всіх працівників (status = 'Працівник'), сортуючи за ПІБ."""
+    """Повертає всіх працівників (status = 'Працівник'), які не є керівниками/HR/Dev, сортуючи за ПІБ."""
+    privileged_ids = await _get_privileged_user_ids()
+
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM users WHERE status = 'Працівник' ORDER BY full_name ASC"
         )
         rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
+        return [
+            dict(r) for r in rows
+            if r["user_id"] not in privileged_ids and r["role"] not in MANAGEMENT_ROLES
+        ]
 
 async def get_interns_in_progress_for_manager(manager_id, active_only=True):
     """

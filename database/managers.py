@@ -877,11 +877,23 @@ async def delete_observer_by_uid(uid: int) -> bool:
 async def is_user_without_store_manager(user: dict) -> bool:
     """
     Визначає, чи у користувача немає активного керівника магазину:
-    1. manager_id відсутній (None)
-    2. АБО manager_id є ID Територіала (закріплений на територіала тимчасово через відсутність керівника)
-    3. АБО для магазину користувача в його місті немає активного керівника в managers.
-    4. АБО закріплений керівник має статус 'fired'.
+    1. Користувачі з керівними ролями (Керівник, Наглядач, Територіал, Developer тощо) виключаються.
+    2. manager_id відсутній (None)
+    3. АБО manager_id є ID Територіала (закріплений на територіала тимчасово через відсутність керівника)
+    4. АБО для магазину користувача в його місті немає активного керівника в managers.
+    5. АБО закріплений керівник має статус 'fired'.
     """
+    from database.users import MANAGEMENT_ROLES
+    role = user.get("role")
+    if role in MANAGEMENT_ROLES:
+        return False
+
+    uid = user.get("user_id")
+    if uid:
+        own_mgr_record = await get_manager_by_uid(uid)
+        if own_mgr_record and own_mgr_record.get("status") != "fired":
+            return False
+
     manager_id = user.get("manager_id")
     if not manager_id:
         return True
