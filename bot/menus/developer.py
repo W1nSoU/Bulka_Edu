@@ -7012,13 +7012,19 @@ async def dev_survey_preview_look(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-ALL_SURVEY_ROLES = ["Працівник", "Стажер", "Керівник", "Наглядач"]
+ALL_SURVEY_ROLES = ["Працівник", "Стажер", "Керівник", "Наглядач", "Територіал", "Адміністратор"]
 
 def _build_survey_roles_keyboard(selected_roles: list[str]) -> InlineKeyboardMarkup:
     buttons = []
+    row = []
     for r in ALL_SURVEY_ROLES:
         mark = "✅" if r in selected_roles else "⬜️"
-        buttons.append([InlineKeyboardButton(text=f"{mark} {r}", callback_data=f"dev_survey_toggle_role:{r}")])
+        row.append(InlineKeyboardButton(text=f"{mark} {r}", callback_data=f"dev_survey_toggle_role:{r}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
 
     buttons.append([InlineKeyboardButton(text="➡️ Далі: Вибір міст", callback_data="dev_survey_to_city")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_survey_back_to_summary")])
@@ -7128,8 +7134,7 @@ async def dev_survey_select_city(callback: CallbackQuery, state: FSMContext):
         "🌊 <b>Параметри розсилки:</b>\n"
         "• Хвилі по 50 осіб з паузою 5-10 хв.\n"
         "• До 3-х нагадувань у робочий час (09:00 - 19:00)\n"
-        "• Максимальний термін: 72 години\n"
-        "• Позначка для користувачів: Анонімне\n\n"
+        "• Максимальний термін: 72 години\n\n"
         "Запустити розсилку опитування?"
     )
     buttons = [
