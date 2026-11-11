@@ -2549,7 +2549,7 @@ async def developer_users_add_role(callback: CallbackQuery, state: FSMContext):
         f"💼 Посада: <b>{role}</b>"
         f"{sup_text}\n\n"
         f"🔗 <b>Посилання для стажера:</b>\n"
-        f"<code>{link}</code>\n\n"
+        f"{link}\n\n"
         f"⚠️ Посилання діє 24 години і лише для одного користувача."
     )
 
@@ -3084,7 +3084,7 @@ async def _create_manager_invite_link(callback: CallbackQuery, state: FSMContext
         f"👥 <b>Переведення людей:</b> {transfer_label}\n"
         f"⏱️ <b>Термін дії:</b> 24 години\n\n"
         f"Надішліть це посилання майбутньому керівнику для проходження реєстрації:\n"
-        f"<code>{invite_link}</code>"
+        f"{invite_link}"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -11293,7 +11293,7 @@ async def developer_add_territorial_finish(callback: CallbackQuery, state: FSMCo
         f"👔 <b>Перенесення керівників міста:</b> {transfer_label}\n"
         f"⏱️ <b>Термін дії:</b> 24 години\n\n"
         f"Надішліть це посилання майбутньому територіалу для проходження реєстрації:\n"
-        f"<code>{invite_link}</code>"
+        f"{invite_link}"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -11388,7 +11388,7 @@ async def developer_observer_create_invite(callback: CallbackQuery):
     text = (
         "👁 <b>Персональне запрошення для Наглядача</b>\n\n"
         "🔗 <b>Одноразове посилання:</b>\n"
-        f"<code>{invite_link}</code>\n\n"
+        f"{invite_link}\n\n"
         "⏳ <b>Термін дії:</b> 24 години (на 1 людину).\n"
         "👤 Надішліть це посилання людині, яку призначаєте Наглядачем.\n"
         "Після переходу за посиланням користувач введе своє ПІБ та автоматично отримає роль <b>Наглядач</b>."
@@ -11442,7 +11442,7 @@ async def developer_observer_office_invite(callback: CallbackQuery):
     text = (
         "🏢 <b>Спільне посилання для офісу (Наглядачі)</b>\n\n"
         "🔗 <b>Багаторазове посилання:</b>\n"
-        f"<code>{invite_link}</code>\n\n"
+        f"{invite_link}\n\n"
         f"⏳ <b>Діє до:</b> {expires_at_str} (24 год)\n"
         f"👥 <b>Вже приєдналося за цим посиланням:</b> {used_count} осіб\n"
         "♾ <b>Ліміт переходів:</b> Без обмежень (для всього офісу)\n\n"
