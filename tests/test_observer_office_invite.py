@@ -8,6 +8,7 @@ import database.tokens as tokens_mod
 import database.managers as managers_mod
 import database.users as users_mod
 import database.shops as shops_mod
+import database.hr as hr_mod
 from database.schema import init_db
 
 
@@ -29,6 +30,9 @@ class TestObserverOfficeInvite(unittest.IsolatedAsyncioTestCase):
         self._orig_shops_mgr = shops_mod.MANAGERS_DB_PATH
         self._orig_shops_tok = shops_mod.TOKENS_DB_PATH
 
+        self._orig_hr_db = hr_mod.DB_PATH
+        self._orig_hr_mgr = hr_mod.MANAGERS_DB_PATH
+
         database.DB_PATH = self.users_db
         schema_mod.DB_PATH = self.users_db
         users_mod.DB_PATH = self.users_db
@@ -38,8 +42,11 @@ class TestObserverOfficeInvite(unittest.IsolatedAsyncioTestCase):
         shops_mod.DB_PATH = self.users_db
         shops_mod.MANAGERS_DB_PATH = self.managers_db
         shops_mod.TOKENS_DB_PATH = self.tokens_db
+        hr_mod.DB_PATH = self.users_db
+        hr_mod.MANAGERS_DB_PATH = self.managers_db
 
         await init_db()
+        await hr_mod.init_hr_db()
         await tokens_mod.init_tokens_db()
         await managers_mod.init_managers_db()
 
@@ -53,6 +60,8 @@ class TestObserverOfficeInvite(unittest.IsolatedAsyncioTestCase):
         shops_mod.DB_PATH = self._orig_shops_db
         shops_mod.MANAGERS_DB_PATH = self._orig_shops_mgr
         shops_mod.TOKENS_DB_PATH = self._orig_shops_tok
+        hr_mod.DB_PATH = self._orig_hr_db
+        hr_mod.MANAGERS_DB_PATH = self._orig_hr_mgr
         self._tmpdir.cleanup()
 
     async def test_multi_use_office_token_allows_multiple_observers(self):
@@ -213,6 +222,43 @@ class TestObserverOfficeInvite(unittest.IsolatedAsyncioTestCase):
         # 3. Перевірка оновлення
         data_after = await tokens_mod.get_token_data(token)
         self.assertIn(777001, data_after["extra_data"]["used_by_list"])
+
+
+    async def test_access_middleware_allows_fsm_registration_and_observers(self):
+        from bot.middleware import AccessMiddleware
+        from unittest.mock import AsyncMock, MagicMock
+        from aiogram.types import Message, User
+
+        middleware = AccessMiddleware()
+        handler = AsyncMock(return_value="OK")
+
+        # 1. Новий невідомий користувач відправляє своє ПІБ без FSM стану -> блокується
+        user_new = User(id=999888, is_bot=False, first_name="Петро")
+        msg_without_state = MagicMock(spec=Message)
+        msg_without_state.from_user = user_new
+        msg_without_state.text = "Петренко Петро Петрович"
+        msg_without_state.answer = AsyncMock()
+
+        res = await middleware(handler, msg_without_state, {"state": None})
+        self.assertIsNone(res)
+        msg_without_state.answer.assert_called_once()
+        self.assertIn("Доступ обмежено", msg_without_state.answer.call_args[0][0])
+
+        # 2. Новий невідомий користувач відправляє ПІБ з активним станом реєстрації -> ДОЗВОЛЕНО!
+        handler.reset_mock()
+        mock_state = MagicMock()
+        mock_state.get_state = AsyncMock(return_value="RegistrationStates:waiting_for_full_name")
+
+        res_fsm = await middleware(handler, msg_without_state, {"state": mock_state})
+        self.assertEqual(res_fsm, "OK")
+        handler.assert_called_once_with(msg_without_state, {"state": mock_state})
+
+        # 3. Зареєстрований наглядач відправляє будь-яке повідомлення -> ДОЗВОЛЕНО!
+        await managers_mod.add_observer(999888, "Петренко Петро", "petro")
+        handler.reset_mock()
+        res_obs = await middleware(handler, msg_without_state, {"state": None})
+        self.assertEqual(res_obs, "OK")
+        handler.assert_called_once()
 
 
 if __name__ == "__main__":

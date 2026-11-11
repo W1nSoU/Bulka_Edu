@@ -79,8 +79,11 @@ class RegistrationStates(StatesGroup):
     waiting_for_full_name = State()
 
 async def start_menu(message: types.Message, state: FSMContext):
-    args = message.text.split()[1:] if len(message.text.split()) > 1 else []
+    raw_text = message.text or ""
+    args = raw_text.split()[1:] if len(raw_text.split()) > 1 else []
     user_id = message.from_user.id
+    logger.info(f"👉 /start received: uid={user_id} (@{message.from_user.username}), text='{raw_text}', args={args}")
+
     is_observer = await is_observer_user(user_id)
     is_developer = await is_developer_user(user_id)
     is_territorial = await is_territorial_user(user_id)
@@ -125,27 +128,38 @@ async def start_menu(message: types.Message, state: FSMContext):
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT user_id, role FROM users WHERE user_id = ?", (user_id,))
+        cursor = await db.execute("SELECT user_id, role, full_name FROM users WHERE user_id = ?", (user_id,))
         existing_user = await cursor.fetchone()
     
     valid_referral = False
-    if message.text.startswith("/start") and len(args) > 0:
-        start_arg = args[0]
-        parts = start_arg.split('-')
-        
-        if len(parts) == 2:
-            try:
+    if raw_text.startswith("/start") and len(args) > 0:
+        start_arg = args[0].strip()
+        logger.info(f"🔑 Deep-link parsing start_arg='{start_arg}' for uid={user_id}")
+
+        token_data = None
+        manager_id = None
+        token = None
+
+        # Спроба 1: Розділити за першим дефісом: <manager_id>-<token>
+        if '-' in start_arg:
+            parts = start_arg.split('-', 1)
+            if parts[0].isdigit():
                 manager_id = int(parts[0])
-            except ValueError:
-                await message.answer(
-                    "⚠️ <b>Помилка реєстрації!</b>\n\n"
-                    "Посилання має некоректний формат. "
-                    "Попросіть керівника надіслати нове запрошення."
-                )
-                return
-            token = parts[1].strip()
-            
-            token_data = await get_token_data(token)
+                token = parts[1].strip()
+                tok_res = await get_token_data(token)
+                if tok_res.get("status") in ("ok", "expired", "already_used"):
+                    token_data = tok_res
+
+        # Спроба 2: Весь start_arg сам є токеном (якщо посилання містить start=<token>)
+        if not token_data:
+            tok_res = await get_token_data(start_arg)
+            if tok_res.get("status") in ("ok", "expired", "already_used"):
+                token_data = tok_res
+                token = start_arg
+                if token_data.get("manager_id"):
+                    manager_id = token_data["manager_id"]
+
+        if token_data:
             logger.info(
                 f"🔑 Реєстрація deep-link /start: user_id={user_id} (@{message.from_user.username}), "
                 f"manager_id={manager_id}, token='{token}', status='{token_data.get('status')}', role='{token_data.get('role')}'"
@@ -153,7 +167,7 @@ async def start_menu(message: types.Message, state: FSMContext):
             
             if token_data.get("status") == "ok":
                 role = token_data["role"]
-                city = token_data["city"]
+                city = token_data.get("city")
                 shop = token_data.get("shop")  # Get shop from token data
                 shops = token_data.get("shops") or ([shop] if shop else [])
                 extra_data = token_data.get("extra_data") or {}
@@ -163,9 +177,10 @@ async def start_menu(message: types.Message, state: FSMContext):
                     await message.answer(error_text)
                     return
                 
+                valid_referral = True
                 # Start registration flow
                 await state.update_data(
-                    reg_manager_id=manager_id,
+                    reg_manager_id=manager_id or token_data.get("manager_id"),
                     reg_role=role,
                     reg_city=city,
                     reg_shop=shop,
@@ -203,7 +218,10 @@ async def start_menu(message: types.Message, state: FSMContext):
                     "Зверніться до свого керівника за коректним посиланням."
                 )
                 return
-        elif len(parts) >= 4:
+        
+        # Спроба 3: Legacy формат з 4+ частин: manager_id-role-city-shop
+        parts = start_arg.split('-')
+        if len(parts) >= 4:
             try:
                 import urllib.parse
                 manager_id = int(parts[0])
@@ -215,6 +233,7 @@ async def start_menu(message: types.Message, state: FSMContext):
                     await message.answer(error_text)
                     return
                 
+                valid_referral = True
                 # Start registration flow
                 await state.update_data(
                     reg_manager_id=manager_id,
@@ -230,7 +249,7 @@ async def start_menu(message: types.Message, state: FSMContext):
                 return
                 
             except Exception as e:
-                print(f"Помилка обробки deep-link параметрів: {e}")
+                logger.error(f"Помилка обробки legacy deep-link параметрів: {e}")
 
     is_privileged = await is_privileged_user(user_id)
 
@@ -242,19 +261,29 @@ async def start_menu(message: types.Message, state: FSMContext):
                 full_name=message.from_user.full_name,
             )
         else:
+            logger.warning(f"⛔ /start access denied: new user uid={user_id} (@{message.from_user.username}), args={args}")
             await message.answer(
                 "⚠️ <b>Доступ обмежено</b> ⚠️\n\n"
                 "Вибачте, але у вас немає доступу до корпоративної навчальної платформи BULKA.\n\n"
                 "Доступ надається виключно працівникам компанії за запрошенням від керівника.\n\n"
-                "Якщо ви співробітник компанії, будь ласка, зверніться до свого керівника для отримання посилання-запрошення."
+                "💡 <i>Якщо вам надіслали посилання, перейдіть саме за ним (наприклад, t.me/bulka_education_bot?start=...) та натисніть «Розпочати».</i>"
             )
             return
 
-    # Додатковий захист: якщо користувач має керівну роль, але не має активних привілеїв, блокуємо доступ
+    # Додатковий захист: якщо користувач має керівну роль, але не має активних привілеїв, перевіряємо доступ
     if existing_user and not valid_referral:
         u_role = existing_user["role"]
         from database.users import MANAGEMENT_ROLES
         if u_role in MANAGEMENT_ROLES and not (is_manager or is_territorial or is_developer or is_hr or is_observer):
+            # Якщо користувач у users.db має роль Наглядач, автоматично відновлюємо його статус у managers.db
+            if u_role == "Наглядач":
+                from database.managers import add_observer
+                logger.info(f"🔄 Auto-syncing observer {user_id} from users.db to managers.db")
+                await add_observer(user_id, existing_user["full_name"] or message.from_user.full_name or "", message.from_user.username)
+                await show_observer_main_menu(message, allow_edit=False)
+                return
+
+            logger.warning(f"⛔ /start access denied: existing user uid={user_id} with inactive role '{u_role}'")
             await message.answer(
                 "⚠️ <b>Доступ обмежено</b> ⚠️\n\n"
                 "Вибачте, але у вас немає доступу до корпоративної навчальної платформи BULKA.\n\n"
