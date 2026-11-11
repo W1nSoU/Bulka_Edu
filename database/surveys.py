@@ -259,7 +259,7 @@ async def get_matching_survey_recipients(
 ) -> List[int]:
     """
     Повертає список Telegram user_id діючих користувачів, які підпадають під умови опитування:
-    - target_roles: підмножина ['Працівник', 'Стажер', 'Керівник', 'Територіал', 'Наглядач']
+    - target_roles: підмножина ['Працівник', 'Стажер', 'Керівник', 'Територіал', 'Наглядач', 'Адміністратор']
     - target_city: назва міста або None / 'ALL' (для всіх міст)
     """
     matched_uids = set()
@@ -378,6 +378,32 @@ async def get_matching_survey_recipients(
                     for row in await cursor.fetchall():
                         if row[0]:
                             matched_uids.add(row[0])
+            except Exception:
+                pass
+
+        # 6. Адміністратори: role IN ('Адміністратор', 'Developer', 'Dev') або managers.db
+        if "Адміністратор" in target_roles:
+            query = "SELECT user_id FROM users WHERE role IN ('Адміністратор', 'Developer', 'Dev')"
+            cursor = await db.execute(query)
+            for row in await cursor.fetchall():
+                if row[0]:
+                    matched_uids.add(row[0])
+
+            from database.managers import MANAGERS_DB_PATH
+            try:
+                async with aiosqlite.connect(MANAGERS_DB_PATH) as m_db:
+                    query = "SELECT uid FROM managers WHERE process IN ('Developer', 'Адміністратор') AND (status = 'active' OR status IS NULL)"
+                    cursor = await m_db.execute(query)
+                    for row in await cursor.fetchall():
+                        if row[0]:
+                            matched_uids.add(row[0])
+            except Exception:
+                pass
+
+            try:
+                from bot.config import MAIN_DEVELOPER_ID
+                if MAIN_DEVELOPER_ID and MAIN_DEVELOPER_ID > 0:
+                    matched_uids.add(MAIN_DEVELOPER_ID)
             except Exception:
                 pass
 

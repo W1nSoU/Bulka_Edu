@@ -7773,7 +7773,7 @@ async def _show_news_roles_selection(callback: CallbackQuery, state: FSMContext)
     data = await state.get_data()
     selected_roles = set(data.get("selected_roles", ["Працівник", "Стажер"]))
 
-    all_roles = ["Працівник", "Стажер", "Керівник", "Територіал", "Наглядач"]
+    all_roles = ["Працівник", "Стажер", "Керівник", "Територіал", "Наглядач", "Адміністратор"]
     buttons = []
     for r in all_roles:
         mark = "✅ " if r in selected_roles else "⬜️ "
