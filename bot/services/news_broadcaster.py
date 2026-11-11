@@ -2,15 +2,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+import time
 
 from database.news import (
     NEWS_REACTIONS,
     record_deliveries_batch,
-    update_news_stats
+    update_news_stats,
+    get_news_by_id,
+    get_news_reactions_summary,
+    format_news_reactions_line,
+    update_text_with_reactions_line,
+    get_delivered_news_messages
 )
 from bot.utils.message_utils import sanitize_telegram_html
 
@@ -64,6 +70,9 @@ async def send_news_batch(
     deliveries = []
 
     clean_text = sanitize_telegram_html(text)
+    if news_id:
+        initial_line = format_news_reactions_line({})
+        clean_text = update_text_with_reactions_line(clean_text, initial_line)
     reply_markup = get_news_reaction_keyboard(news_id) if news_id else None
 
     effective_media_type = media_type
@@ -271,3 +280,146 @@ def start_news_wave_broadcast(
             media_type=media_type
         )
     )
+
+
+class NewsReactionSyncQueue:
+    """
+    Фоновий менеджер черги синхронізації лічильників реакцій новин для всіх отримувачів.
+    Використовує дебаунс (за замовчуванням 15 сек, макс 30 сек) та безпечно оновлює
+    повідомлення отримувачів пакетами, не перевищуючи ліміти Telegram.
+    """
+
+    def __init__(self, debounce_seconds: float = 15.0, max_wait_seconds: float = 30.0, db_path: Optional[str] = None):
+        self.debounce_seconds = debounce_seconds
+        self.max_wait_seconds = max_wait_seconds
+        self.db_path = db_path
+        self._pending: Dict[int, Dict[str, Any]] = {}
+
+    def schedule_sync(self, bot: Bot, news_id: int, trigger_user_id: Optional[int] = None) -> None:
+        """Планує відкладену синхронізацію після кліку реакції."""
+        now = time.time()
+        info = self._pending.get(news_id)
+        if not info:
+            info = {
+                "first_triggered": now,
+                "last_triggered": now,
+                "exclude_uids": set(),
+                "timer_task": None,
+            }
+            self._pending[news_id] = info
+        else:
+            info["last_triggered"] = now
+
+        if trigger_user_id:
+            info["exclude_uids"].add(trigger_user_id)
+
+        # Скасовуємо попередній таймер дебаунсу, якщо він активний
+        prev_task = info.get("timer_task")
+        if prev_task and not prev_task.done():
+            prev_task.cancel()
+
+        # Розраховуємо дебаунс з урахуванням граничного max_wait_seconds
+        elapsed = now - info["first_triggered"]
+        remaining_max = max(0.0, self.max_wait_seconds - elapsed)
+        delay = min(self.debounce_seconds, remaining_max)
+
+        info["timer_task"] = asyncio.create_task(self._delayed_sync(bot, news_id, delay))
+
+    async def _delayed_sync(self, bot: Bot, news_id: int, delay: float) -> None:
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await self._execute_sync(bot, news_id)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.exception(f"[NewsReactionSyncQueue] Unexpected error during sync for news {news_id}: {e}")
+
+    async def _execute_sync(self, bot: Bot, news_id: int) -> None:
+        info = self._pending.pop(news_id, None)
+        exclude_uids = info.get("exclude_uids", set()) if info else set()
+
+        import database.news as news_db_module
+        effective_db_path = self.db_path or news_db_module.DB_PATH
+
+        news_row = await get_news_by_id(news_id, db_path=effective_db_path)
+        if not news_row:
+            return
+
+        summary = await get_news_reactions_summary(news_id, db_path=effective_db_path)
+        new_reactions_line = format_news_reactions_line(summary.get("breakdown", {}))
+
+        clean_base_text = sanitize_telegram_html(news_row.get("text", ""))
+        full_updated_text = update_text_with_reactions_line(clean_base_text, new_reactions_line)
+
+        messages = await get_delivered_news_messages(news_id, db_path=effective_db_path)
+        if not messages:
+            return
+
+        # Завантажуємо реакції користувачів для збереження їхніх індивідуальних позначок ✅
+        import aiosqlite
+        user_reactions = {}
+        try:
+            async with aiosqlite.connect(effective_db_path) as db:
+                cursor = await db.execute("SELECT user_id, reaction FROM news_reactions WHERE news_id = ?", (news_id,))
+                rows = await cursor.fetchall()
+                user_reactions = {r[0]: r[1] for r in rows}
+        except Exception as e:
+            logger.warning(f"[NewsReactionSyncQueue] Could not load user reactions for news {news_id}: {e}")
+
+        logger.info(
+            f"[NewsReactionSyncQueue] Syncing live reactions for news {news_id} to {len(messages)} recipients: '{new_reactions_line}'"
+        )
+
+        for item in messages:
+            uid = item.get("user_id")
+            mid = item.get("message_id")
+            if not uid or not mid:
+                continue
+
+            # Користувача, який щойно голосував, пропускаємо (його повідомлення вже оновлено миттєво)
+            if uid in exclude_uids:
+                continue
+
+            user_reaction = user_reactions.get(uid)
+            kb = get_news_reaction_keyboard(news_id, current_reaction=user_reaction)
+
+            try:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=uid,
+                        message_id=mid,
+                        text=full_updated_text,
+                        reply_markup=kb,
+                        parse_mode="HTML"
+                    )
+                except TelegramBadRequest as tbe:
+                    err_lower = str(tbe).lower()
+                    if "message is not modified" in err_lower:
+                        pass
+                    elif "no text in the message to edit" in err_lower or "there is no text" in err_lower:
+                        # Спроба редагувати caption, якщо повідомлення було з фото/відео
+                        await bot.edit_message_caption(
+                            chat_id=uid,
+                            message_id=mid,
+                            caption=full_updated_text,
+                            reply_markup=kb,
+                            parse_mode="HTML"
+                        )
+                    elif any(term in err_lower for term in ["message to edit not found", "chat not found", "bot was blocked", "user is deactivated"]):
+                        pass
+                    else:
+                        logger.debug(f"[NewsReactionSyncQueue] Edit error for uid={uid}: {tbe}")
+            except TelegramRetryAfter as tra:
+                logger.warning(f"[NewsReactionSyncQueue] Flood wait {tra.retry_after}s for news {news_id}")
+                await asyncio.sleep(tra.retry_after)
+            except Exception as e:
+                err_lower = str(e).lower()
+                if not any(term in err_lower for term in ["blocked", "deactivated", "not found", "not modified"]):
+                    logger.debug(f"[NewsReactionSyncQueue] Failed to edit for uid={uid}: {e}")
+
+            # Захисна мікропауза 0.05с між викликами
+            await asyncio.sleep(0.05)
+
+
+news_reaction_sync_queue = NewsReactionSyncQueue()

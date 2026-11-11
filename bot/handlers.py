@@ -2909,8 +2909,14 @@ async def news_reaction_handler(callback: CallbackQuery):
         return
 
     user_id = callback.from_user.id
-    from database.news import upsert_news_reaction, NEWS_REACTIONS
-    from bot.services.news_broadcaster import get_news_reaction_keyboard
+    from database.news import (
+        upsert_news_reaction,
+        NEWS_REACTIONS,
+        get_news_reactions_summary,
+        format_news_reactions_line,
+        update_text_with_reactions_line,
+    )
+    from bot.services.news_broadcaster import get_news_reaction_keyboard, news_reaction_sync_queue
 
     if emoji not in NEWS_REACTIONS:
         await callback.answer("Невідома реакція.", show_alert=True)
@@ -2921,9 +2927,11 @@ async def news_reaction_handler(callback: CallbackQuery):
         await callback.answer("Помилка збереження реакції.", show_alert=True)
         return
 
-    await callback.answer("✅ Вашу реакцію успішно надіслано!")
+    await callback.answer("✅ Реакцію враховано!")
 
-    reaction_line = f"Ваша анонімна реакція: {emoji}"
+    # Розраховуємо новий лічильник для оновлення поточного повідомлення
+    summary = await get_news_reactions_summary(news_id)
+    reactions_line = format_news_reactions_line(summary.get("breakdown", {}))
     new_kb = get_news_reaction_keyboard(news_id, current_reaction=emoji)
 
     msg = callback.message
@@ -2934,11 +2942,7 @@ async def news_reaction_handler(callback: CallbackQuery):
     if not caption_or_text:
         return
 
-    import re
-    if re.search(r"Ваша анонімна реакція:\s*.+", caption_or_text):
-        new_text = re.sub(r"Ваша анонімна реакція:\s*.+", reaction_line, caption_or_text)
-    else:
-        new_text = f"{caption_or_text.rstrip()}\n\n{reaction_line}"
+    new_text = update_text_with_reactions_line(caption_or_text, reactions_line)
 
     try:
         if msg.photo:
@@ -2947,6 +2951,12 @@ async def news_reaction_handler(callback: CallbackQuery):
             await msg.edit_text(text=new_text, reply_markup=new_kb, parse_mode="HTML")
     except Exception as e:
         logger.debug(f"[News Reaction] Failed to edit message: {e}")
+
+    # Ставимо завдання у фонову чергу для оновлення лічильників у решти отримувачів
+    try:
+        news_reaction_sync_queue.schedule_sync(callback.bot, news_id, trigger_user_id=user_id)
+    except Exception as e:
+        logger.warning(f"[News Reaction] Failed to schedule sync: {e}")
 
 
 def register_handlers(dp: Dispatcher):

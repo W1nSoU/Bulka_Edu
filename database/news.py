@@ -11,13 +11,50 @@ from . import DB_PATH
 
 logger = logging.getLogger(__name__)
 
-NEWS_REACTIONS = ["👎", "🤔", "❤️", "🔥"]
+NEWS_REACTIONS = ["🔥", "😁", "❤️", "🤔"]
 
 
 def get_current_kyiv_time_str() -> str:
     """Повертає поточний час у часовому поясі Europe/Kyiv у форматі YYYY-MM-DD HH:MM:SS."""
     tz = pytz.timezone(TIMEZONE)
     return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_news_reactions_line(breakdown: dict[str, int]) -> str:
+    """
+    Формує рядок сумарних лічильників формату:
+    0 🔥 | 0 😁 | 0 ❤️ | 0 🤔
+    """
+    fire = breakdown.get("🔥", 0)
+    laugh = breakdown.get("😁", 0) + breakdown.get("👎", 0)
+    heart = breakdown.get("❤️", 0)
+    think = breakdown.get("🤔", 0)
+    return f"{fire} 🔥 | {laugh} 😁 | {heart} ❤️ | {think} 🤔"
+
+
+def update_text_with_reactions_line(raw_text: str, new_line: str) -> str:
+    """
+    Замінює існуючий рядок лічильників у тексті на новий, або додає його в кінець.
+    Також очищає застарілий рядок 'Ваша анонімна реакція: ...' якщо такий є.
+    """
+    if not raw_text:
+        return new_line
+
+    text = raw_text.rstrip()
+    # Очищаємо старий рядок вибору користувача, якщо він був
+    text = re.sub(r"\n*Ваша анонімна реакція:\s*.+", "", text).rstrip()
+
+    # Регекс для пошуку рядка лічильника: X 🔥 | Y 😁 | Z ❤️ | W 🤔 (або зі старим 👎)
+    pattern = r"\d+\s*🔥\s*\|\s*\d+\s*[😁👎]\s*\|\s*\d+\s*❤️\s*\|\s*\d+\s*🤔"
+    if re.search(pattern, text):
+        return re.sub(pattern, new_line, text)
+    
+    # Зворотний порядок емодзі якщо був старий шаблон
+    pattern_old = r"\d+\s*[👎😁]\s*\|\s*\d+\s*🤔\s*\|\s*\d+\s*❤️\s*\|\s*\d+\s*🔥"
+    if re.search(pattern_old, text):
+        return re.sub(pattern_old, new_line, text)
+
+    return f"{text}\n\n{new_line}"
 
 
 def normalize_hashtag(raw_name: str) -> str:
@@ -108,6 +145,8 @@ async def init_news_db(db_path: str = DB_PATH) -> None:
         await db.execute("""
         CREATE INDEX IF NOT EXISTS idx_news_reactions_news_id ON news_reactions(news_id)
         """)
+        # Міграція: оновлюємо застарілу реакцію дизлайку на сміх
+        await db.execute("UPDATE news_reactions SET reaction = '😁' WHERE reaction = '👎'")
         await db.commit()
     logger.info("News database initialized successfully.")
 
@@ -436,6 +475,28 @@ async def get_news_reactions_summary(
 
     total = sum(breakdown.values())
     return {"total": total, "breakdown": breakdown}
+
+
+async def get_delivered_news_messages(
+    news_id: int,
+    exclude_user_id: Optional[int] = None,
+    db_path: str = DB_PATH
+) -> List[Dict[str, Any]]:
+    """Повертає список успішно доставлених повідомлень новини з message_id."""
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        if exclude_user_id:
+            cursor = await db.execute(
+                "SELECT user_id, message_id FROM news_deliveries WHERE news_id = ? AND status = 'delivered' AND message_id IS NOT NULL AND user_id != ?",
+                (news_id, exclude_user_id)
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT user_id, message_id FROM news_deliveries WHERE news_id = ? AND status = 'delivered' AND message_id IS NOT NULL",
+                (news_id,)
+            )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
 
 
 async def get_news_failed_deliveries_detailed(

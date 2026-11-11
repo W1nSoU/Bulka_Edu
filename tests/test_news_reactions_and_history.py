@@ -100,7 +100,7 @@ class TestNewsReactionsAndHistory(unittest.IsolatedAsyncioTestCase):
         row_active = kb_active.inline_keyboard[0]
         texts = [btn.text for btn in row_active]
         self.assertIn("❤️ ✅", texts)
-        self.assertIn("👎", texts)
+        self.assertIn("😁", texts)
         self.assertIn("🤔", texts)
         self.assertIn("🔥", texts)
 
@@ -188,7 +188,7 @@ class TestNewsReactionsAndHistory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["total"], 2)
         self.assertEqual(summary["breakdown"]["❤️"], 1)
         self.assertEqual(summary["breakdown"]["🔥"], 1)
-        self.assertEqual(summary["breakdown"]["👎"], 0)
+        self.assertEqual(summary["breakdown"]["😁"], 0)
         self.assertEqual(summary["breakdown"]["🤔"], 0)
 
         # 3. Користувач 101 змінює свою реакцію на "🔥"

@@ -181,10 +181,10 @@ async def generate_news_report_xlsx(news_id: int, db_path: str = DB_PATH) -> io.
     r_idx += 1
 
     reaction_labels = {
-        "👎": "Не подобається",
-        "🤔": "Замислився",
+        "🔥": "Супер / Вогонь",
+        "😁": "Смішно / Позитивно",
         "❤️": "Чудово / Любов",
-        "🔥": "Супер / Вогонь"
+        "🤔": "Замислився",
     }
 
     breakdown = reactions_summary.get("breakdown", {})

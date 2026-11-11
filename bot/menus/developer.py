@@ -8252,10 +8252,10 @@ async def dev_news_view_handler(callback: CallbackQuery):
     reaction_pct = round((total_reactions / sent * 100), 1) if sent > 0 else 0
 
     breakdown = summary.get("breakdown", {})
-    r_bad = breakdown.get("👎", 0)
-    r_think = breakdown.get("🤔", 0)
-    r_love = breakdown.get("❤️", 0)
     r_fire = breakdown.get("🔥", 0)
+    r_laugh = breakdown.get("😁", 0) + breakdown.get("👎", 0)
+    r_love = breakdown.get("❤️", 0)
+    r_think = breakdown.get("🤔", 0)
 
     created_at = news.get("created_at") or "—"
     roles_list = news.get("selected_roles") or []
@@ -8276,7 +8276,7 @@ async def dev_news_view_handler(callback: CallbackQuery):
         f"❌ Не вдалося доставити: <b>{failed}</b> ({failed_pct}%)\n"
         f"💬 Отримано реакцій: <b>{total_reactions}</b> ({reaction_pct}%)\n\n"
         f"<b>Емоції:</b>\n"
-        f"👎 {r_bad}  |  🤔 {r_think}  |  ❤️ {r_love}  |  🔥 {r_fire}"
+        f"🔥 {r_fire}  |  😁 {r_laugh}  |  ❤️ {r_love}  |  🤔 {r_think}"
     )
 
     buttons = [
