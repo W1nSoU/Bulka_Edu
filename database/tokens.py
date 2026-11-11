@@ -147,6 +147,9 @@ async def save_token_data(token, manager_id, role, city):
 
 async def get_token_data(token):
     """Отримує дані по токену, перевіряючи, що він ще дійсний і не використаний"""
+    if not token:
+        return {"status": "not_found"}
+    token = str(token).strip()
     now = datetime.now(pytz.timezone(TIMEZONE))
     
     async with aiosqlite.connect(TOKENS_DB_PATH) as db:
@@ -157,6 +160,14 @@ async def get_token_data(token):
         )
         token_data = await cursor.fetchone()
         
+        # Якщо токен не знайдено за точним збігом, перевіряємо без урахування регістру (на випадок зміни URL месенджером)
+        if not token_data:
+            cursor = await db.execute(
+                "SELECT * FROM tokens WHERE token = ? COLLATE NOCASE",
+                (token,)
+            )
+            token_data = await cursor.fetchone()
+
         # Якщо токен не знайдено
         if not token_data:
             return {"status": "not_found"}
@@ -236,19 +247,28 @@ async def use_token(token, user_id):
     Returns:
         bool: True, якщо токен успішно позначено, False інакше
     """
+    if not token:
+        return False
+    token = str(token).strip()
     now = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
     
     async with aiosqlite.connect(TOKENS_DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT used_by, extra_data FROM tokens WHERE token = ?", 
+            "SELECT token, used_by, extra_data FROM tokens WHERE token = ?", 
             (token,)
         )
         token_data = await cursor.fetchone()
+        if not token_data:
+            cursor = await db.execute(
+                "SELECT token, used_by, extra_data FROM tokens WHERE token = ? COLLATE NOCASE", 
+                (token,)
+            )
+            token_data = await cursor.fetchone()
         
         if not token_data:
             return False  # Токен не існує
             
-        used_by, extra_raw = token_data[0], token_data[1]
+        canonical_token, used_by, extra_raw = token_data[0], token_data[1], token_data[2]
         extra = {}
         if extra_raw:
             try:
@@ -267,7 +287,7 @@ async def use_token(token, user_id):
             extra["used_by_list"] = used_list
             await db.execute(
                 "UPDATE tokens SET extra_data = ?, used_at = ? WHERE token = ?",
-                (json.dumps(extra, ensure_ascii=False), now, token)
+                (json.dumps(extra, ensure_ascii=False), now, canonical_token)
             )
             await db.commit()
             return True
@@ -278,7 +298,7 @@ async def use_token(token, user_id):
         # Позначаємо одноразовий токен як використаний
         await db.execute(
             "UPDATE tokens SET used_by = ?, used_at = ? WHERE token = ?",
-            (user_id, now, token)
+            (user_id, now, canonical_token)
         )
         await db.commit()
         return True

@@ -1349,7 +1349,7 @@ async def dev_att_add_shop_confirm_handler(callback: CallbackQuery, bot: Bot):
         show_alert=True
     )
     # Повертаємось на екран активної хвилі
-    callback.data = f"dev_att_active_wave:{wave_id}"
+    callback = callback.model_copy(update={"data": f"dev_att_active_wave:{wave_id}"})
     await dev_att_active_wave_handler(callback)
 
 
@@ -1487,7 +1487,7 @@ async def dev_att_grant_retake_handler(callback: CallbackQuery, bot: Bot):
         except Exception as e:
             logger.warning(f"Не вдалося сповістити користувача {user_id} про перездачу: {e}")
 
-        callback.data = f"dev_att_sh_dt:{wave_shop_id}"
+        callback = callback.model_copy(update={"data": f"dev_att_sh_dt:{wave_shop_id}"})
         await dev_att_shop_details_handler(callback)
     else:
         await callback.answer("⚠️ Не вдалося надати дозвіл на перездачу.", show_alert=True)

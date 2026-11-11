@@ -2043,11 +2043,11 @@ async def developer_user_card_back_handler(callback: CallbackQuery, state: FSMCo
         sh_parts = ret_code.split("_")
         c_idx = int(sh_parts[1])
         s_idx = int(sh_parts[2])
-        callback.data = f"dev_u_shop:{c_idx}:{s_idx}"
+        callback = callback.model_copy(update={"data": f"dev_u_shop:{c_idx}:{s_idx}"})
         await developer_users_shop_selected(callback)
     elif ret_code.startswith("mg_"):
         mgr_uid = int(ret_code.split("_")[1])
-        callback.data = f"dev_u_mgr:{mgr_uid}"
+        callback = callback.model_copy(update={"data": f"dev_u_mgr:{mgr_uid}"})
         await developer_users_manager_selected(callback)
     elif ret_code.startswith("ct_"):
         c_idx = int(ret_code.split("_")[1])
@@ -4763,7 +4763,7 @@ async def developer_material_delete_confirm(callback: CallbackQuery):
             # Show the new page at the same index (or the last one if we deleted the end)
             new_page_idx = page if page < len(pages) else len(pages) - 1
             # Mock callback to trigger pagination view
-            callback.data = f"dev_pag:{material_id}:{day}:{new_page_idx}:{ctype}"
+            callback = callback.model_copy(update={"data": f"dev_pag:{material_id}:{day}:{new_page_idx}:{ctype}"})
             await developer_pagination_handler(callback)
     else:
         await callback.answer("Помилка: сторінка вже не існує.")
@@ -9947,7 +9947,7 @@ async def dev_pos_set_type(callback: CallbackQuery):
 
     type_label = POSITION_TYPES.get(new_type, new_type)
     await callback.answer(f"✅ Тип змінено на {type_label}")
-    callback.data = f"dev_pos_view:{pos_id}"
+    callback = callback.model_copy(update={"data": f"dev_pos_view:{pos_id}"})
     await dev_pos_view(callback)
 
 
@@ -9967,7 +9967,7 @@ async def dev_pos_toggle_type(callback: CallbackQuery):
     
     type_label = POSITION_TYPES.get(new_type, new_type)
     await callback.answer(f"✅ Тип змінено на {type_label}")
-    callback.data = f"dev_pos_view:{pos_id}"
+    callback = callback.model_copy(update={"data": f"dev_pos_view:{pos_id}"})
     await dev_pos_view(callback)
 
 

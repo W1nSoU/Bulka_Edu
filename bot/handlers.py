@@ -143,9 +143,13 @@ async def start_menu(message: types.Message, state: FSMContext):
                     "Попросіть керівника надіслати нове запрошення."
                 )
                 return
-            token = parts[1]
+            token = parts[1].strip()
             
             token_data = await get_token_data(token)
+            logger.info(
+                f"🔑 Реєстрація deep-link /start: user_id={user_id} (@{message.from_user.username}), "
+                f"manager_id={manager_id}, token='{token}', status='{token_data.get('status')}', role='{token_data.get('role')}'"
+            )
             
             if token_data.get("status") == "ok":
                 role = token_data["role"]

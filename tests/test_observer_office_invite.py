@@ -7,6 +7,7 @@ import database.schema as schema_mod
 import database.tokens as tokens_mod
 import database.managers as managers_mod
 import database.users as users_mod
+import database.shops as shops_mod
 from database.schema import init_db
 
 
@@ -24,6 +25,9 @@ class TestObserverOfficeInvite(unittest.IsolatedAsyncioTestCase):
         self._orig_mgr_db = managers_mod.DB_PATH
         self._orig_mgr_path = managers_mod.MANAGERS_DB_PATH
         self._orig_tok_path = tokens_mod.TOKENS_DB_PATH
+        self._orig_shops_db = shops_mod.DB_PATH
+        self._orig_shops_mgr = shops_mod.MANAGERS_DB_PATH
+        self._orig_shops_tok = shops_mod.TOKENS_DB_PATH
 
         database.DB_PATH = self.users_db
         schema_mod.DB_PATH = self.users_db
@@ -31,6 +35,9 @@ class TestObserverOfficeInvite(unittest.IsolatedAsyncioTestCase):
         managers_mod.DB_PATH = self.users_db
         managers_mod.MANAGERS_DB_PATH = self.managers_db
         tokens_mod.TOKENS_DB_PATH = self.tokens_db
+        shops_mod.DB_PATH = self.users_db
+        shops_mod.MANAGERS_DB_PATH = self.managers_db
+        shops_mod.TOKENS_DB_PATH = self.tokens_db
 
         await init_db()
         await tokens_mod.init_tokens_db()
@@ -43,6 +50,9 @@ class TestObserverOfficeInvite(unittest.IsolatedAsyncioTestCase):
         managers_mod.DB_PATH = self._orig_mgr_db
         managers_mod.MANAGERS_DB_PATH = self._orig_mgr_path
         tokens_mod.TOKENS_DB_PATH = self._orig_tok_path
+        shops_mod.DB_PATH = self._orig_shops_db
+        shops_mod.MANAGERS_DB_PATH = self._orig_shops_mgr
+        shops_mod.TOKENS_DB_PATH = self._orig_shops_tok
         self._tmpdir.cleanup()
 
     async def test_multi_use_office_token_allows_multiple_observers(self):
@@ -179,6 +189,30 @@ class TestObserverOfficeInvite(unittest.IsolatedAsyncioTestCase):
             state.update_data.assert_called_with(manager_city=long_city, selected_shops=[])
         finally:
             cities_mod.DB_PATH = orig_cities_db
+
+
+    async def test_token_case_insensitivity_and_strip(self):
+        admin_uid = 999003
+        token = await tokens_mod.generate_token(
+            manager_id=admin_uid,
+            role="Наглядач",
+            expires_in_hours=24,
+            extra_data={"multi_use": True, "used_by_list": []}
+        )
+
+        # 1. Пошук токена у нижньому регістрі з пробілами
+        lower_token = f"  {token.lower()} \n"
+        data_lower = await tokens_mod.get_token_data(lower_token)
+        self.assertEqual(data_lower.get("status"), "ok")
+        self.assertEqual(data_lower.get("role"), "Наглядач")
+
+        # 2. Використання токена у нижньому регістрі
+        used_ok = await tokens_mod.use_token(lower_token, 777001)
+        self.assertTrue(used_ok)
+
+        # 3. Перевірка оновлення
+        data_after = await tokens_mod.get_token_data(token)
+        self.assertIn(777001, data_after["extra_data"]["used_by_list"])
 
 
 if __name__ == "__main__":
