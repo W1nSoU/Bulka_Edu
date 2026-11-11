@@ -95,7 +95,7 @@ async def survey_start_callback(callback: CallbackQuery, state: FSMContext):
         await mark_survey_recipient_completed(survey_id, user_id)
         await callback.message.edit_text(
             "🎉 <b>Дякуємо за участь в опитуванні!</b>\n\n"
-            "Ми цінуємо вашу думку та щодня стараємось, аби сімʼя BULKA ставала ще кращою. 🥐✨"
+            "Ми цінуємо вашу думку та щодня стараємось, аби команда BULKA ставала ще кращою. 🥐✨"
         )
         await callback.answer()
         return
@@ -170,7 +170,7 @@ async def survey_choice_answer_callback(callback: CallbackQuery, state: FSMConte
         await mark_survey_recipient_completed(survey_id, user_id)
         await callback.message.edit_text(
             "🎉 <b>Дякуємо за участь в опитуванні!</b>\n\n"
-            "Ми цінуємо вашу думку та щодня стараємось, аби сімʼя BULKA ставала ще кращою. 🥐✨",
+            "Ми цінуємо вашу думку та щодня стараємось, аби команда BULKA ставала ще кращою. 🥐✨",
             parse_mode="HTML"
         )
         await callback.answer("Відповідь збережено!", show_alert=False)
@@ -216,7 +216,7 @@ async def survey_free_text_answer_message(message: Message, state: FSMContext):
         await mark_survey_recipient_completed(survey_id, user_id)
         await message.answer(
             "🎉 <b>Дякуємо за участь в опитуванні!</b>\n\n"
-            "Ми цінуємо вашу думку та щодня стараємось, аби сімʼя BULKA ставала ще кращою. 🥐✨",
+            "Ми цінуємо вашу думку та щодня стараємось, аби команда BULKA ставала ще кращою. 🥐✨",
             parse_mode="HTML"
         )
 
