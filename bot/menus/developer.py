@@ -1974,16 +1974,21 @@ async def _show_user_profile_card(
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=card_back_cb)]
         ])
     else:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{user_id}:{ret_code}"),
-                InlineKeyboardButton(text="✍️ Змінити", callback_data=f"dev_user_modify:{user_id}:{ret_code}")
-            ],
-            [
-                InlineKeyboardButton(text="❌ Видалити", callback_data=f"dev_user_delete_confirm:{user_id}:{ret_code}"),
-                InlineKeyboardButton(text="⬅️ Назад", callback_data=card_back_cb)
-            ]
+        user_info = await get_user_details(user_id)
+        card_buttons = []
+        if user_info and user_info.get("status") != "Працівник":
+            card_buttons.append([
+                InlineKeyboardButton(text="🎓 Перевести у працівники", callback_data=f"dev_u_promote_prompt:{user_id}:{ret_code}")
+            ])
+        card_buttons.append([
+            InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{user_id}:{ret_code}"),
+            InlineKeyboardButton(text="✍️ Змінити", callback_data=f"dev_user_modify:{user_id}:{ret_code}")
         ])
+        card_buttons.append([
+            InlineKeyboardButton(text="❌ Видалити", callback_data=f"dev_user_delete_confirm:{user_id}:{ret_code}"),
+            InlineKeyboardButton(text="⬅️ Назад", callback_data=card_back_cb)
+        ])
+        kb = InlineKeyboardMarkup(inline_keyboard=card_buttons)
 
     photo_input = await get_user_avatar_input(bot, user_id)
     if isinstance(event, CallbackQuery):
@@ -8780,6 +8785,69 @@ async def developer_process_change_city(callback: CallbackQuery, state: FSMConte
     await callback.answer(f"Місто змінено на {new_city}!", show_alert=True)
     await _rebuild_user_profile_view(callback, user_id, state)
 
+# --- Promote User to Worker ---
+
+async def developer_user_promote_prompt_handler(callback: CallbackQuery, state: FSMContext):
+    """Показ вікна підтвердження перед переведенням стажера в статус Працівника."""
+    try:
+        parts = callback.data.split(":")
+        user_id = int(parts[1])
+        ret_code = parts[2] if len(parts) > 2 else "menu"
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ID користувача.", show_alert=True)
+        return
+
+    user = await get_user_details(user_id)
+    if not user:
+        await callback.answer("Користувача не знайдено.", show_alert=True)
+        return
+
+    name = user.get("full_name") or user.get("username") or f"ID {user_id}"
+    text = (
+        f"🎓 <b>Переведення у статус Працівника</b>\n\n"
+        f"Ви дійсно бажаєте перевести стажера <b>{html.escape(name)}</b> у статус <b>Працівника</b>?\n\n"
+        f"ℹ️ <i>Всі навчальні дні посади буде автоматично відкрито та зараховано як успішно пройдені. Співробітник отримає святкове повідомлення у боті.</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Так, перевести", callback_data=f"dev_u_promote_confirm:{user_id}:{ret_code}")],
+        [InlineKeyboardButton(text="⬅️ Скасувати", callback_data=f"dev_user_profile_back:{user_id}:{ret_code}")]
+    ])
+    await _send_text_screen(callback, text, reply_markup=kb)
+    await callback.answer()
+
+async def developer_user_promote_confirm_handler(callback: CallbackQuery, state: FSMContext):
+    """Підтвердження переведення стажера в статус Працівника з панелі адміністратора/розробника."""
+    try:
+        parts = callback.data.split(":")
+        user_id = int(parts[1])
+        ret_code = parts[2] if len(parts) > 2 else "menu"
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ID користувача.", show_alert=True)
+        return
+
+    user = await get_user_details(user_id)
+    if not user:
+        await callback.answer("Користувача не знайдено в системі.", show_alert=True)
+        return
+
+    from database.users import update_user_role
+    await update_user_role(user_id, "Працівник", actor_id=callback.from_user.id)
+
+    # Вітальне повідомлення стажеру
+    try:
+        congrats_text = (
+            "🎉 <b>Вітаємо! Ви стали Працівником Bulka!</b>\n\n"
+            "Ваш керівник підтвердив, що ви готові розпочати свій шлях у нашій команді.\n\n"
+            "🍞 Ласкаво просимо до родини Bulka - тут починається ваша справжня кар'єра!\n\n"
+            "<i>Бажаємо вам натхнення, зростання та яскравих успіхів!</i> 🌟"
+        )
+        await callback.bot.send_message(user_id, congrats_text, parse_mode="HTML")
+    except Exception:
+        pass
+
+    await callback.answer("✅ Статус оновлено: Працівник", show_alert=False)
+    await _rebuild_user_profile_view(callback, user_id, state, ret_code=ret_code)
+
 # --- Delete User ---
 
 async def developer_user_delete_confirm(callback: CallbackQuery, state: FSMContext):
@@ -11961,6 +12029,8 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_process_change_role, lambda c: c.data and (c.data.startswith("dev_process_change_role:") or c.data.startswith("dev_set_role:")))
     dp.callback_query.register(developer_change_city_start, lambda c: c.data and c.data.startswith("dev_change_city:"))
     dp.callback_query.register(developer_process_change_city, lambda c: c.data and (c.data.startswith("dev_process_change_city:") or c.data.startswith("dev_set_city:")))
+    dp.callback_query.register(developer_user_promote_prompt_handler, lambda c: c.data and c.data.startswith("dev_u_promote_prompt:"))
+    dp.callback_query.register(developer_user_promote_confirm_handler, lambda c: c.data and c.data.startswith("dev_u_promote_confirm:"))
     dp.callback_query.register(developer_user_delete_confirm, lambda c: c.data and c.data.startswith("dev_user_delete_confirm:"))
     dp.callback_query.register(developer_user_delete_perform, lambda c: c.data and c.data.startswith("dev_user_delete_perform:"))
     

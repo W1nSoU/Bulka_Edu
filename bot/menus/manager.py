@@ -1465,9 +1465,11 @@ async def _show_intern_details(
     bot = event.bot
     report = await get_user_days_report(intern_id, bot=bot)
     
-    buttons = [
-        [InlineKeyboardButton(text="❌ Звільнити", callback_data=f"mgr_fire_prompt:{intern_id}:{back_callback}")]
-    ]
+    user = await get_user_details(intern_id)
+    buttons = []
+    if user and user.get("status") != "Працівник":
+        buttons.append([InlineKeyboardButton(text="🎓 Перевести у працівники", callback_data=f"mgr_promote_prompt:{intern_id}:{back_callback}")])
+    buttons.append([InlineKeyboardButton(text="❌ Звільнити", callback_data=f"mgr_fire_prompt:{intern_id}:{back_callback}")])
     if back_callback and back_callback != "mgr_my_team":
         buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)])
     buttons.append([InlineKeyboardButton(text="👥 До працівників", callback_data="mgr_my_team")])
@@ -1704,6 +1706,71 @@ async def manager_fire_confirm_handler(callback: CallbackQuery):
     ])
     await _edit_menu_message(callback.message, text, reply_markup=kb, photo_path=PHOTO_MGR_TEAM)
 
+async def manager_promote_prompt_handler(callback: CallbackQuery):
+    """Екран підтвердження переведення стажера в статус Працівника."""
+    if not await _ensure_manager(callback):
+        return
+    try:
+        parts = callback.data.split(":", 2)
+        intern_id = int(parts[1])
+        back_cb = parts[2] if len(parts) > 2 else "mgr_my_team"
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+
+    intern = await get_user_details(intern_id)
+    if not intern:
+        await callback.answer("Стажера не знайдено в системі.", show_alert=True)
+        return
+
+    name = intern.get("full_name") or intern.get("username") or f"ID {intern_id}"
+    text = (
+        f"🎓 <b>Переведення у статус Працівника</b>\n\n"
+        f"Ви дійсно бажаєте перевести стажера <b>{html.escape(name)}</b> у статус <b>Працівника</b>?\n\n"
+        f"ℹ️ <i>Всі навчальні дні посади буде автоматично відкрито та зараховано як успішно пройдені. Співробітник отримає святкове повідомлення у боті.</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Так, перевести", callback_data=f"mgr_promote_confirm:{intern_id}:{back_cb}")],
+        [InlineKeyboardButton(text="⬅️ Скасувати", callback_data=f"mgr_view_intern_{intern_id}:{back_cb}")]
+    ])
+    await _edit_menu_message(callback.message, text, reply_markup=kb, photo_path=PHOTO_MGR_TEAM)
+    await callback.answer()
+
+async def manager_promote_confirm_handler(callback: CallbackQuery):
+    """Підтвердження переведення стажера в статус Працівника."""
+    if not await _ensure_manager(callback):
+        return
+    try:
+        parts = callback.data.split(":", 2)
+        intern_id = int(parts[1])
+        back_cb = parts[2] if len(parts) > 2 else "mgr_my_team"
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+
+    intern = await get_user_details(intern_id)
+    if not intern:
+        await callback.answer("Стажера не знайдено в системі.", show_alert=True)
+        return
+
+    await update_user_role(intern_id, "Працівник", actor_id=callback.from_user.id)
+    full_name = intern.get("full_name") or intern.get("username") or f"ID {intern_id}"
+
+    # Вітальне повідомлення стажеру
+    try:
+        congrats_text = (
+            "🎉 <b>Вітаємо! Ви стали Працівником Bulka!</b>\n\n"
+            "Ваш керівник підтвердив, що ви готові розпочати свій шлях у нашій команді.\n\n"
+            "🍞 Ласкаво просимо до родини Bulka - тут починається ваша справжня кар'єра!\n\n"
+            "<i>Бажаємо вам натхнення, зростання та яскравих успіхів!</i> 🌟"
+        )
+        await callback.bot.send_message(intern_id, congrats_text, parse_mode="HTML")
+    except Exception:
+        pass
+
+    await callback.answer("✅ Статус оновлено: Працівник", show_alert=False)
+    await _show_intern_details(callback, intern_id, back_callback=back_cb)
+
 # --- Register ---
 def register_manager_handlers(dp: Dispatcher):
     dp.callback_query.register(manager_menu, lambda c: c.data == "manager_menu")
@@ -1739,6 +1806,10 @@ def register_manager_handlers(dp: Dispatcher):
     dp.callback_query.register(intern_promote_handler, lambda c: c.data and c.data.startswith("intern_promote_"))
     dp.callback_query.register(intern_dismiss_handler, lambda c: c.data and c.data.startswith("intern_dismiss_"))
     
+    # Promote from card
+    dp.callback_query.register(manager_promote_prompt_handler, lambda c: c.data and c.data.startswith("mgr_promote_prompt:"))
+    dp.callback_query.register(manager_promote_confirm_handler, lambda c: c.data and c.data.startswith("mgr_promote_confirm:"))
+
     # Fire from card
     dp.callback_query.register(manager_fire_prompt_handler, lambda c: c.data and c.data.startswith("mgr_fire_prompt:"))
     dp.callback_query.register(manager_fire_confirm_handler, lambda c: c.data and c.data.startswith("mgr_fire_confirm:"))
