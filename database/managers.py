@@ -897,6 +897,17 @@ async def is_user_without_store_manager(user: dict) -> bool:
     manager_id = user.get("manager_id")
     if not manager_id:
         return True
+
+    # Перевіряємо чи сам закріплений керівник активний
+    mgr = await get_manager_by_uid(manager_id)
+    if not mgr or mgr.get("status") == "fired":
+        return True
+
+    # Виняток: Шилоносова Валерія Олексіївна курує свої заклади (Tiko Kava, Dogger) напряму
+    # як повноцінний керівник, тому для її підлеглих керівник вважається наявним.
+    mgr_full_name = (mgr.get("full_name") or "").lower()
+    if "шилоносова" in mgr_full_name:
+        return False
     
     # Якщо manager_id належить територіалу - це тимчасова прив'язка через відсутність керівника
     if await is_territorial_user(manager_id):
@@ -908,11 +919,6 @@ async def is_user_without_store_manager(user: dict) -> bool:
         shop_mgr = await get_manager_by_shop(city, shop)
         if not shop_mgr or shop_mgr.get("status") == "fired":
             return True
-            
-    # Перевіряємо чи сам закріплений керівник активний
-    mgr = await get_manager_by_uid(manager_id)
-    if not mgr or mgr.get("status") == "fired":
-        return True
 
     return False
 
