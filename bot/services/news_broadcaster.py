@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import html
 import logging
 import random
 from typing import Optional, List, Tuple, Dict, Any
@@ -16,7 +17,8 @@ from database.news import (
     get_news_reactions_summary,
     format_news_reactions_line,
     update_text_with_reactions_line,
-    get_delivered_news_messages
+    get_delivered_news_messages,
+    get_news_failed_deliveries_detailed
 )
 from bot.utils.message_utils import sanitize_telegram_html
 
@@ -235,16 +237,45 @@ async def dispatch_news_waves(
 
     if admin_chat_id:
         try:
+            report_lines = [
+                "🏁 <b>Розсилку новини повністю завершено!</b>",
+                "───────────────────",
+                f"📬 Всього отримувачів: <b>{total_recipients}</b>",
+                f"✅ Успішно доставлено: <b>{total_sent}</b>",
+                f"❌ Не вдалося доставити: <b>{total_failed}</b>",
+                f"🌊 Всього хвиль: <b>{total_waves}</b>"
+            ]
+
+            if total_failed > 0 and news_id:
+                try:
+                    failed_details = await get_news_failed_deliveries_detailed(news_id)
+                    if failed_details:
+                        report_lines.append("\n⚠️ <b>Не отримали повідомлення:</b>")
+                        display_items = failed_details[:15]
+                        for fd in display_items:
+                            uid = fd.get("user_id")
+                            name = fd.get("full_name") or (f"@{fd['username']}" if fd.get("username") else f"ID {uid}")
+                            name_clean = html.escape(str(name))
+                            
+                            meta_parts = []
+                            if fd.get("role"):
+                                meta_parts.append(str(fd["role"]))
+                            if fd.get("shop"):
+                                meta_parts.append(str(fd["shop"]))
+                            meta_str = f" | {', '.join(meta_parts)}" if meta_parts else ""
+                            
+                            reason = fd.get("error_reason") or "Помилка доставки"
+                            report_lines.append(f"• <b>{name_clean}</b> (<code>{uid}</code>{html.escape(meta_str)}) — {html.escape(str(reason))}")
+                        
+                        if len(failed_details) > 15:
+                            remaining = len(failed_details) - 15
+                            report_lines.append(f"<i>...та ще {remaining} осіб</i>")
+                except Exception as fe:
+                    logger.warning(f"[News Broadcaster] Could not attach failed details to report: {fe}")
+
             await bot.send_message(
                 chat_id=admin_chat_id,
-                text=(
-                    f"🏁 <b>Розсилку новини повністю завершено!</b>\n"
-                    f"───────────────────\n"
-                    f"📬 Всього отримувачів: <b>{total_recipients}</b>\n"
-                    f"✅ Успішно доставлено: <b>{total_sent}</b>\n"
-                    f"❌ Не вдалося доставити: <b>{total_failed}</b>\n"
-                    f"🌊 Всього хвиль: <b>{total_waves}</b>"
-                ),
+                text="\n".join(report_lines),
                 parse_mode="HTML"
             )
         except Exception as e:
