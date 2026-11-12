@@ -165,6 +165,7 @@ class DeveloperStates(StatesGroup):
     waiting_notify_decision = State()
     waiting_notify_message = State()
     # Стани для зміни даних користувача
+    waiting_change_fullname = State()
     waiting_change_manager_id = State()
     waiting_change_role = State()
     waiting_change_city = State()
@@ -8583,6 +8584,7 @@ async def developer_user_modify_menu(callback: CallbackQuery, state: FSMContext)
 
     await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Змінити ПІБ", callback_data=f"dev_change_fullname:{user_id}")],
         [InlineKeyboardButton(text="Змінити керівника", callback_data=f"dev_change_manager:{user_id}")],
         [InlineKeyboardButton(text="Змінити посаду", callback_data=f"dev_change_role:{user_id}")],
         [InlineKeyboardButton(text="Змінити місто", callback_data=f"dev_change_city:{user_id}")],
@@ -8590,6 +8592,74 @@ async def developer_user_modify_menu(callback: CallbackQuery, state: FSMContext)
     ])
     await _send_text_screen(callback, "✍️ <b>Що саме ви хочете змінити?</b>", reply_markup=kb)
     await callback.answer()
+
+async def developer_change_fullname_start(callback: CallbackQuery, state: FSMContext):
+    try:
+        user_id = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ID користувача.", show_alert=True)
+        return
+
+    await state.set_state(DeveloperStates.waiting_change_fullname)
+    await state.update_data(user_id_to_modify=user_id)
+    await _edit_or_answer(
+        callback.message,
+        "Введіть нове повне ПІБ користувача (Прізвище Ім'я По батькові):",
+        reply_markup=_cancel_keyboard(f"dev_user_modify:{user_id}")
+    )
+    await callback.answer()
+
+async def developer_process_change_fullname(message: Message, state: FSMContext):
+    data = await state.get_data()
+    user_id = data.get("user_id_to_modify")
+    if not user_id:
+        await message.answer("⚠️ Помилка стану: користувача не знайдено.")
+        await state.clear()
+        return
+
+    raw_text = (message.text or "").strip()
+    words = raw_text.split()
+    if len(words) < 3:
+        await message.answer(
+            "❌ ПІБ має містити щонайменше 3 слова (Прізвище, Ім'я, По батькові).\n"
+            "Спробуйте ще раз або натисніть «Скасувати»:",
+            reply_markup=_cancel_keyboard(f"dev_user_modify:{user_id}")
+        )
+        return
+
+    new_fullname = " ".join(words)
+    user_details = await get_user_details(user_id)
+    if not user_details:
+        await message.answer("⚠️ Користувача не знайдено.")
+        await state.clear()
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET full_name = ? WHERE user_id = ?",
+            (new_fullname, user_id)
+        )
+        await db.commit()
+
+    await state.clear()
+    await message.answer(f"✅ ПІБ користувача успішно змінено на <b>{html.escape(new_fullname)}</b>!")
+
+    try:
+        report = await get_user_days_report(user_id)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"dev_days_manage:{user_id}"),
+                InlineKeyboardButton(text="✍️ Змінити", callback_data=f"dev_user_modify:{user_id}")
+            ],
+            [
+                InlineKeyboardButton(text="❌ Видалити", callback_data=f"dev_user_delete_confirm:{user_id}"),
+                InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_users_menu")
+            ]
+        ])
+        await message.answer(report, reply_markup=kb)
+    except Exception as e:
+        logger = get_logger()
+        logger.error(f"Failed to display updated user profile after fullname change: {e}")
 
 async def developer_change_manager_start(callback: CallbackQuery, state: FSMContext):
     try:
@@ -12023,6 +12093,8 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_toggle_day_status, lambda c: c.data and c.data.startswith("dev_toggle_day:"))
     dp.callback_query.register(developer_user_profile_back, lambda c: c.data and c.data.startswith("dev_user_profile_back:"))
     dp.callback_query.register(developer_user_modify_menu, lambda c: c.data and c.data.startswith("dev_user_modify:"))
+    dp.callback_query.register(developer_change_fullname_start, lambda c: c.data and c.data.startswith("dev_change_fullname:"))
+    dp.message.register(developer_process_change_fullname, DeveloperStates.waiting_change_fullname)
     dp.callback_query.register(developer_change_manager_start, lambda c: c.data and c.data.startswith("dev_change_manager:"))
     dp.message.register(developer_process_change_manager, DeveloperStates.waiting_change_manager_id)
     dp.callback_query.register(developer_change_role_start, lambda c: c.data and c.data.startswith("dev_change_role:"))
