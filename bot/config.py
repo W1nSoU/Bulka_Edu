@@ -24,7 +24,7 @@ TOKEN_EXPIRY_HOURS = int(os.getenv("TOKEN_EXPIRY_HOURS", "24"))
 TOKEN_CLEANUP_INTERVAL_HOURS = int(os.getenv("TOKEN_CLEANUP_INTERVAL_HOURS", "6"))
 
 # ==================== Reminder settings ====================
-INACTIVE_DAYS_THRESHOLD = int(os.getenv("INACTIVE_DAYS_THRESHOLD", "3"))
+INACTIVE_DAYS_THRESHOLD = int(os.getenv("INACTIVE_DAYS_THRESHOLD", "7"))
 AUTO_REMINDER_INTERVAL_HOURS = int(os.getenv("AUTO_REMINDER_INTERVAL_HOURS", "24"))
 
 # ==================== Logging settings ====================

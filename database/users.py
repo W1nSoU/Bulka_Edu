@@ -9,7 +9,7 @@ from database.managers import MANAGERS_DB_PATH, get_manager_by_uid
 def _now_str() -> str:
     return datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
 
-def get_business_days_cutoff(now: Optional[datetime] = None, business_days: int = 3) -> datetime:
+def get_business_days_cutoff(now: Optional[datetime] = None, business_days: int = 7) -> datetime:
     """
     Повертає пороговий момент часу (datetime), віднімаючи вказану кількість робочих днів (business_days).
     Субота та неділя ігноруються (не враховуються як дні неактивності).
@@ -657,7 +657,7 @@ async def get_inactive_interns_for_manager(manager_id, days=3):
         
         return inactive
 
-async def get_inactive_interns_for_auto_delete(days: int = 3) -> list[dict]:
+async def get_inactive_interns_for_auto_delete(days: int = 7) -> list[dict]:
     """
     Повертає стажерів для автоматичного видалення:
     неактивні >= days робочих днів (без сб/нд), не є Працівниками, мають керівника, не завершили навчання.

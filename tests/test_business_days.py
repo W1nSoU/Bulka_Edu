@@ -73,6 +73,21 @@ class TestBusinessDaysCutoff(unittest.TestCase):
         self.assertEqual(cutoff_mon_after, self.tz.localize(datetime(2026, 9, 16, 15, 1, 0)))
         self.assertTrue(wednesday_15 < cutoff_mon_after)
 
+    def test_seven_business_days_cutoff(self):
+        # Активність у понеділок о 10:00 (2026-09-14)
+        active_mon = self.tz.localize(datetime(2026, 9, 14, 10, 0, 0))
+
+        # Перевірка через 7 робочих днів (з урахуванням сб/нд 19-20 вересня) -> середа 23 вересня 10:00
+        wed_23_before = self.tz.localize(datetime(2026, 9, 23, 9, 59, 0))
+        cutoff_before = get_business_days_cutoff(wed_23_before, business_days=7)
+        self.assertEqual(cutoff_before, self.tz.localize(datetime(2026, 9, 14, 9, 59, 0)))
+        self.assertFalse(active_mon < cutoff_before)
+
+        wed_23_after = self.tz.localize(datetime(2026, 9, 23, 10, 1, 0))
+        cutoff_after = get_business_days_cutoff(wed_23_after, business_days=7)
+        self.assertEqual(cutoff_after, self.tz.localize(datetime(2026, 9, 14, 10, 1, 0)))
+        self.assertTrue(active_mon < cutoff_after)
+
 
 
 class TestAutoDeleteWorkflow(unittest.IsolatedAsyncioTestCase):

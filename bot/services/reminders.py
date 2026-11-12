@@ -12,7 +12,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from bot.config import TIMEZONE
+from bot.config import TIMEZONE, INACTIVE_DAYS_THRESHOLD
 from database.users import (
     get_user_details,
     get_inactive_interns_for_auto_reminder,
@@ -28,7 +28,6 @@ from database.users import (
 from database.managers import get_manager_by_uid
 
 REMINDER_COOLDOWN_HOURS = 24
-INACTIVE_DAYS_THRESHOLD = 3
 
 # Шаблони питань для 3-го дня
 DAY_3_QUESTIONS = [
@@ -295,10 +294,10 @@ async def auto_reminder_loop(bot: Bot) -> None:
         
         now = datetime.now(tz)
 
-        # 0. Автоматичне видалення стажерів після 3 робочих днів неактивності:
+        # 0. Автоматичне видалення стажерів після N робочих днів неактивності:
         # У вихідні (субота=5, неділя=6) видалення ставиться на паузу
         if now.weekday() not in (5, 6):
-            inactive_to_delete = await get_inactive_interns_for_auto_delete(days=3)
+            inactive_to_delete = await get_inactive_interns_for_auto_delete(days=INACTIVE_DAYS_THRESHOLD)
             for intern in inactive_to_delete:
                 intern_id = intern["user_id"]
                 if await is_privileged_user(intern_id):
@@ -327,7 +326,7 @@ async def auto_reminder_loop(bot: Bot) -> None:
                     )
                     # 2. Видаляємо користувача
                     await delete_user(intern_id)
-                    logger.info(f"Auto-deleted inactive intern {intern_id} ({full_name}) after 3 business days of inactivity")
+                    logger.info(f"Auto-deleted inactive intern {intern_id} ({full_name}) after {INACTIVE_DAYS_THRESHOLD} business days of inactivity")
 
                     # 3. Сповіщаємо керівника
                     if manager_id:
@@ -338,7 +337,7 @@ async def auto_reminder_loop(bot: Bot) -> None:
                             f"💼 Посада: <b>{role}</b>\n"
                             f"🏪 Магазин: <b>{shop}</b> ({city})\n"
                             f"🕒 Остання активність: <b>{last_activity}</b>\n\n"
-                            "<i>Стажер був неактивний понад 3 робочі дні (субота та неділя не враховувалися) "
+                            f"<i>Стажер був неактивний понад {INACTIVE_DAYS_THRESHOLD} робочих днів (субота та неділя не враховувалися) "
                             "і був автоматично відрахований з навчальної програми.</i>"
                         )
                         try:
