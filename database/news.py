@@ -11,7 +11,7 @@ from . import DB_PATH
 
 logger = logging.getLogger(__name__)
 
-NEWS_REACTIONS = ["🔥", "😁", "❤️", "🤔"]
+NEWS_REACTIONS = ["👍", "🔥", "😁", "❤️", "🤔"]
 
 
 def get_current_kyiv_time_str() -> str:
@@ -23,13 +23,14 @@ def get_current_kyiv_time_str() -> str:
 def format_news_reactions_line(breakdown: dict[str, int]) -> str:
     """
     Формує рядок сумарних лічильників формату:
-    0 🔥 | 0 😁 | 0 ❤️ | 0 🤔
+    0 👍 | 0 🔥 | 0 😁 | 0 ❤️ | 0 🤔
     """
+    thumbs = breakdown.get("👍", 0)
     fire = breakdown.get("🔥", 0)
     laugh = breakdown.get("😁", 0) + breakdown.get("👎", 0)
     heart = breakdown.get("❤️", 0)
     think = breakdown.get("🤔", 0)
-    return f"{fire} 🔥 | {laugh} 😁 | {heart} ❤️ | {think} 🤔"
+    return f"{thumbs} 👍 | {fire} 🔥 | {laugh} 😁 | {heart} ❤️ | {think} 🤔"
 
 
 def update_text_with_reactions_line(raw_text: str, new_line: str) -> str:
@@ -44,8 +45,8 @@ def update_text_with_reactions_line(raw_text: str, new_line: str) -> str:
     # Очищаємо старий рядок вибору користувача, якщо він був
     text = re.sub(r"\n*Ваша анонімна реакція:\s*.+", "", text).rstrip()
 
-    # Регекс для пошуку рядка лічильника: X 🔥 | Y 😁 | Z ❤️ | W 🤔 (або зі старим 👎)
-    pattern = r"\d+\s*🔥\s*\|\s*\d+\s*[😁👎]\s*\|\s*\d+\s*❤️\s*\|\s*\d+\s*🤔"
+    # Регекс для пошуку рядка лічильника: [X 👍 | ] Y 🔥 | Z 😁 | W ❤️ | V 🤔 (або зі старим 👎)
+    pattern = r"(?:\d+\s*👍\s*\|\s*)?\d+\s*🔥\s*\|\s*\d+\s*[😁👎]\s*\|\s*\d+\s*❤️\s*\|\s*\d+\s*🤔"
     if re.search(pattern, text):
         return re.sub(pattern, new_line, text)
     

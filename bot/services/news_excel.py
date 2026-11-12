@@ -181,6 +181,7 @@ async def generate_news_report_xlsx(news_id: int, db_path: str = DB_PATH) -> io.
     r_idx += 1
 
     reaction_labels = {
+        "👍": "Схвалення / Палець вгору",
         "🔥": "Супер / Вогонь",
         "😁": "Смішно / Позитивно",
         "❤️": "Чудово / Любов",

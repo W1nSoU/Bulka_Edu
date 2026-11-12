@@ -29,29 +29,29 @@ class TestNewsLiveReactions(unittest.IsolatedAsyncioTestCase):
         self.temp_dir.cleanup()
 
     def test_news_reactions_order_and_emojis(self):
-        """Перевіряє, що дизлайк замінено на сміх та правильний набір емодзі."""
-        self.assertEqual(NEWS_REACTIONS, ["🔥", "😁", "❤️", "🤔"])
+        """Перевіряє, що додано палець вгору та правильний набір емодзі."""
+        self.assertEqual(NEWS_REACTIONS, ["👍", "🔥", "😁", "❤️", "🤔"])
         self.assertNotIn("👎", NEWS_REACTIONS)
 
     def test_format_news_reactions_line(self):
         """Перевіряє правильне форматування рядка лічильника."""
         empty_line = format_news_reactions_line({})
-        self.assertEqual(empty_line, "0 🔥 | 0 😁 | 0 ❤️ | 0 🤔")
+        self.assertEqual(empty_line, "0 👍 | 0 🔥 | 0 😁 | 0 ❤️ | 0 🤔")
 
-        populated_line = format_news_reactions_line({"🔥": 12, "😁": 5, "❤️": 99, "🤔": 3})
-        self.assertEqual(populated_line, "12 🔥 | 5 😁 | 99 ❤️ | 3 🤔")
+        populated_line = format_news_reactions_line({"👍": 7, "🔥": 12, "😁": 5, "❤️": 99, "🤔": 3})
+        self.assertEqual(populated_line, "7 👍 | 12 🔥 | 5 😁 | 99 ❤️ | 3 🤔")
 
     def test_update_text_with_reactions_line(self):
         """Перевіряє вставку та оновлення рядка лічильника в тексті новини."""
         original_text = "<b>Увага!</b> Нове меню в пекарні."
-        initial_line = "0 🔥 | 0 😁 | 0 ❤️ | 0 🤔"
+        initial_line = "0 👍 | 0 🔥 | 0 😁 | 0 ❤️ | 0 🤔"
 
         # 1. Первинне додавання
         first_pass = update_text_with_reactions_line(original_text, initial_line)
         self.assertEqual(first_pass, f"<b>Увага!</b> Нове меню в пекарні.\n\n{initial_line}")
 
         # 2. Оновлення існуючого рядка
-        updated_line = "5 🔥 | 2 😁 | 1 ❤️ | 0 🤔"
+        updated_line = "1 👍 | 5 🔥 | 2 😁 | 1 ❤️ | 0 🤔"
         second_pass = update_text_with_reactions_line(first_pass, updated_line)
         self.assertEqual(second_pass, f"<b>Увага!</b> Нове меню в пекарні.\n\n{updated_line}")
 

@@ -90,7 +90,7 @@ class TestNewsReactionsAndHistory(unittest.IsolatedAsyncioTestCase):
         kb = get_news_reaction_keyboard(news_id=42)
         self.assertEqual(len(kb.inline_keyboard), 1)
         row = kb.inline_keyboard[0]
-        self.assertEqual(len(row), 4)
+        self.assertEqual(len(row), 5)
         for i, emoji in enumerate(NEWS_REACTIONS):
             self.assertEqual(row[i].text, emoji)
             self.assertEqual(row[i].callback_data, f"news_react:42:{emoji}")
@@ -100,6 +100,7 @@ class TestNewsReactionsAndHistory(unittest.IsolatedAsyncioTestCase):
         row_active = kb_active.inline_keyboard[0]
         texts = [btn.text for btn in row_active]
         self.assertIn("❤️ ✅", texts)
+        self.assertIn("👍", texts)
         self.assertIn("😁", texts)
         self.assertIn("🤔", texts)
         self.assertIn("🔥", texts)
