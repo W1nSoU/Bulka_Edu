@@ -42,7 +42,7 @@ async def init_surveys_db(db_path: str = DB_PATH) -> None:
             survey_id INTEGER NOT NULL,
             question_idx INTEGER NOT NULL,
             text TEXT NOT NULL,
-            question_type TEXT NOT NULL,          -- choice | text
+            question_type TEXT NOT NULL,          -- choice | multi_choice | text
             options_json TEXT,                    -- JSON-масив: ["а. ...", "б. ..."]
             FOREIGN KEY (survey_id) REFERENCES surveys(id) ON DELETE CASCADE,
             UNIQUE(survey_id, question_idx)
@@ -772,34 +772,82 @@ async def get_survey_recipients_by_wave(survey_id: int, wave_number: int, db_pat
         return [dict(r) for r in rows]
 
 
+def parse_multi_choice_answer(raw_text: Optional[str]) -> List[str]:
+    """Розбирає відповідь на питання з кількома варіантами з JSON-масиву з fallback на одиничний рядок."""
+    if raw_text is None:
+        return []
+    raw_str = str(raw_text)
+    stripped = raw_str.strip()
+    if not stripped:
+        return []
+
+    if stripped.startswith("["):
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                return list(dict.fromkeys(
+                    str(item) for item in parsed if item is not None and str(item) != ""
+                ))
+        except Exception:
+            pass
+
+    return [raw_str]
+
+
+def _aggregate_choice_counts(
+    q_type: str,
+    options: List[str],
+    raw_answers: List[str],
+) -> Tuple[Dict[str, int], int]:
+    """Підраховує кількість голосів по кожному варіанту та загальну суму позначок."""
+    opt_counts: Dict[str, int] = {opt: 0 for opt in options}
+    total_selections = 0
+
+    for ans in raw_answers:
+        selected = parse_multi_choice_answer(ans) if q_type == "multi_choice" else ([ans] if ans else [])
+        for item in selected:
+            opt_counts[item] = opt_counts.get(item, 0) + 1
+            total_selections += 1
+
+    return opt_counts, total_selections
+
+
 async def get_survey_question_stats(survey_id: int, question_idx: int, db_path: str = DB_PATH) -> Dict[str, int]:
     """Повертає кількість відповідей за кожним варіантом для конкретного питання."""
     async with aiosqlite.connect(db_path) as db:
         cursor = await db.execute(
             """
-            SELECT answer_text, COUNT(*) as cnt
+            SELECT answer_text
             FROM survey_answers
             WHERE survey_id = ? AND question_idx = ?
-            GROUP BY answer_text
             """,
             (survey_id, question_idx)
         )
-        rows = await cursor.fetchall()
-        res = {row[0]: row[1] for row in rows}
+        raw_answers = [row[0] for row in await cursor.fetchall()]
 
         q_cursor = await db.execute(
-            "SELECT options_json FROM survey_questions WHERE survey_id = ? AND question_idx = ?",
+            "SELECT question_type, options_json FROM survey_questions WHERE survey_id = ? AND question_idx = ?",
             (survey_id, question_idx)
         )
         q_row = await q_cursor.fetchone()
-        if q_row and q_row[0]:
+
+        q_type = (q_row[0] or "choice") if q_row else "text"
+        opts: List[str] = []
+        if q_row and q_row[1]:
             try:
-                opts = json.loads(q_row[0])
-                for opt in opts:
-                    if opt not in res:
-                        res[opt] = 0
+                loaded = json.loads(q_row[1])
+                if isinstance(loaded, list):
+                    opts = loaded
             except Exception:
-                pass
+                opts = []
+
+        if q_type in ("choice", "multi_choice"):
+            opt_counts, _ = _aggregate_choice_counts(q_type, opts, raw_answers)
+            return opt_counts
+
+        res: Dict[str, int] = {}
+        for ans in raw_answers:
+            res[ans] = res.get(ans, 0) + 1
         return res
 
 
@@ -813,6 +861,7 @@ async def get_survey_detailed_results(survey_id: int, db_path: str = DB_PATH) ->
     """
     survey = await get_survey_by_id(survey_id, db_path)
     questions = await get_survey_questions(survey_id, db_path)
+    q_types_by_idx = {q["question_idx"]: q["question_type"] for q in questions}
 
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
@@ -843,12 +892,10 @@ async def get_survey_detailed_results(survey_id: int, db_path: str = DB_PATH) ->
             q_answers = [a["answer_text"] for a in all_answers if a["question_idx"] == q_idx]
             total_q_ans = len(q_answers)
             
-            opt_counts: Dict[str, int] = {}
-            if q_type == 'choice':
-                for opt in options:
-                    opt_counts[opt] = 0
-                for ans in q_answers:
-                    opt_counts[ans] = opt_counts.get(ans, 0) + 1
+            if q_type in ("choice", "multi_choice"):
+                opt_counts, total_selections = _aggregate_choice_counts(q_type, options, q_answers)
+            else:
+                opt_counts, total_selections = {}, total_q_ans
             
             opt_percentages: Dict[str, float] = {}
             for opt, cnt in opt_counts.items():
@@ -860,6 +907,7 @@ async def get_survey_detailed_results(survey_id: int, db_path: str = DB_PATH) ->
                 "question_type": q_type,
                 "options": options,
                 "total_answers": total_q_ans,
+                "total_selections": total_selections,
                 "option_counts": opt_counts,
                 "option_percentages": opt_percentages,
                 "raw_text_answers": q_answers if q_type == 'text' else []
@@ -883,7 +931,10 @@ async def get_survey_detailed_results(survey_id: int, db_path: str = DB_PATH) ->
                     "completed_at": a.get("completed_at") or "",
                     "answers": {}
                 }
-            shops_dict[shop_name][uid]["answers"][a["question_idx"]] = a["answer_text"]
+            ans_val = a["answer_text"]
+            if q_types_by_idx.get(a["question_idx"]) == "multi_choice":
+                ans_val = "; ".join(parse_multi_choice_answer(ans_val))
+            shops_dict[shop_name][uid]["answers"][a["question_idx"]] = ans_val
 
         # Перетворюємо на списки
         shops_formatted: Dict[str, List[Dict[str, Any]]] = {}

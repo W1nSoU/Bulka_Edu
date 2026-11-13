@@ -6854,10 +6854,10 @@ def _render_survey_step2_template_text(title: str) -> str:
         "а. Чудово, все зрозуміло\n"
         "б. Задовільно, є питання\n"
         "в. Складно, потрібна допомога\n\n"
-        "2. Чи вистачає вам підтримки від наставника?\n"
-        "а. Так, повністю\n"
-        "б. Частково\n"
-        "в. Ні, підтримки мало\n\n"
+        "2. Які формати навчання вам найкорисніші? (кілька варіантів)\n"
+        "а. Короткі відео\n"
+        "б. Покрокові чеклісти\n"
+        "в. Допомога наставника\n\n"
         "3. Що б ви хотіли покращити або змінити? (вільна відповідь)"
     )
 
@@ -6869,6 +6869,7 @@ def _render_survey_step2_template_text(title: str) -> str:
         "📋 <b>Правила форматування:</b>\n"
         "• Номер питання: <code>1. </code>, <code>2. </code>\n"
         "• Варіанти відповіді: <code>а. </code>, <code>б. </code>, <code>в. </code> (або a., b., c.)\n"
+        "• Вибір кількох варіантів: позначка <code>(кілька варіантів)</code> біля питання\n"
         "• Відкрите питання: позначка <code>(вільна відповідь)</code>\n\n"
         f"💡 <b>Зразок для копіювання:</b>\n<pre>{example_template}</pre>\n\n"
         "✍️ Надішліть повідомлення з вашим опитуванням:"
@@ -6885,8 +6886,8 @@ async def dev_survey_process_template(message: Message, state: FSMContext):
         text = (
             f"❌ <b>Помилка розпізнавання шаблону!</b>\n\n"
             f"{html.escape(error)}\n\n"
-            f"💡 Перевірте нумерацію запитань (наприклад, <code>1. Запитання</code>) "
-            f"та варіанти (наприклад, <code>а. Варіант 1</code>) або вкажіть <code>(вільна відповідь)</code>.\n\n"
+            f"💡 Перевірте нумерацію запитань (наприклад, <code>1. Запитання</code>), "
+            f"варіанти (наприклад, <code>а. Варіант 1</code>) або позначки <code>(кілька варіантів)</code> чи <code>(вільна відповідь)</code>.\n\n"
             f"✍️ Надішліть виправлений текст або скасуйте:"
         )
         buttons = [
@@ -6897,25 +6898,36 @@ async def dev_survey_process_template(message: Message, state: FSMContext):
 
     data = await state.get_data()
     title = data.get("title", "Опитування")
+    questions_dicts = [q.to_dict() if hasattr(q, "to_dict") else dict(q) for q in questions]
 
     await state.update_data(
         raw_template=template_text,
-        questions=questions,
+        questions=questions_dicts,
         selected_roles=["Працівник"]
     )
     await state.set_state(SurveyCreationStates.waiting_roles)
 
-    await _show_survey_summary_view(message, title, questions, ["Працівник"])
+    await _show_survey_summary_view(message, title, questions_dicts, ["Працівник"])
 
 
 async def _show_survey_summary_view(target_obj: Union[Message, CallbackQuery], title: str, questions: list, roles: list):
     """Відображає результат розпізнавання шаблону та кнопки переходу."""
+    type_labels = {
+        "choice": "один варіант",
+        "multi_choice": "кілька варіантів",
+        "text": "вільна відповідь",
+    }
     q_preview_lines = []
-    for q in questions[:5]:
-        q_type_str = "варіанти" if q["question_type"] == "choice" else "вільна відповідь"
+    for q in questions[:10]:
+        q_type_str = type_labels.get(q["question_type"], "один варіант")
         q_preview_lines.append(f"• <b>{q['question_idx']}.</b> {html.escape(q['text'][:60])} <i>({q_type_str})</i>")
-    if len(questions) > 5:
-        q_preview_lines.append(f"<i>... ще {len(questions) - 5} питань</i>")
+    if len(questions) > 10:
+        q_preview_lines.append(f"<i>... ще {len(questions) - 10} питань</i>")
+
+    choice_questions = [q for q in questions if q.get("question_type") in ("choice", "multi_choice")]
+    toggle_hint = ""
+    if choice_questions:
+        toggle_hint = "\n\n<i>Для перемикання «один / кілька варіантів» натисніть на питання нижче:</i>"
 
     text = (
         f"✅ <b>Шаблон успішно розпізнано!</b>\n"
@@ -6923,19 +6935,85 @@ async def _show_survey_summary_view(target_obj: Union[Message, CallbackQuery], t
         f"📌 <b>Назва:</b> {html.escape(title)}\n"
         f"❓ <b>Кількість питань:</b> {len(questions)}\n\n"
         f"📋 <b>Питання:</b>\n" + "\n".join(q_preview_lines) + "\n\n"
-        "Чи правильно сформовано опитування?"
+        "Чи правильно сформовано опитування?" + toggle_hint
     )
-    buttons = [
+
+    buttons = []
+    if choice_questions:
+        compact_mode = len(choice_questions) > 4
+        row = []
+        for q in choice_questions:
+            is_multi = q.get("question_type") == "multi_choice"
+            icon = "☑️" if is_multi else "🔘"
+            if compact_mode:
+                mode_label = "Кілька" if is_multi else "Один"
+            else:
+                mode_label = "Кілька варіантів" if is_multi else "Один варіант"
+            btn = InlineKeyboardButton(
+                text=f"{icon} П{q['question_idx']}: {mode_label}",
+                callback_data=f"dev_survey_toggle_qtype:{q['question_idx']}"
+            )
+            if compact_mode:
+                row.append(btn)
+                if len(row) == 2:
+                    buttons.append(row)
+                    row = []
+            else:
+                buttons.append([btn])
+        if row:
+            buttons.append(row)
+
+    buttons.extend([
         [InlineKeyboardButton(text="👁 Переглянути вигляд", callback_data="dev_survey_preview_look")],
         [InlineKeyboardButton(text="🚀 Надіслати", callback_data="dev_survey_to_roles")],
         [InlineKeyboardButton(text="🔙 Назад до шаблону", callback_data="dev_survey_reenter_template")],
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_surveys_menu")]
-    ]
+    ])
     if isinstance(target_obj, CallbackQuery):
         await _edit_or_answer(target_obj.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
         await target_obj.answer()
     else:
         await target_obj.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+
+async def dev_survey_toggle_qtype(callback: CallbackQuery, state: FSMContext):
+    """Перемикає режим вибору (один варіант <-> кілька варіантів) для питання перед запуском."""
+    from bot.services.survey_parser import SurveyParser
+
+    try:
+        q_idx = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Некоректні дані кнопки.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    raw_questions = data.get("questions", [])
+    if not raw_questions:
+        await callback.answer("Дані опитування застаріли. Почніть створення заново.", show_alert=True)
+        return
+
+    updated_questions = [q.to_dict() if hasattr(q, "to_dict") else dict(q) for q in raw_questions]
+    target_q = next((q for q in updated_questions if q.get("question_idx") == q_idx), None)
+    if not target_q or target_q.get("question_type") not in ("choice", "multi_choice"):
+        await callback.answer("Для цього питання режим вибору змінити не можна.", show_alert=True)
+        return
+
+    if target_q["question_type"] == "choice":
+        options_count = len(target_q.get("options") or [])
+        if options_count > SurveyParser.MAX_MULTI_CHOICE_OPTIONS:
+            await callback.answer(
+                f"Мультивибір підтримує не більше {SurveyParser.MAX_MULTI_CHOICE_OPTIONS} варіантів.",
+                show_alert=True
+            )
+            return
+        target_q["question_type"] = "multi_choice"
+    else:
+        target_q["question_type"] = "choice"
+
+    await state.update_data(questions=updated_questions)
+    title = data.get("title", "Опитування")
+    roles = data.get("selected_roles", ["Працівник"])
+    await _show_survey_summary_view(callback, title, updated_questions, roles)
 
 
 async def dev_survey_back_to_summary(callback: CallbackQuery, state: FSMContext):
@@ -6989,14 +7067,17 @@ async def dev_survey_preview_look(callback: CallbackQuery, state: FSMContext):
         q_text = html.escape(q["text"])
         q_type = q["question_type"]
         lines.append(f"<b>{q_idx}. {q_text}</b>")
-        if q_type == "choice":
+        if q_type in ("choice", "multi_choice"):
+            if q_type == "multi_choice":
+                lines.append("   <i>☑️ (Можна обрати кілька варіантів)</i>")
+            opt_bullet = "⬜️" if q_type == "multi_choice" else "▫️"
             options = q.get("options", []) if hasattr(q, "get") else getattr(q, "options", [])
             for i, opt in enumerate(options or []):
                 if re.match(r"^[а-яА-Яa-zA-ZіїєґІЇЄҐ]\.\s*", opt):
-                    lines.append(f"   ▫️ {html.escape(opt)}")
+                    lines.append(f"   {opt_bullet} {html.escape(opt)}")
                 else:
                     prefix = letter_symbols[i] if i < len(letter_symbols) else str(i + 1)
-                    lines.append(f"   ▫️ <i>{prefix}.</i> {html.escape(opt)}")
+                    lines.append(f"   {opt_bullet} <i>{prefix}.</i> {html.escape(opt)}")
         else:
             lines.append("   ✍️ <i>(Вільна відповідь текстом)</i>")
         lines.append("")
@@ -12153,6 +12234,7 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.message.register(dev_survey_process_title, SurveyCreationStates.waiting_title)
     dp.message.register(dev_survey_process_template, SurveyCreationStates.waiting_template)
     dp.callback_query.register(dev_survey_back_to_summary, lambda c: c.data == "dev_survey_back_to_summary")
+    dp.callback_query.register(dev_survey_toggle_qtype, lambda c: c.data and c.data.startswith("dev_survey_toggle_qtype:"))
     dp.callback_query.register(dev_survey_reenter_template, lambda c: c.data == "dev_survey_reenter_template")
     dp.callback_query.register(dev_survey_preview_look, lambda c: c.data == "dev_survey_preview_look")
     dp.callback_query.register(dev_survey_to_roles, lambda c: c.data == "dev_survey_to_roles")

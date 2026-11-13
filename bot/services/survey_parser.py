@@ -8,7 +8,7 @@ from dataclasses import dataclass
 class ParsedQuestion:
     question_idx: int
     text: str
-    question_type: str  # 'choice' | 'text'
+    question_type: str  # 'choice' | 'multi_choice' | 'text'
     options: List[str]
 
     def to_dict(self) -> Dict[str, Any]:
@@ -50,6 +50,22 @@ class SurveyParser:
         "(текстова відповідь)",
         "(текст)"
     ]
+    MULTI_CHOICE_MARKERS = [
+        "(кілька варіантів)",
+        "(вибір кількох варіантів)",
+        "(мультивибір)",
+        "(множинний вибір)",
+        "(можна кілька)",
+    ]
+    MAX_MULTI_CHOICE_OPTIONS = 45
+
+    @staticmethod
+    def _strip_markers(text: str, markers: List[str]) -> str:
+        """Видаляє службові маркери типу питання без урахування регістру."""
+        cleaned = text
+        for marker in markers:
+            cleaned = re.sub(re.escape(marker), "", cleaned, flags=re.IGNORECASE)
+        return re.sub(r"\s{2,}", " ", cleaned).strip()
 
     @classmethod
     def parse_template(cls, text: str) -> Tuple[Optional[List[ParsedQuestion]], Optional[str]]:
@@ -110,15 +126,21 @@ class SurveyParser:
         for idx, block in enumerate(raw_blocks, start=1):
             q_text = block["text"]
             options = block["options"]
+            q_lower = q_text.lower()
 
-            # Перевіряємо, чи це вільна відповідь
-            is_free_text = any(marker in q_text.lower() for marker in cls.FREE_TEXT_MARKERS)
-            
-            # Очищуємо маркер вільної відповіді з відображуваного тексту (опціонально залишаємо красивий текст)
-            clean_text = q_text
-            for marker in cls.FREE_TEXT_MARKERS:
-                pattern = re.compile(re.escape(marker), re.IGNORECASE)
-                clean_text = pattern.sub("", clean_text).strip()
+            # Перевіряємо тип питання за маркерами
+            is_free_text = any(marker in q_lower for marker in cls.FREE_TEXT_MARKERS)
+            is_multi_choice = any(marker in q_lower for marker in cls.MULTI_CHOICE_MARKERS)
+
+            if is_free_text and is_multi_choice:
+                return None, (
+                    f"❌ <b>Помилка у питанні №{block['num']}:</b>\n"
+                    f"«{block['text']}»\n\n"
+                    "Не можна одночасно позначати питання як вільну відповідь і вибір кількох варіантів."
+                )
+
+            # Очищуємо маркери з відображуваного тексту питання
+            clean_text = cls._strip_markers(q_text, cls.FREE_TEXT_MARKERS + cls.MULTI_CHOICE_MARKERS)
 
             if is_free_text or not options:
                 # Якщо явно вказано вільну відповідь або немає варіантів
@@ -129,6 +151,13 @@ class SurveyParser:
                         question_type="text",
                         options=[]
                     ))
+                elif is_multi_choice:
+                    return None, (
+                        f"❌ <b>Помилка у питанні №{block['num']}:</b>\n"
+                        f"«{block['text']}»\n\n"
+                        "Для питання з вибором кількох варіантів потрібно додати щонайменше 2 варіанти "
+                        "(наприклад: <code>а. Варіант 1</code>, <code>б. Варіант 2</code>)."
+                    )
                 else:
                     return None, (
                         f"❌ <b>Помилка у питанні №{block['num']}:</b>\n"
@@ -144,10 +173,16 @@ class SurveyParser:
                         f"«{block['text']}»\n\n"
                         f"Знайдено лише {len(options)} варіант відповіді. Для вибору потрібно щонайменше 2 варіанти (а. та б.)."
                     )
+                if is_multi_choice and len(options) > cls.MAX_MULTI_CHOICE_OPTIONS:
+                    return None, (
+                        f"❌ <b>Помилка у питанні №{block['num']}:</b>\n"
+                        f"«{block['text']}»\n\n"
+                        f"Знайдено {len(options)} варіантів. Для мультивибору підтримується не більше {cls.MAX_MULTI_CHOICE_OPTIONS} варіантів."
+                    )
                 parsed_questions.append(ParsedQuestion(
                     question_idx=idx,
                     text=clean_text or q_text,
-                    question_type="choice",
+                    question_type="multi_choice" if is_multi_choice else "choice",
                     options=options
                 ))
 

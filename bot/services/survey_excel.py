@@ -117,7 +117,12 @@ async def generate_survey_results_xlsx(survey_id: int, db_path: str = DB_PATH) -
         # Заголовок питання
         ws_summary.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=4)
         cell_q = ws_summary.cell(row=current_row, column=1)
-        type_badge = " [Вибір варіанту]" if q_type == 'choice' else " [Вільна відповідь]"
+        badge_map = {
+            "choice": " [Вибір варіанту]",
+            "multi_choice": " [Вибір кількох варіантів]",
+            "text": " [Вільна відповідь]",
+        }
+        type_badge = badge_map.get(q_type, " [Вільна відповідь]")
         cell_q.value = f"Питання №{q_idx}: {q_text}{type_badge}"
         cell_q.font = font_section
         cell_q.fill = fill_navy
@@ -125,13 +130,14 @@ async def generate_survey_results_xlsx(survey_id: int, db_path: str = DB_PATH) -
         ws_summary.row_dimensions[current_row].height = 22
         current_row += 1
 
-        if q_type == 'choice':
+        if q_type in ("choice", "multi_choice"):
             # Шапка таблиці варіантів
+            pct_header = "% від респондентів" if q_type == "multi_choice" else "% від відповідей"
             ws_summary.cell(row=current_row, column=1, value="Варіант відповіді").fill = fill_amber
             ws_summary.cell(row=current_row, column=1).font = font_header
             ws_summary.cell(row=current_row, column=2, value="Кількість відповідей").fill = fill_amber
             ws_summary.cell(row=current_row, column=2).font = font_header
-            ws_summary.cell(row=current_row, column=3, value="% від відповідей").fill = fill_amber
+            ws_summary.cell(row=current_row, column=3, value=pct_header).fill = fill_amber
             ws_summary.cell(row=current_row, column=3).font = font_header
             ws_summary.cell(row=current_row, column=2).alignment = align_center
             ws_summary.cell(row=current_row, column=3).alignment = align_center
@@ -153,10 +159,18 @@ async def generate_survey_results_xlsx(survey_id: int, db_path: str = DB_PATH) -
                 current_row += 1
 
             # Рядок Всього
-            ws_summary.cell(row=current_row, column=1, value="Всього відповіли на питання").font = font_bold
+            if q_type == "multi_choice":
+                total_selections = stats.get("total_selections", total_q_ans)
+                total_label = "Всього відповіли респондентів"
+                total_third_col = f"Всього позначок: {total_selections}"
+            else:
+                total_label = "Всього відповіли на питання"
+                total_third_col = "100%"
+
+            ws_summary.cell(row=current_row, column=1, value=total_label).font = font_bold
             ws_summary.cell(row=current_row, column=2, value=total_q_ans).font = font_bold
             ws_summary.cell(row=current_row, column=2).alignment = align_center
-            ws_summary.cell(row=current_row, column=3, value="100%").font = font_bold
+            ws_summary.cell(row=current_row, column=3, value=total_third_col).font = font_bold
             ws_summary.cell(row=current_row, column=3).alignment = align_center
             for col in range(1, 4):
                 ws_summary.cell(row=current_row, column=col).border = border_data
@@ -254,6 +268,7 @@ async def generate_survey_results_xlsx(survey_id: int, db_path: str = DB_PATH) -
                     completed_at = str(completed_at)[:16]
             row_vals.append(completed_at)
 
+            max_wrapped_lines = 1
             for col_idx, val in enumerate(row_vals, start=1):
                 cell = ws_shop.cell(row=current_data_row, column=col_idx, value=val)
                 cell.font = font_data
@@ -261,20 +276,24 @@ async def generate_survey_results_xlsx(survey_id: int, db_path: str = DB_PATH) -
                 if row_fill.fill_type:
                     cell.fill = row_fill
                 
-                # Вирівнювання: текст ліворуч, номери та дати по центру
-                if col_idx in (1, 4 + len(questions)):
+                # Вирівнювання: довгі або мультивибірні тексти переносимо, номери та дати по центру
+                if isinstance(val, str) and ("; " in val or "\n" in val or len(val) > 35):
+                    cell.alignment = align_wrap
+                    est_lines = max(len(val.splitlines()), (len(val) + 45) // 46)
+                    max_wrapped_lines = max(max_wrapped_lines, est_lines)
+                elif col_idx in (1, 4 + len(questions)):
                     cell.alignment = align_center
                 else:
                     cell.alignment = align_left
 
-            ws_shop.row_dimensions[current_data_row].height = 20
+            ws_shop.row_dimensions[current_data_row].height = max(20, min(max_wrapped_lines * 16, 120))
             current_data_row += 1
 
         # Автоширина колонок
         for col in range(1, len(headers) + 1):
             col_letter = get_column_letter(col)
             max_len = max(len(str(ws_shop.cell(row=r, column=col).value or '')) for r in range(3, current_data_row))
-            ws_shop.column_dimensions[col_letter].width = max(max_len + 4, 12)
+            ws_shop.column_dimensions[col_letter].width = min(max(max_len + 4, 12), 55)
         ws_shop.column_dimensions["B"].width = 28  # ПІБ
 
     buffer = io.BytesIO()
