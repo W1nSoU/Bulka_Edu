@@ -302,8 +302,46 @@ async def get_position_direction(role_name: str) -> str:
     return "ТЗ"
 
 
+async def get_searchable_roles(exclude_manager_roles: bool = False, db_path: str = DB_PATH) -> list[str]:
+    """
+    Повертає динамічний об'єднаний список посад із таблиць `positions` та `materials`
+    (fallback до `AVAILABLE_ROLES` лише якщо в БД порожньо).
+    """
+    excluded = {"", "ALL"}
+    if exclude_manager_roles:
+        excluded.update({"Керівник", "Керівник Стажер"})
+
+    roles: list[str] = []
+    seen: set[str] = set()
+
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            for query_sql in (
+                "SELECT name FROM positions ORDER BY name",
+                "SELECT DISTINCT role FROM materials WHERE role IS NOT NULL ORDER BY role",
+            ):
+                try:
+                    cursor = await db.execute(query_sql)
+                    for (raw_name,) in await cursor.fetchall():
+                        clean = (raw_name or "").strip()
+                        if clean and clean not in excluded and clean not in seen:
+                            seen.add(clean)
+                            roles.append(clean)
+                except aiosqlite.OperationalError:
+                    continue
+    except Exception:
+        pass
+
+    if roles:
+        return roles
+
+    from bot.constants import AVAILABLE_ROLES
+    return [r for r in AVAILABLE_ROLES if r not in excluded]
+
+
 __all__ = [
     "get_all_positions",
+    "get_searchable_roles",
     "get_position_by_id",
     "get_position_by_name",
     "get_days_count_for_role",

@@ -40,6 +40,7 @@ from database.users import (
 )
 from bot.services.developer_actions import get_user_days_report, _format_last_activity
 from bot.constants import AVAILABLE_ROLES, AVAILABLE_CITIES, AVAILABLE_SHOPS
+from database.positions import get_searchable_roles
 from database.tokens import generate_token
 from database.shops import get_shops_by_city
 from bot.utils import get_user_avatar_input, _send_or_edit_card_photo
@@ -1076,14 +1077,17 @@ async def manager_report(callback: CallbackQuery):
     )
     await callback.answer()
 
-async def manager_remind_menu(callback: CallbackQuery):
+async def manager_remind_menu(callback: CallbackQuery, state: Optional[FSMContext] = None):
     if not await _ensure_manager(callback):
         return
-    all_roles = await _get_manager_add_roles()
+    all_roles = await get_searchable_roles(exclude_manager_roles=True)
+    if state is not None:
+        await state.update_data(mgr_remind_roles_list=all_roles)
     buttons = []
     for i, role in enumerate(all_roles):
         label = role[:30] + "..." if len(role) > 30 else role
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"mgr_remind_role:{i}")])
+    buttons.append([InlineKeyboardButton(text="🌐 Всі посади", callback_data="mgr_remind_role:ALL")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_study_root")])
     await _edit_menu_message(
         callback.message,
@@ -1096,19 +1100,26 @@ async def manager_remind_menu(callback: CallbackQuery):
 async def manager_process_remind_role(callback: CallbackQuery, state: FSMContext):
     if not await _ensure_manager(callback):
         return
-    try:
-        role_idx = int(callback.data.split(":")[1])
-        all_roles = await _get_manager_add_roles()
-        role = all_roles[role_idx]
-    except (ValueError, IndexError):
-        await callback.answer("Некоректна посада.", show_alert=True)
-        return
+    role_part = callback.data.split(":", 1)[1] if ":" in (callback.data or "") else ""
+    if role_part == "ALL":
+        role = None
+        role_label = "всіх посад"
+    else:
+        try:
+            role_idx = int(role_part)
+            data = await state.get_data()
+            all_roles = data.get("mgr_remind_roles_list") or await get_searchable_roles(exclude_manager_roles=True)
+            role = all_roles[role_idx]
+            role_label = role
+        except (ValueError, IndexError):
+            await callback.answer("Некоректна посада.", show_alert=True)
+            return
 
     await state.update_data(role=role, mode="manager_global")
     await state.set_state(SearchStates.waiting_for_query)
     await _edit_menu_message(
         callback.message,
-        f"🧠 <b>Пошук матеріалів ({role})</b>\n\n"
+        f"🧠 <b>Пошук матеріалів ({html.escape(role_label)})</b>\n\n"
         "Введи ключові слова або питання, щоб знайти інформацію:",
         InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="mgr_remind_menu")]]),
         photo_path=PHOTO_MGR_MATERIALS

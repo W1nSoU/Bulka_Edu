@@ -274,3 +274,7 @@ async def init_db():
     from .shops import init_shops_db
     await init_shops_db()
 
+    # Ініціалізація бази знань для гібридного пошуку
+    from .knowledge_chunks import init_knowledge_chunks_db
+    await init_knowledge_chunks_db(DB_PATH)
+

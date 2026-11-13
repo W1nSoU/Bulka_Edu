@@ -7,10 +7,16 @@ OpenAI GPT service для AI-наставника навчальної плат�
 
 from __future__ import annotations
 
-import os
+import asyncio
+import html
 import json
-from typing import Optional, List
+import os
+import re
+from typing import List, Optional
+
 from bot.services.logger import get_logger
+from bot.utils.message_utils import sanitize_telegram_html
+from database import DB_PATH
 
 logger = get_logger()
 
@@ -48,9 +54,6 @@ def get_client():
             logger.error("openai package not installed. Run: pip install openai")
             return None
     return _client
-
-
-import asyncio
 
 
 async def generate_material_summary(
@@ -155,83 +158,306 @@ async def backfill_materials_summaries_background():
         logger.error(f"[AI Summary Worker] Помилка у фоновому процесі генерації summary: {e}", exc_info=True)
 
 
-def build_course_outline(all_materials: list[dict]) -> str:
-    """
-    Створює зміст курсу. Якщо для дня є згенероване `summary` — використовує його!
-    Це забезпечує надточний роутинг питань стажера до потрібного дня.
-    """
-    days_dict: dict[int, list[dict]] = {}
-    for m in all_materials:
-        day = m.get("day", 1)
-        days_dict.setdefault(day, []).append(m)
-
-    outline_lines = []
-    for day in sorted(days_dict.keys()):
-        mats = days_dict[day]
-        outline_lines.append(f"📅 День {day}:")
-        
-        # Перевіряємо, чи є хоча б одне summary для цього дня
-        summaries = [m.get("summary") for m in mats if m.get("summary")]
-        if summaries:
-            for s in summaries:
-                outline_lines.append(f"{s}\n")
-        else:
-            # Fallback: якщо summary ще не готове, беремо заголовки
-            for m in mats:
-                title = (m.get("title") or "").strip()
-                if not title:
-                    content = (m.get("content") or "").strip()
-                    title = content.split("\n")[0][:80] if content else "Без назви"
-                outline_lines.append(f"  • {title}")
-
-    return "\n".join(outline_lines)
+NO_ANSWER_MARKER = "__NO_ANSWER_IN_MATERIALS__"
+NETWORK_FALLBACK_NOTE = (
+    "<i>ℹ️ У матеріалах твоєї посади відповіді не знайдено, "
+    "тому я перевірив інструкції всієї мережі:</i>\n\n"
+)
 
 
-async def route_question_to_days(
+def _format_gpt_telegram_html(raw_text: str) -> str:
+    """Converts any leftover Markdown bolding/headings and sanitizes output for Telegram HTML."""
+    text = (raw_text or "").strip()
+    text = re.sub(r"(?m)^#{1,6}\s+(.+)$", r"<b>\1</b>", text)
+    text = re.sub(r"\*\*([^\n*]+?)\*\*", r"<b>\1</b>", text)
+    return sanitize_telegram_html(text)
+
+
+def _format_extractive_fallback(
     question: str,
-    course_outline: str,
-    user_id: int | None = None
-) -> List[int]:
+    results: list[dict],
+    used_network_fallback: bool = False,
+    max_items: int = 8,
+) -> str:
+    """Formats clean chunk excerpts when OpenAI chat completion is unavailable."""
+    safe_q = html.escape((question or "").strip())
+    lines: list[str] = [
+        f"🔎 <b>Результати пошуку за запитом «{safe_q}»</b>",
+        "<i>BULKA радник тимчасово недоступний. Показую знайдені фрагменти з інструкцій:</i>",
+        "",
+    ]
+    if used_network_fallback:
+        lines.append(NETWORK_FALLBACK_NOTE.strip())
+        lines.append("")
+
+    for idx, item in enumerate(results[:max_items], 1):
+        label = html.escape(item.get("sources_label") or "Інструкція")
+        excerpt = (item.get("excerpt") or "").strip()
+        if len(excerpt) > 450:
+            excerpt = excerpt[:449].rstrip() + "…"
+        lines.append(f"{idx}. <b>{label}</b>")
+        if excerpt:
+            lines.append(f"   {html.escape(excerpt)}")
+        lines.append("")
+
+    return sanitize_telegram_html("\n".join(lines).strip())
+
+
+def _build_chunks_context(results: list[dict]) -> str:
+    blocks: list[str] = []
+    for idx, item in enumerate(results, 1):
+        label = item.get("sources_label") or "Загальні матеріали"
+        excerpt = (item.get("excerpt") or "").strip()
+        if excerpt:
+            blocks.append(f"[Джерело {idx}: {label}]\n{excerpt}")
+    return "\n\n---\n\n".join(blocks)
+
+
+async def _synthesize_answer_from_chunks(
+    question: str,
+    results: list[dict],
+    role_label: str,
+    is_network_wide: bool,
+    user_id: Optional[int] = None,
+    client=None,
+) -> tuple[Optional[str], bool]:
     """
-    КРОК 1: Визначає, в яких саме днях навчання міститься відповідь на питання.
-    Швидкий запит до gpt-4o-mini (JSON response).
+    Calls gpt-4o-mini on retrieved chunks.
+
+    Returns (answer_text_or_none, gpt_was_available).
+    When GPT explicitly determines the excerpts do not answer the question, returns
+    (NO_ANSWER_MARKER, True).
     """
-    client = get_client()
-    if not client or not course_outline:
-        return []
+    active_client = client if client is not None else get_client()
+    if not active_client:
+        return None, False
+
+    context = _build_chunks_context(results)
+    if not context:
+        return NO_ANSWER_MARKER, True
+
+    citation_rule = (
+        "Обов'язково вказуй джерело у форматі [Посада, День X] для кожного факту або блоку."
+        if is_network_wide
+        else "Обов'язково вказуй, до якого дня відноситься інформація (наприклад: [День X])."
+    )
 
     system_prompt = (
-        "Ти — інтелектуальний диспетчер навчальної програми компанії BULKA.\n"
-        "Твоє завдання — проаналізувати зміст навчального курсу за днями і визначити, "
-        "в яких саме днях міститься відповідь на питання працівника.\n\n"
-        f"Зміст навчального курсу:\n{course_outline}\n\n"
-        "Правила:\n"
-        "1. Обери від 1 до 2 найбільш релевантних днів (наприклад, [1] або [2, 3]).\n"
-        "2. Якщо питання загальне по всій компанії чи правилах — можеш повернути до 3 днів.\n"
-        "3. Відповідай ТІЛЬКИ у форматі валідного JSON об'єкта: {\"days\": [номер_дня_1, номер_дня_2]}"
+        "Ти — BULKA радник, інтелектуальний помічник навчальної платформи мережі пекарень BULKA.\n"
+        "Твоє завдання — дати повну, точну та структуровану відповідь на запитання співробітника "
+        "ВИКЛЮЧНО на основі наданих нижче фрагментів інструкцій.\n\n"
+        "Правила відповідей:\n"
+        "• Відповідай тільки фактами з наданих джерел, не вигадуй регламенти, яких немає в тексті.\n"
+        "• Якщо в наданих фрагментах є кілька правил, умов або згадок по темі (наприклад, по всьому тексту чи кількох посадах) — "
+        "обов'язково включи та узагальни ВСІ релевантні пункти, нічого не пропускаючи.\n"
+        f"• {citation_rule}\n"
+        "• Використовуй ТІЛЬКИ валідні Telegram HTML-теги: <b>жирний</b>, <i>курсив</i>, <code>код</code>, <blockquote>цитата</blockquote>. "
+        "Категорично заборонено <ul>, <ol>, <li>, <p>, <br>, <h1>-<h6> та Markdown (** чи #). Для списків використовуй '• ' з нового рядка.\n"
+        f"• Якщо у наданих фрагментах взагалі немає відповіді на це запитання, відповідай ОДНИМ точним рядком: {NO_ANSWER_MARKER}\n\n"
+        f"Фрагменти інструкцій ({role_label}):\n\n"
+        f"{context}"
+    )
+
+    logger.info(
+        f"GPT tutor call: user={user_id}, scope='{role_label}', "
+        f"chunks={len(results)}, context_len={len(context)}, "
+        f"question='{question[:80]}...'"
     )
 
     try:
-        response = await client.chat.completions.create(
+        response = await active_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Питання працівника: {question}"}
+                {"role": "user", "content": question},
             ],
-            response_format={"type": "json_object"},
-            temperature=0.0,
-            max_tokens=150,
-            timeout=10.0,
+            max_tokens=1800,
+            temperature=0.2,
+            timeout=35.0,
         )
-        data = json.loads(response.choices[0].message.content or "{}")
-        days = data.get("days", [])
-        if isinstance(days, list) and all(isinstance(d, int) for d in days):
-            logger.info(f"AI Router: Question routed to days {days} for user={user_id}")
-            return days
+        raw_answer = (response.choices[0].message.content or "").strip()
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            logger.info(
+                f"GPT tutor success: user={user_id}, "
+                f"prompt_tokens={usage.prompt_tokens}, "
+                f"completion_tokens={usage.completion_tokens}, "
+                f"total_tokens={usage.total_tokens}"
+            )
+        if not raw_answer or NO_ANSWER_MARKER in raw_answer:
+            return NO_ANSWER_MARKER, True
+        return _format_gpt_telegram_html(raw_answer), True
     except Exception as e:
-        logger.warning(f"AI Router step failed (fallback will be used): {e}")
+        logger.error(f"OpenAI GPT tutor error (user={user_id}): {e}")
+        return None, False
 
-    return []
+
+async def answer_remind_topic(
+    question: str,
+    role_filter: Optional[str] = None,
+    user_id: Optional[int] = None,
+    db_path: str = DB_PATH,
+    client=None,
+) -> dict:
+    """
+    2-Stage hybrid retrieval + GPT synthesis for 'Нагадати тему':
+      - Global search (`role_filter is None`): searches all network chunks directly.
+      - Role search (`role_filter` set):
+          Stage 1 searches strictly role (+ 'ALL').
+          Stage 2 searches across the whole network ONLY if Stage 1 has 0 chunks,
+          no relevant matches, or GPT returns NO_ANSWER_MARKER.
+    """
+    from bot.services.semantic_search import hybrid_search_chunks
+
+    clean_question = (question or "").strip()
+    if not clean_question:
+        return {
+            "status": "not_found",
+            "text": "",
+            "used_network_fallback": False,
+            "used_gpt": False,
+            "matches": [],
+        }
+
+    # --- Global mode ("Всі посади") ---
+    if not role_filter:
+        global_res = await hybrid_search_chunks(
+            query=clean_question,
+            role_filter=None,
+            scope="global",
+            db_path=db_path,
+            client=client,
+        )
+        if not global_res["results"] or not global_res["has_relevant_match"]:
+            return {
+                "status": "not_found",
+                "text": "",
+                "used_network_fallback": False,
+                "used_gpt": False,
+                "matches": [],
+            }
+
+        answer, gpt_ok = await _synthesize_answer_from_chunks(
+            question=clean_question,
+            results=global_res["results"],
+            role_label="усіх посад мережі",
+            is_network_wide=True,
+            user_id=user_id,
+            client=client,
+        )
+        if gpt_ok:
+            if answer == NO_ANSWER_MARKER:
+                return {
+                    "status": "not_found",
+                    "text": "",
+                    "used_network_fallback": False,
+                    "used_gpt": True,
+                    "matches": [],
+                }
+            return {
+                "status": "ok",
+                "text": answer or "",
+                "used_network_fallback": False,
+                "used_gpt": True,
+                "matches": global_res["results"],
+            }
+
+        return {
+            "status": "fallback_lexical",
+            "text": _format_extractive_fallback(clean_question, global_res["results"], used_network_fallback=False),
+            "used_network_fallback": False,
+            "used_gpt": False,
+            "matches": global_res["results"],
+        }
+
+    # --- Stage 1: User's own role (+ 'ALL') ---
+    stage1_res = await hybrid_search_chunks(
+        query=clean_question,
+        role_filter=role_filter,
+        scope="role",
+        db_path=db_path,
+        client=client,
+    )
+
+    inspected_hashes: Optional[set[str]] = None
+    if stage1_res["scoped_chunk_count"] > 0 and stage1_res["has_relevant_match"] and stage1_res["results"]:
+        answer, gpt_ok = await _synthesize_answer_from_chunks(
+            question=clean_question,
+            results=stage1_res["results"],
+            role_label=role_filter,
+            is_network_wide=False,
+            user_id=user_id,
+            client=client,
+        )
+        if gpt_ok and answer and answer != NO_ANSWER_MARKER:
+            return {
+                "status": "ok",
+                "text": answer,
+                "used_network_fallback": False,
+                "used_gpt": True,
+                "matches": stage1_res["results"],
+            }
+        if not gpt_ok:
+            return {
+                "status": "fallback_lexical",
+                "text": _format_extractive_fallback(clean_question, stage1_res["results"], used_network_fallback=False),
+                "used_network_fallback": False,
+                "used_gpt": False,
+                "matches": stage1_res["results"],
+            }
+        # GPT inspected Stage 1 chunks and confirmed answer is absent there.
+        inspected_hashes = {r["chunk_hash"] for r in stage1_res["results"]}
+
+    # --- Stage 2: Cross-role network fallback ---
+    stage2_res = await hybrid_search_chunks(
+        query=clean_question,
+        role_filter=None,
+        scope="network_fallback",
+        exclude_hashes=inspected_hashes,
+        db_path=db_path,
+        client=client,
+    )
+    if not stage2_res["results"] or not stage2_res["has_relevant_match"]:
+        return {
+            "status": "not_found",
+            "text": "",
+            "used_network_fallback": True,
+            "used_gpt": False,
+            "matches": [],
+        }
+
+    answer2, gpt2_ok = await _synthesize_answer_from_chunks(
+        question=clean_question,
+        results=stage2_res["results"],
+        role_label="усієї мережі",
+        is_network_wide=True,
+        user_id=user_id,
+        client=client,
+    )
+    if gpt2_ok:
+        if answer2 == NO_ANSWER_MARKER or not answer2:
+            return {
+                "status": "not_found",
+                "text": "",
+                "used_network_fallback": True,
+                "used_gpt": True,
+                "matches": [],
+            }
+        return {
+            "status": "ok",
+            "text": f"{NETWORK_FALLBACK_NOTE}{answer2}",
+            "used_network_fallback": True,
+            "used_gpt": True,
+            "matches": stage2_res["results"],
+        }
+
+    return {
+        "status": "fallback_lexical",
+        "text": _format_extractive_fallback(clean_question, stage2_res["results"], used_network_fallback=True),
+        "used_network_fallback": True,
+        "used_gpt": False,
+        "matches": stage2_res["results"],
+    }
 
 
 async def ask_gpt_tutor(
@@ -240,92 +466,12 @@ async def ask_gpt_tutor(
     role: str,
     user_id: int | None = None,
 ) -> Optional[str]:
-    """
-    2-Step GPT Router:
-    Крок 1: Визначаємо релевантні дні за легким змістом курсу.
-    Крок 2: Завантажуємо повні тексти цих днів і формуємо відповідь від BULKA радника.
-    """
-    client = get_client()
-    if not client:
-        logger.warning("OpenAI not configured — skipping GPT tutor call")
-        return None
-
-    if not all_materials:
-        logger.warning(f"No materials provided for role '{role}', cannot answer")
-        return None
-
-    # --- КРОК 1: Автономний роутинг ---
-    course_outline = build_course_outline(all_materials)
-    target_days = await route_question_to_days(question, course_outline, user_id=user_id)
-
-    # Відбираємо матеріали: якщо роутер обрав дні — беремо тільки їх, інакше всі (або перші доступні)
-    if target_days:
-        selected_materials = [m for m in all_materials if m.get("day") in target_days]
-        if not selected_materials:
-            selected_materials = all_materials
-    else:
-        selected_materials = all_materials
-
-    # Збираємо контекст відібраних матеріалів
-    context_parts = []
-    for m in selected_materials:
-        day = m.get("day", "?")
-        title = (m.get("title") or "").strip()
-        content = (m.get("content") or "").strip()
-        if not content:
-            continue
-        header = f"📅 День {day}" + (f": {title}" if title else "")
-        context_parts.append(f"{header}\n{content}")
-
-    if not context_parts:
-        logger.warning(f"All selected materials for role '{role}' have empty content")
-        return None
-
-    context = "\n\n---\n\n".join(context_parts)
-
-    system_prompt = (
-        "Ти — BULKA радник 🥐, інтелектуальний помічник навчальної платформи мережі BULKA.\n"
-        "Твоя задача — чітко, структуровано та доброзичливо відповідати на питання стажерів і працівників "
-        "на основі офіційних навчальних матеріалів компанії.\n\n"
-        "Правила відповідей:\n"
-        "• Відповідай по суті, професійно та зрозуміло, як досвідчений наставник.\n"
-        "• Обов'язково вказуй, до якого дня навчання або теми відноситься інформація (наприклад: «Згідно з матеріалами Дня 2...»).\n"
-        "• Якщо інформації немає в наданих матеріалах — прямо скажи: «У навчальній програмі немає цієї інформації. Будь ласка, зверніться до свого керівника або наставника.»\n"
-        "• Не вигадуй стандартів чи регламентів, яких немає в тексті.\n"
-        "• Відповідай українською мовою з охайним форматуванням (списки, пункти).\n\n"
-        f"Навчальні матеріали для посади «{role}»:\n\n"
-        f"{context}"
-    )
-
-    logger.info(
-        f"GPT tutor call: user={user_id}, role='{role}', "
-        f"materials={len(context_parts)}, context_len={len(context)}, "
-        f"question='{question[:80]}...'"
-    )
-
-    try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question},
-            ],
-            max_tokens=1200,
-            temperature=0.3,
-        )
-        answer = response.choices[0].message.content
-        usage = response.usage
-        logger.info(
-            f"GPT tutor success: user={user_id}, "
-            f"prompt_tokens={usage.prompt_tokens}, "
-            f"completion_tokens={usage.completion_tokens}, "
-            f"total_tokens={usage.total_tokens}"
-        )
-        return answer
-
-    except Exception as e:
-        logger.error(f"OpenAI GPT tutor error (user={user_id}): {e}")
-        return None
+    """Compatibility wrapper delegating to 2-stage hybrid answer_remind_topic."""
+    normalized_role = None if (not role or role == "загальна") else role
+    res = await answer_remind_topic(question=question, role_filter=normalized_role, user_id=user_id)
+    if res["status"] == "ok":
+        return res["text"]
+    return None
 
 
 async def improve_news_text_with_gpt(original_text: str) -> Optional[str]:

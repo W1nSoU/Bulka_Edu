@@ -54,14 +54,15 @@ from bot.services.learning_progress import (
 )
 from bot.services.reminders import send_intern_reminder
 from bot.services.access import is_privileged_user, validate_user_id, parse_callback_id
-from bot.services.semantic_search import semantic_search
 from bot.services.groq_ai import search_with_ai, is_groq_configured
-from bot.services.openai_ai import ask_gpt_tutor, is_openai_configured
+from bot.services.openai_ai import answer_remind_topic
 from bot.services.logger import get_logger
 from bot.services.test_error_monitoring_service import get_test_error_statistics
-from database.materials import get_materials_for_day, search_materials as search_materials_db, get_all_materials, get_material_by_id, get_material_by_role_day_type, get_test_by_role_and_day
+from database.materials import get_materials_for_day, get_material_by_id, get_material_by_role_day_type, get_test_by_role_and_day
+from database.positions import get_searchable_roles
 from bot.constants import is_valid_role, is_valid_city
 from typing import List, Optional, cast
+from bot.utils.message_utils import SAFE_MESSAGE_LENGTH, sanitize_telegram_html
 from bot.utils.paginator import split_text
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -627,12 +628,6 @@ async def _all_days_accessible(user_id: int, role: Optional[str] = None) -> bool
         if status == DayStatus.CLOSED:
             return False
     return True
-
-def _build_snippet(text: str, limit: int = 240) -> str:
-    clean = (text or "").strip()
-    if len(clean) <= limit:
-        return clean
-    return textwrap.shorten(clean, width=limit, placeholder="…")
 
 def _validate_invite_payload(role: Optional[str], city: Optional[str]) -> tuple[bool, Optional[str]]:
     if role in ["Наглядач", "Територіал", "Керівник", "Керівник Стажер"]:
@@ -1503,51 +1498,31 @@ async def remind_topic_global_callback(callback: CallbackQuery, state: FSMContex
         await callback.answer("Ця функція доступна лише для керівництва.", show_alert=True)
         return
 
-    if is_dev or is_hr or is_obs or is_mgr:
-        from bot.constants import AVAILABLE_ROLES
-        filtered_roles = [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")] if is_mgr else AVAILABLE_ROLES
-        buttons = []
-        for i, role in enumerate(AVAILABLE_ROLES):
-            if role in filtered_roles:
-                buttons.append([InlineKeyboardButton(
-                    text=f"👤 {role}",
-                    callback_data=f"remind_role_select:{i}"
-                )])
-        if not is_mgr:
-            buttons.append([InlineKeyboardButton(text="🌐 Всі посади", callback_data="remind_role_select:ALL")])
-        
-        back_button_cb = "mgr_materials_catalog" if is_mgr else ("dev_main_study" if (is_dev or is_obs) else "manager_menu")
-        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_button_cb)])
-        
-        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-        prompt = (
-            "🧠 <b>Нагадати тему</b>\n\n"
-            "Обери посаду, по якій шукати матеріали:"
-        )
-        if callback.message:
-            if callback.message.photo:
-                await callback.message.edit_caption(caption=prompt, reply_markup=kb)
-            else:
-                await callback.message.edit_text(prompt, reply_markup=kb)
-        await callback.answer()
-        return
+    exclude_mgr = is_mgr and not (is_hr or is_dev or is_obs)
+    roles = await get_searchable_roles(exclude_manager_roles=exclude_mgr)
+    await state.update_data(remind_roles_list=roles)
 
-    await state.update_data(role=None, mode="global", intern_id=None)
-    await state.set_state(SearchStates.waiting_for_query)
+    buttons = [
+        [InlineKeyboardButton(text=f"👤 {role}", callback_data=f"remind_role_select:{i}")]
+        for i, role in enumerate(roles)
+    ]
+    buttons.append([InlineKeyboardButton(text="🌐 Всі посади", callback_data="remind_role_select:ALL")])
+
+    back_button_cb = "mgr_materials_catalog" if exclude_mgr else ("dev_main_study" if (is_dev or is_obs) else "manager_menu")
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_button_cb)])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     prompt = (
-        "🧠 <b>Глобальний пошук по матеріалах</b>\n\n"
-        "Введіть слово, фразу або питання, і я знайду відповідні матеріали для HR/Адміністраторів.\n"
-        "Наприклад: <i>мотивація</i>, <i>стандарти продажу</i>, <i>каса</i>."
+        "🧠 <b>Нагадати тему</b>\n\n"
+        "Обери посаду, по якій шукати матеріали:"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ В головне меню", callback_data="main_menu")]
-    ])
     if callback.message:
         if callback.message.photo:
             await callback.message.edit_caption(caption=prompt, reply_markup=kb)
         else:
             await callback.message.edit_text(prompt, reply_markup=kb)
     await callback.answer()
+
 
 async def remind_role_select_callback(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -1559,22 +1534,25 @@ async def remind_role_select_callback(callback: CallbackQuery, state: FSMContext
     if not (is_hr or is_dev or is_obs or is_mgr):
         await callback.answer("Ця функція доступна лише для керівництва.", show_alert=True)
         return
-    
+
     parts = callback.data.split(":", 1)
     if len(parts) != 2:
         await callback.answer("Невірний формат.", show_alert=True)
         return
-    
-    from bot.constants import AVAILABLE_ROLES
+
     role_part = parts[1]
-    
     if role_part == "ALL":
         role = None
     else:
+        data = await state.get_data()
+        roles = data.get("remind_roles_list")
+        if not roles:
+            exclude_mgr = is_mgr and not (is_hr or is_dev or is_obs)
+            roles = await get_searchable_roles(exclude_manager_roles=exclude_mgr)
         try:
             role_index = int(role_part)
-            if 0 <= role_index < len(AVAILABLE_ROLES):
-                role = AVAILABLE_ROLES[role_index]
+            if 0 <= role_index < len(roles):
+                role = roles[role_index]
             else:
                 await callback.answer("Невідома роль.", show_alert=True)
                 return
@@ -1584,8 +1562,8 @@ async def remind_role_select_callback(callback: CallbackQuery, state: FSMContext
 
     await state.update_data(role=role, mode="dev_test", intern_id=None)
     await state.set_state(SearchStates.waiting_for_query)
-    
-    role_text = role if role else "всіх посад"
+
+    role_text = html.escape(role if role else "всіх посад")
     prompt = (
         f"🧠 <b>Пошук матеріалів</b>\n\n"
         f"Посада: <b>{role_text}</b>\n\n"
@@ -1678,6 +1656,18 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
             return
         role_filter = target_role
         new_search_callback = "mgr_remind_menu"
+    elif mode == "dev_test":
+        if not (
+            await is_hr_user(user_id)
+            or await is_developer_user(user_id)
+            or await is_observer_user(user_id)
+            or await is_manager_user(user_id)
+        ):
+            await message.answer("Цей режим доступний лише для керівництва.")
+            await state.clear()
+            return
+        role_filter = target_role
+        new_search_callback = "remind_topic_global"
     elif mode == "for_intern":
         intern_id = data.get("intern_id")
         if not intern_id:
@@ -1712,51 +1702,23 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
     # Показуємо індикатор "думає"
     thinking_msg = await message.answer("🥐 <b>BULKA радник</b> аналізує навчальні матеріали...", parse_mode="HTML")
 
-    # --- Завантажуємо всі матеріали для ролі ---
-    all_mats = await get_all_materials()
-    if role_filter:
-        role_mats = [m for m in all_mats if m.get("role") == role_filter]
-    else:
-        # global mode (для HR/Адміністратора) — всі матеріали
-        role_mats = all_mats
+    # --- 2-етапний гібридний пошук + GPT-синтез (працює навіть якщо у ролі 0 власних матеріалів) ---
+    result = await answer_remind_topic(
+        question=query,
+        role_filter=role_filter,
+        user_id=user_id,
+    )
 
-    # --- GPT-наставник (2-Step Router) ---
-    ai_response = None
-    if is_openai_configured() and role_mats:
-        ai_response = await ask_gpt_tutor(
-            question=query,
-            all_materials=role_mats,
-            role=role_filter or "загальна",
-            user_id=user_id,
+    if result.get("status") == "ok" and result.get("text"):
+        text = sanitize_telegram_html(f"🥐 <b>BULKA радник</b>\n\n{result['text']}")
+    elif result.get("status") == "fallback_lexical" and result.get("text"):
+        logger.warning(f"GPT unavailable, returning clean lexical chunk fallback for user={user_id}")
+        text = sanitize_telegram_html(result["text"])
+    else:
+        text = (
+            f"😿 На жаль, я не знайшов інформації за запитом <b>«{html.escape(query)}»</b>.\n"
+            "Спробуй інше формулювання або постав питання більш конкретно."
         )
-
-    # --- Fallback: якщо GPT недоступний, показати keyword результати ---
-    if not ai_response:
-        logger.warning(f"GPT unavailable or no materials, falling back to keyword search for user={user_id}")
-        keyword_results = await search_materials_db(query, role=role_filter, limit=5)
-        if keyword_results:
-            lines = [
-                f"🔎 <b>Результати пошуку за запитом «{query}»</b>",
-                "<i>BULKA радник тимчасово недоступний. Показую знайдене за ключовими словами:</i>",
-                "",
-            ]
-            for idx, item in enumerate(keyword_results, 1):
-                day = item.get("day", "?")
-                title = item.get("title", "Без назви")
-                content_snippet = _build_snippet(item.get("content", ""), 200)
-                lines.append(f"{idx}. <b>День {day}</b> — {title}")
-                if content_snippet:
-                    lines.append(f"   {content_snippet}")
-                lines.append("")
-            text = "\n".join(lines).strip()
-        else:
-            text = (
-                f"😿 На жаль, я не знайшов інформації за запитом <b>«{query}»</b>.\n"
-                "Спробуй інше формулювання або постав питання більш конкретно."
-            )
-    else:
-        # Чиста відповідь від BULKA радник
-        text = f"🥐 <b>BULKA радник</b>\n\n{ai_response}"
 
     # Видаляємо індикатор "думає"
     try:
@@ -1771,14 +1733,14 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
         ]
     )
 
-    # Telegram ліміт 4096 символів
-    MAX_MESSAGE_LENGTH = 4000
-    if len(text) <= MAX_MESSAGE_LENGTH:
+    if len(text) <= SAFE_MESSAGE_LENGTH:
         await message.answer(text, reply_markup=kb, parse_mode="HTML")
     else:
-        truncated = text[:MAX_MESSAGE_LENGTH - 100] + "\n\n<i>... (відповідь обрізано через довжину)</i>"
-        await message.answer(truncated, reply_markup=kb, parse_mode="HTML")
-        logger.warning(f"GPT response truncated: {len(text)} -> {len(truncated)} chars")
+        parts = split_text(text, page_size=SAFE_MESSAGE_LENGTH - 150)
+        for idx, part in enumerate(parts):
+            safe_part = sanitize_telegram_html(part) or part
+            is_last = idx == len(parts) - 1
+            await message.answer(safe_part, reply_markup=kb if is_last else None, parse_mode="HTML")
 
     await state.clear()
 

@@ -22,7 +22,8 @@ from bot.services.logger import setup_bot_logger, get_logger
 from bot.services.health import token_cleanup_loop, health_monitor_loop
 from bot.services.reports import auto_monthly_report_sender # New import
 from bot.services.groq_ai import is_groq_configured, get_groq_status
-from bot.services.openai_ai import is_openai_configured, backfill_materials_summaries_background
+from bot.services.openai_ai import is_openai_configured
+from bot.services.semantic_search import build_and_reset_embeddings
 from bot.services.test_error_monitoring_service import perform_monthly_reset_if_due, get_intern_incomplete_open_test_days, group_test_failures_by_manager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler # New import
 from bot.services.survey_broadcaster import survey_reminder_worker
@@ -180,11 +181,11 @@ async def start_bot():
     
     # Запускаємо фонові воркери
     background_tasks = [
-        asyncio.create_task(backfill_materials_summaries_background()),
+        asyncio.create_task(build_and_reset_embeddings()),
         asyncio.create_task(survey_reminder_worker(bot)),
         asyncio.create_task(attestation_reminder_worker(bot))
     ]
-    print_status("🧠", "Фонова синхронізація AI-паспортів матеріалів запущена", indent=5)
+    print_status("🧠", "Фонова синхронізація індексу бази знань запущена", indent=5)
     print_status("📝", "Фоновий воркер опитувань та нагадувань запущено", indent=5)
     print_status("🎓", "Фоновий воркер атестації запущено", indent=5)
     
