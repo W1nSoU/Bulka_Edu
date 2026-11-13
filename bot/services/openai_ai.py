@@ -221,6 +221,7 @@ async def _synthesize_answer_from_chunks(
     user_id: Optional[int] = None,
     client=None,
     allow_no_answer: bool = True,
+    term_hints: Optional[list[str]] = None,
 ) -> tuple[Optional[str], bool]:
     """
     Calls gpt-4o-mini on retrieved chunks.
@@ -249,6 +250,11 @@ async def _synthesize_answer_from_chunks(
         if allow_no_answer
         else "• Склади огляд усіх наявних згадок, правил і деталей за темою з наданих фрагментів.\n"
     )
+    terminology_note = (
+        f"• Термінологія мережі BULKA для цього запиту: {' '.join(term_hints)}\n"
+        if term_hints
+        else ""
+    )
 
     system_prompt = (
         "Ти — BULKA радник, інтелектуальний помічник навчальної платформи мережі пекарень BULKA.\n"
@@ -257,6 +263,7 @@ async def _synthesize_answer_from_chunks(
         "Правила відповідей:\n"
         "• Запит може бути як повноцінним запитанням, так і коротким ключовим словом чи темою (наприклад: «РЦ», «Каса», «Списування алкоголю»).\n"
         "• Якщо у фрагментах згадується запитуваний термін, процес чи тема — ОБОВ'ЯЗКОВО збери, структуруй і виклади ВСІ знайдені правила, процедури, винятки й нюанси з УСІХ наданих джерел. НЕ шукай словникове визначення терміна — дай саме практичні правила з інструкцій!\n"
+        f"{terminology_note}"
         "• Відповідай тільки фактами з наданих джерел, не вигадуй регламенти, яких немає в тексті.\n"
         f"• {citation_rule}\n"
         "• Використовуй ТІЛЬКИ валідні Telegram HTML-теги: <b>жирний</b>, <i>курсив</i>, <code>код</code>, <blockquote>цитата</blockquote>. "
@@ -318,9 +325,14 @@ async def _finalize_final_scope_answer(
 
     results = search_res["results"]
     has_exact = any(r.get("is_exact_match") for r in results)
-    is_short_keyword_query = len(tokenize_query(clean_question)) <= 2
+    has_partial = any(r.get("has_partial_exact") for r in results)
+    is_topic_list = bool(search_res.get("is_topic_list"))
+    concept_count = int(search_res.get("concept_count") or len(tokenize_query(clean_question)))
+    is_topic_search = concept_count <= 2 or is_topic_list
+    has_strong_hit = has_exact or (is_topic_list and has_partial)
+    term_hints = search_res.get("term_hints") or None
 
-    allow_no_answer_first = not (has_exact and is_short_keyword_query)
+    allow_no_answer_first = not (has_strong_hit and is_topic_search)
 
     answer, gpt_ok = await _synthesize_answer_from_chunks(
         question=clean_question,
@@ -330,10 +342,11 @@ async def _finalize_final_scope_answer(
         user_id=user_id,
         client=client,
         allow_no_answer=allow_no_answer_first,
+        term_hints=term_hints,
     )
 
-    if gpt_ok and answer == NO_ANSWER_MARKER and has_exact and allow_no_answer_first:
-        # Safety net: exact literal mentions exist in retrieved chunks, retry summary once.
+    if gpt_ok and answer == NO_ANSWER_MARKER and has_strong_hit and allow_no_answer_first:
+        # Safety net: strong domain/lexical mentions exist in retrieved chunks, retry summary once.
         answer, gpt_ok = await _synthesize_answer_from_chunks(
             question=clean_question,
             results=results,
@@ -342,11 +355,12 @@ async def _finalize_final_scope_answer(
             user_id=user_id,
             client=client,
             allow_no_answer=False,
+            term_hints=term_hints,
         )
 
     if gpt_ok:
         if answer == NO_ANSWER_MARKER or not answer:
-            if has_exact:
+            if has_strong_hit:
                 fallback_txt = _format_extractive_fallback(
                     clean_question, results, used_network_fallback=used_network_fallback
                 )
@@ -397,9 +411,9 @@ async def answer_remind_topic(
           Stage 2 searches across the whole network ONLY if Stage 1 has 0 chunks,
           no relevant matches, or GPT returns NO_ANSWER_MARKER.
     """
-    from bot.services.semantic_search import hybrid_search_chunks
+    from bot.services.semantic_search import hybrid_search_chunks, sanitize_search_query
 
-    clean_question = (question or "").strip()
+    clean_question = sanitize_search_query(question)
     if not clean_question:
         return {
             "status": "not_found",
@@ -454,6 +468,7 @@ async def answer_remind_topic(
             user_id=user_id,
             client=client,
             allow_no_answer=True,
+            term_hints=stage1_res.get("term_hints") or None,
         )
         if gpt_ok and answer and answer != NO_ANSWER_MARKER:
             return {

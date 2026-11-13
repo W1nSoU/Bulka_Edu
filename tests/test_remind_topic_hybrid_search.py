@@ -447,6 +447,119 @@ class TestHybridSearchAndSqliteCache(unittest.IsolatedAsyncioTestCase):
         self.assertIn("РЦ", res_rc_adversarial["text"])
         self.assertEqual(len(adversarial_client.chat.completions.calls), 1)
 
+    async def test_domain_synonyms_copy_paste_cleanup_and_topic_lists(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            # 12 distinct RC chunks + 2 distinct Sklad chunks + ТТ + ф/о + non-matching distractor with 'працівники'
+            for i in range(1, 13):
+                filler = f"Загальний опис операцій зміни #{i} для торгової зали та касової зони. " * 6
+                await db.execute(
+                    "INSERT INTO materials (role, day, content_type, title, content) VALUES (?, ?, 'text', ?, ?)",
+                    (f"Роль РЦ {i}", 1, f"Поставки {i}", f"{filler}\n\nПрийом поставки з РЦ #{i}: перевірити накладні РЦ."),
+                )
+            await db.execute(
+                "INSERT INTO materials (role, day, content_type, title, content) VALUES (?, ?, 'text', ?, ?)",
+                ("Старший продавець", 2, "Склад", "Склад магазину: підтримувати прохід вільним та маркувати стелажі на складі."),
+            )
+            await db.execute(
+                "INSERT INTO materials (role, day, content_type, title, content) VALUES (?, ?, 'text', ?, ?)",
+                ("Приймальник", 2, "Овочі", "Склад ф/о приймає ящики з фруктами та овочами щодня зранку на ТТ."),
+            )
+            await db.execute(
+                "INSERT INTO materials (role, day, content_type, title, content) VALUES (?, ?, 'text', ?, ?)",
+                ("Касир", 1, "Загальне", "Працівники магазину проходять інструктаж перед першою зміною."),
+            )
+            await db.commit()
+
+        # Deliberately give weak embedding similarity to 'РЦ' vs noise so bidirectional synonym rules must carry retrieval
+        def vec_fn(txt: str) -> list[float]:
+            if "Працівники" in txt or "Місяць" in txt:
+                return [1.0, 0.0, 0.0]
+            if "РЦ" in txt or "Розподільчий центр" in txt:
+                return [0.7, 0.7, 0.0]
+            return [0.0, 0.0, 1.0]
+
+        def smart_chat(kwargs, call_idx):
+            sys_prompt = kwargs["messages"][0]["content"]
+            user_prompt = kwargs["messages"][1]["content"]
+            if "Місяць" in user_prompt:
+                return NO_ANSWER_MARKER
+            if "Прийом поставки з РЦ #1" in sys_prompt and "Прийом поставки з РЦ #12" in sys_prompt:
+                return "Знайдено всі правила по РЦ та складу [Роль РЦ 1, День 1]."
+            return "Знайдено інструкцію [День 2]."
+
+        fake_client = _FakeOpenAIClient(vector_fn=vec_fn, chat_handler=smart_chat)
+
+        # 1) Full name 'Розподільчий центр' must find ALL 12 chunks written as 'РЦ' + enrich GPT prompt + disable NO_ANSWER_MARKER
+        search_rc_full = await hybrid_search_chunks(
+            query="Розподільчий центр",
+            role_filter=None,
+            scope="global",
+            db_path=self.db_path,
+            client=fake_client,
+        )
+        self.assertTrue(search_rc_full["has_relevant_match"])
+        self.assertEqual(search_rc_full["concept_count"], 1)
+        joined_rc = "\n".join(r["excerpt"] for r in search_rc_full["results"])
+        for i in range(1, 13):
+            self.assertIn(f"Прийом поставки з РЦ #{i}", joined_rc)
+
+        fake_client.chat.completions.calls.clear()
+        ans_rc_full = await answer_remind_topic(
+            question="Розподільчий центр",
+            role_filter=None,
+            user_id=738460434,
+            db_path=self.db_path,
+            client=fake_client,
+        )
+        self.assertEqual(ans_rc_full["status"], "ok")
+        self.assertEqual(len(fake_client.chat.completions.calls), 1)
+        sys_p = fake_client.chat.completions.calls[0]["messages"][0]["content"]
+        self.assertNotIn(NO_ANSWER_MARKER, sys_p)
+        self.assertIn("«РЦ»", sys_p)
+
+        # 2) Copy-paste noisy query 'Розподільчий центр, склад 09:29 //' strips '09:29 //', hits both РЦ and склад, and returns ok
+        fake_client.chat.completions.calls.clear()
+        ans_combo = await answer_remind_topic(
+            question="Розподільчий центр, склад 09:29 //",
+            role_filter=None,
+            user_id=738460434,
+            db_path=self.db_path,
+            client=fake_client,
+        )
+        self.assertEqual(ans_combo["status"], "ok")
+        combo_sys = fake_client.chat.completions.calls[0]["messages"][0]["content"]
+        combo_user = fake_client.chat.completions.calls[0]["messages"][1]["content"]
+        self.assertNotIn("09:29", combo_user)
+        self.assertNotIn("//", combo_user)
+        self.assertNotIn(NO_ANSWER_MARKER, combo_sys)
+        self.assertIn("Склад магазину", combo_sys)
+        self.assertIn("Прийом поставки з РЦ #12", combo_sys)
+
+        # 3) Combined synonymous + extra list ('РЦ, розподільчий центр, склад') deduplicates concepts to 2
+        res_dup_list = await hybrid_search_chunks("РЦ, розподільчий центр, склад", role_filter=None, scope="global", db_path=self.db_path, client=fake_client)
+        self.assertEqual(res_dup_list["concept_count"], 2)
+        self.assertTrue(res_dup_list["is_topic_list"])
+
+        # 4) Bidirectional aliases: 'фрукти та овочі' hits 'Склад ф/о' and 'Торгова точка' hits 'ТТ'
+        search_fo = await hybrid_search_chunks("фрукти та овочі", role_filter=None, scope="global", db_path=self.db_path, client=fake_client)
+        self.assertTrue(any("Склад ф/о" in r["excerpt"] for r in search_fo["results"]))
+        self.assertTrue(any(r["is_exact_match"] for r in search_fo["results"]))
+
+        search_tt = await hybrid_search_chunks("Торгова точка", role_filter=None, scope="global", db_path=self.db_path, client=fake_client)
+        self.assertTrue(any("щодня зранку на ТТ" in r["excerpt"] for r in search_tt["results"]))
+        self.assertTrue(any(r["is_exact_match"] for r in search_tt["results"]))
+
+        # 4) Non-existent topic even when an unspecific word ('працівники') matches still returns 'not_found'
+        fake_client.chat.completions.calls.clear()
+        ans_moon = await answer_remind_topic(
+            question="Коли працівники Булки летять на Місяць?",
+            role_filter=None,
+            user_id=738460434,
+            db_path=self.db_path,
+            client=fake_client,
+        )
+        self.assertEqual(ans_moon["status"], "not_found")
+
 
 class TestRemindHandlersAndDynamicRoles(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
