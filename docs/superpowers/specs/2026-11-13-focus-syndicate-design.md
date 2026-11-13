@@ -14,6 +14,7 @@
    - `aiogram 3` (long-polling — працює через вихідні HTTPS-запити з MacBook без вебхуків, доменів чи тунелів).
    - Тонкий клієнт **Telegram Bot API 10.4 HTML Widgets** (`aiohttp`): прямі виклики `sendWidget`, `editMessageWidgetData`, `answerWidgetQuery` та обробка `widget_query` updates.
    - Уся торгівля, створення/вступ у синдикати, призначення ролей, синергія та таємне голосування відбуваються **виключно в Telegram-боті**.
+   - **Вхід для адміністратора (`ADMIN_TG_IDS`):** при відправці `/start` адміном бот **одразу відкриває адмін-панель** (без екрану звичайного гравця), з доступом до керування етапами, вибору спікера, зупинки графіка, Margin Call, «Купівлі людини» та опційним перемикачем для перегляду інтерфейсу гравця.
    - Резервний `/legacy`-режим (звичайні inline-кнопки Telegram), якщо у когось із гостей не оновлений клієнт Telegram під Bot API 10.4.
 
 2. **Web Server (`web/` — `FastAPI` + `WebSocket` на `http://localhost:8000`):**
@@ -147,8 +148,8 @@ Focus_Syndicate/
 │   ├── __init__.py
 │   ├── widgets_api.py       # Прямий Bot API 10.4 клієнт (sendWidget, editMessageWidgetData, answerWidgetQuery)
 │   ├── templates.py         # Компактні HTML-віджети (<2.5 KB gzip): Lock, Hub/Syndicate, Trading, Synergy, Duel
-│   ├── handlers.py          # /start (QR join/syn/ally), text input для назви синдикату, widget_query router, /legacy fallback
-│   └── admin_handlers.py    # Дубль ключових кнопок адміна в Telegram (/admin)
+│   ├── handlers.py          # /start (авто-роутинг: ADMIN_TG_IDS -> адмінка, гість -> гравець; QR join/syn/ally)
+│   └── admin_handlers.py    # Адмін-панель у Telegram (відкривається одразу на /start для ADMIN_TG_IDS + /admin)
 ├── web/
 │   ├── app.py               # FastAPI routes (/screen, /admin, /board, /api/*) + WebSocket hub
 │   └── static/
