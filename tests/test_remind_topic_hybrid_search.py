@@ -416,6 +416,37 @@ class TestHybridSearchAndSqliteCache(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res_none["status"], "not_found")
         self.assertEqual(len(fake_client.chat.completions.calls), 0)
 
+        # 7) Short keyword query 'РЦ' in global scope forbids NO_ANSWER_MARKER in prompt,
+        # and even an adversarial GPT returning NO_ANSWER_MARKER degrades safely to lexical excerpts (never 'not_found').
+        fake_client.chat.completions.calls.clear()
+        res_rc_ok = await answer_remind_topic(
+            question="РЦ",
+            role_filter=None,
+            user_id=738460434,
+            db_path=self.db_path,
+            client=fake_client,
+        )
+        self.assertEqual(res_rc_ok["status"], "ok")
+        self.assertEqual(len(fake_client.chat.completions.calls), 1)
+        rc_sys_prompt = fake_client.chat.completions.calls[0]["messages"][0]["content"]
+        self.assertNotIn(NO_ANSWER_MARKER, rc_sys_prompt)
+
+        adversarial_client = _FakeOpenAIClient(
+            vector_fn=domain_vec,
+            chat_handler=lambda kwargs, idx: NO_ANSWER_MARKER,
+        )
+        res_rc_adversarial = await answer_remind_topic(
+            question="РЦ",
+            role_filter=None,
+            user_id=738460434,
+            db_path=self.db_path,
+            client=adversarial_client,
+        )
+        self.assertEqual(res_rc_adversarial["status"], "fallback_lexical")
+        self.assertNotIn(NO_ANSWER_MARKER, res_rc_adversarial["text"])
+        self.assertIn("РЦ", res_rc_adversarial["text"])
+        self.assertEqual(len(adversarial_client.chat.completions.calls), 1)
+
 
 class TestRemindHandlersAndDynamicRoles(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

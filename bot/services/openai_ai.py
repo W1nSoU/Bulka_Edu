@@ -220,13 +220,14 @@ async def _synthesize_answer_from_chunks(
     is_network_wide: bool,
     user_id: Optional[int] = None,
     client=None,
+    allow_no_answer: bool = True,
 ) -> tuple[Optional[str], bool]:
     """
     Calls gpt-4o-mini on retrieved chunks.
 
     Returns (answer_text_or_none, gpt_was_available).
-    When GPT explicitly determines the excerpts do not answer the question, returns
-    (NO_ANSWER_MARKER, True).
+    When `allow_no_answer=True` and GPT determines the excerpts do not answer the
+    question, returns (NO_ANSWER_MARKER, True).
     """
     active_client = client if client is not None else get_client()
     if not active_client:
@@ -234,7 +235,7 @@ async def _synthesize_answer_from_chunks(
 
     context = _build_chunks_context(results)
     if not context:
-        return NO_ANSWER_MARKER, True
+        return (NO_ANSWER_MARKER, True) if allow_no_answer else (None, False)
 
     citation_rule = (
         "Обов'язково вказуй джерело у форматі [Посада, День X] для кожного факту або блоку."
@@ -242,20 +243,32 @@ async def _synthesize_answer_from_chunks(
         else "Обов'язково вказуй, до якого дня відноситься інформація (наприклад: [День X])."
     )
 
+    no_answer_rule = (
+        f"• Тільки якщо надані фрагменти тематично зовсім не стосуються запиту й не містять жодної "
+        f"корисної згадки чи правила за цією темою, відповідай ОДНИМ точним рядком: {NO_ANSWER_MARKER}\n"
+        if allow_no_answer
+        else "• Склади огляд усіх наявних згадок, правил і деталей за темою з наданих фрагментів.\n"
+    )
+
     system_prompt = (
         "Ти — BULKA радник, інтелектуальний помічник навчальної платформи мережі пекарень BULKA.\n"
-        "Твоє завдання — дати повну, точну та структуровану відповідь на запитання співробітника "
+        "Твоє завдання — дати повну, точну та структуровану відповідь співробітнику "
         "ВИКЛЮЧНО на основі наданих нижче фрагментів інструкцій.\n\n"
         "Правила відповідей:\n"
+        "• Запит може бути як повноцінним запитанням, так і коротким ключовим словом чи темою (наприклад: «РЦ», «Каса», «Списування алкоголю»).\n"
+        "• Якщо у фрагментах згадується запитуваний термін, процес чи тема — ОБОВ'ЯЗКОВО збери, структуруй і виклади ВСІ знайдені правила, процедури, винятки й нюанси з УСІХ наданих джерел. НЕ шукай словникове визначення терміна — дай саме практичні правила з інструкцій!\n"
         "• Відповідай тільки фактами з наданих джерел, не вигадуй регламенти, яких немає в тексті.\n"
-        "• Якщо в наданих фрагментах є кілька правил, умов або згадок по темі (наприклад, по всьому тексту чи кількох посадах) — "
-        "обов'язково включи та узагальни ВСІ релевантні пункти, нічого не пропускаючи.\n"
         f"• {citation_rule}\n"
         "• Використовуй ТІЛЬКИ валідні Telegram HTML-теги: <b>жирний</b>, <i>курсив</i>, <code>код</code>, <blockquote>цитата</blockquote>. "
         "Категорично заборонено <ul>, <ol>, <li>, <p>, <br>, <h1>-<h6> та Markdown (** чи #). Для списків використовуй '• ' з нового рядка.\n"
-        f"• Якщо у наданих фрагментах взагалі немає відповіді на це запитання, відповідай ОДНИМ точним рядком: {NO_ANSWER_MARKER}\n\n"
+        f"{no_answer_rule}\n"
         f"Фрагменти інструкцій ({role_label}):\n\n"
         f"{context}"
+    )
+
+    user_prompt = (
+        f"Запит користувача (питання або ключова тема пошуку): «{question}»\n"
+        "Дай структуровану відповідь з усіма знайденими правилами та згадками з наданих фрагментів."
     )
 
     logger.info(
@@ -269,7 +282,7 @@ async def _synthesize_answer_from_chunks(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question},
+                {"role": "user", "content": user_prompt},
             ],
             max_tokens=1800,
             temperature=0.2,
@@ -290,6 +303,83 @@ async def _synthesize_answer_from_chunks(
     except Exception as e:
         logger.error(f"OpenAI GPT tutor error (user={user_id}): {e}")
         return None, False
+
+
+async def _finalize_final_scope_answer(
+    clean_question: str,
+    search_res: dict,
+    role_label: str,
+    used_network_fallback: bool,
+    user_id: Optional[int],
+    client=None,
+) -> dict:
+    """Synthesizes GPT response for Global/Stage-2 scopes with exact-match safety net."""
+    from bot.services.semantic_search import tokenize_query
+
+    results = search_res["results"]
+    has_exact = any(r.get("is_exact_match") for r in results)
+    is_short_keyword_query = len(tokenize_query(clean_question)) <= 2
+
+    allow_no_answer_first = not (has_exact and is_short_keyword_query)
+
+    answer, gpt_ok = await _synthesize_answer_from_chunks(
+        question=clean_question,
+        results=results,
+        role_label=role_label,
+        is_network_wide=True,
+        user_id=user_id,
+        client=client,
+        allow_no_answer=allow_no_answer_first,
+    )
+
+    if gpt_ok and answer == NO_ANSWER_MARKER and has_exact and allow_no_answer_first:
+        # Safety net: exact literal mentions exist in retrieved chunks, retry summary once.
+        answer, gpt_ok = await _synthesize_answer_from_chunks(
+            question=clean_question,
+            results=results,
+            role_label=role_label,
+            is_network_wide=True,
+            user_id=user_id,
+            client=client,
+            allow_no_answer=False,
+        )
+
+    if gpt_ok:
+        if answer == NO_ANSWER_MARKER or not answer:
+            if has_exact:
+                fallback_txt = _format_extractive_fallback(
+                    clean_question, results, used_network_fallback=used_network_fallback
+                )
+                return {
+                    "status": "fallback_lexical",
+                    "text": fallback_txt,
+                    "used_network_fallback": used_network_fallback,
+                    "used_gpt": False,
+                    "matches": results,
+                }
+            return {
+                "status": "not_found",
+                "text": "",
+                "used_network_fallback": used_network_fallback,
+                "used_gpt": True,
+                "matches": [],
+            }
+        final_text = f"{NETWORK_FALLBACK_NOTE}{answer}" if used_network_fallback else answer
+        return {
+            "status": "ok",
+            "text": final_text,
+            "used_network_fallback": used_network_fallback,
+            "used_gpt": True,
+            "matches": results,
+        }
+
+    return {
+        "status": "fallback_lexical",
+        "text": _format_extractive_fallback(clean_question, results, used_network_fallback=used_network_fallback),
+        "used_network_fallback": used_network_fallback,
+        "used_gpt": False,
+        "matches": results,
+    }
 
 
 async def answer_remind_topic(
@@ -336,39 +426,14 @@ async def answer_remind_topic(
                 "used_gpt": False,
                 "matches": [],
             }
-
-        answer, gpt_ok = await _synthesize_answer_from_chunks(
-            question=clean_question,
-            results=global_res["results"],
+        return await _finalize_final_scope_answer(
+            clean_question=clean_question,
+            search_res=global_res,
             role_label="усіх посад мережі",
-            is_network_wide=True,
+            used_network_fallback=False,
             user_id=user_id,
             client=client,
         )
-        if gpt_ok:
-            if answer == NO_ANSWER_MARKER:
-                return {
-                    "status": "not_found",
-                    "text": "",
-                    "used_network_fallback": False,
-                    "used_gpt": True,
-                    "matches": [],
-                }
-            return {
-                "status": "ok",
-                "text": answer or "",
-                "used_network_fallback": False,
-                "used_gpt": True,
-                "matches": global_res["results"],
-            }
-
-        return {
-            "status": "fallback_lexical",
-            "text": _format_extractive_fallback(clean_question, global_res["results"], used_network_fallback=False),
-            "used_network_fallback": False,
-            "used_gpt": False,
-            "matches": global_res["results"],
-        }
 
     # --- Stage 1: User's own role (+ 'ALL') ---
     stage1_res = await hybrid_search_chunks(
@@ -388,6 +453,7 @@ async def answer_remind_topic(
             is_network_wide=False,
             user_id=user_id,
             client=client,
+            allow_no_answer=True,
         )
         if gpt_ok and answer and answer != NO_ANSWER_MARKER:
             return {
@@ -426,38 +492,14 @@ async def answer_remind_topic(
             "matches": [],
         }
 
-    answer2, gpt2_ok = await _synthesize_answer_from_chunks(
-        question=clean_question,
-        results=stage2_res["results"],
+    return await _finalize_final_scope_answer(
+        clean_question=clean_question,
+        search_res=stage2_res,
         role_label="усієї мережі",
-        is_network_wide=True,
+        used_network_fallback=True,
         user_id=user_id,
         client=client,
     )
-    if gpt2_ok:
-        if answer2 == NO_ANSWER_MARKER or not answer2:
-            return {
-                "status": "not_found",
-                "text": "",
-                "used_network_fallback": True,
-                "used_gpt": True,
-                "matches": [],
-            }
-        return {
-            "status": "ok",
-            "text": f"{NETWORK_FALLBACK_NOTE}{answer2}",
-            "used_network_fallback": True,
-            "used_gpt": True,
-            "matches": stage2_res["results"],
-        }
-
-    return {
-        "status": "fallback_lexical",
-        "text": _format_extractive_fallback(clean_question, stage2_res["results"], used_network_fallback=True),
-        "used_network_fallback": True,
-        "used_gpt": False,
-        "matches": stage2_res["results"],
-    }
 
 
 async def ask_gpt_tutor(
