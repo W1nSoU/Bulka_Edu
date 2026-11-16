@@ -29,6 +29,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler # New import
 from bot.services.survey_broadcaster import survey_reminder_worker
 from database.attestation import init_attestation_db
 from bot.services.attestation_worker import attestation_reminder_worker
+from database.raffles import (
+    init_raffles_db,
+    check_and_complete_expired_raffles,
+    cleanup_expired_raffle_media,
+)
 
 
 
@@ -72,6 +77,21 @@ async def daily_test_failure_notifier(bot: Bot):
     except Exception as exc:
         logger.error(f"daily_test_failure_notifier error: {exc}", exc_info=True, send_alert=True)
     logger.info("🔵 daily_test_failure_notifier finished.")
+
+
+async def raffle_maintenance_loop():
+    """
+    Періодичне обслуговування розіграшів:
+    - автоматично завершує розіграші, у яких минув дедлайн;
+    - очищає медіафайли розіграшів, завершених понад 60 днів тому.
+    """
+    try:
+        completed = await check_and_complete_expired_raffles()
+        cleaned = await cleanup_expired_raffle_media(days=60)
+        if completed or cleaned:
+            logger.info(f"🎁 Raffle maintenance: completed={completed}, cleaned_media={cleaned}")
+    except Exception as exc:
+        logger.error(f"raffle_maintenance_loop error: {exc}", exc_info=True)
 
 
 def custom_asyncio_exception_handler(loop, context):
@@ -135,6 +155,9 @@ async def start_bot():
     print_status("✅", "База атестації")
     await init_shops_db()
     print_status("✅", "База магазинів")
+    await init_raffles_db()
+    await raffle_maintenance_loop()
+    print_status("✅", "База розіграшів")
     await perform_monthly_reset_if_due()
     print_status("✅", "Перевірено та оновлено статистику помилок тестів (якщо потрібно)")
     await load_all_progress()
@@ -174,6 +197,9 @@ async def start_bot():
     
     scheduler.add_job(auto_monthly_report_sender, "cron", day="last", hour=23, minute=0, args=(bot,), id="monthly_report_sender")
     print_status("  ✓", "Автоматичний місячний звіт (останній день місяця, 23:00)")
+
+    scheduler.add_job(raffle_maintenance_loop, "interval", minutes=10, id="raffle_maintenance")
+    print_status("  ✓", "Обслуговування розіграшів та 60-денне очищення (кожні 10 хв)")
     
     # Запускаємо scheduler
     scheduler.start()

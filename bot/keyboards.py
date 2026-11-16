@@ -2,7 +2,7 @@ from typing import Optional
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from bot.services.learning_progress import DayStatus
 
-def main_menu_keyboard(is_new_user=False, is_manager=False, is_hr=False, is_developer=False, is_territorial=False, is_observer=False, can_search=False):
+def main_menu_keyboard(is_new_user=False, is_manager=False, is_hr=False, is_developer=False, is_territorial=False, is_observer=False, can_search=False, has_active_raffle=False):
     """
     Створює клавіатуру головного меню.
     Якщо is_developer=True, показує меню для розробника.
@@ -10,12 +10,15 @@ def main_menu_keyboard(is_new_user=False, is_manager=False, is_hr=False, is_deve
     Якщо is_hr=True, додає кнопку Панелі керівника.
     Якщо is_territorial=True, додає кнопку Панелі Територіала.
     Якщо is_observer=True, додає кнопку Панелі Наглядача.
+    Якщо has_active_raffle=True, додає кнопку участі в активному розіграші.
     """
     if is_observer or is_developer or is_territorial:
         buttons = [
             [InlineKeyboardButton(text="👤 Профіль", callback_data="profile")],
             [InlineKeyboardButton(text="🚀 Почати роботу", callback_data="developer_menu")]
         ]
+        if has_active_raffle:
+            buttons.append([InlineKeyboardButton(text="🎁 Розіграш", callback_data="user_raffle_menu")])
         return InlineKeyboardMarkup(inline_keyboard=buttons)
 
     if is_manager:
@@ -23,6 +26,8 @@ def main_menu_keyboard(is_new_user=False, is_manager=False, is_hr=False, is_deve
             [InlineKeyboardButton(text="👑 Панель керівника", callback_data="manager_menu")],
             [InlineKeyboardButton(text="👤 Профіль", callback_data="profile")]
         ]
+        if has_active_raffle:
+            buttons.append([InlineKeyboardButton(text="🎁 Розіграш", callback_data="user_raffle_menu")])
         return InlineKeyboardMarkup(inline_keyboard=buttons)
     
     button_text = "📁 Розпочати навчання" if is_new_user else "📁 Продовжити навчання"
@@ -37,6 +42,8 @@ def main_menu_keyboard(is_new_user=False, is_manager=False, is_hr=False, is_deve
         [InlineKeyboardButton(text="👤 Профіль", callback_data="profile")],
         [InlineKeyboardButton(text="🛡️ Зв'язок з керівником", callback_data="support")],
     ])
+    if has_active_raffle:
+        buttons.append([InlineKeyboardButton(text="🎁 Розіграш", callback_data="user_raffle_menu")])
     
     # Додаємо кнопки адмін-панелей для тих, хто має доступ
     prefix_buttons = []

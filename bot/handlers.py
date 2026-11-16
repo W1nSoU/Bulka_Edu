@@ -301,6 +301,25 @@ async def start_menu(message: types.Message, state: FSMContext):
         allow_edit=False,
     )
 
+async def _check_has_active_raffle(message: types.Message, explicit_uid: Optional[int] = None) -> bool:
+    """Перевіряє, чи показувати користувачу кнопку активного розіграшу в головному меню."""
+    target_uid = explicit_uid
+    if not target_uid and message:
+        if getattr(message, "chat", None) and message.chat.id:
+            target_uid = message.chat.id
+        elif getattr(message, "from_user", None):
+            target_uid = message.from_user.id
+    if not target_uid:
+        return False
+    try:
+        from database.raffles import is_user_eligible_for_active_raffle
+
+        return bool(await is_user_eligible_for_active_raffle(target_uid))
+    except Exception as exc:
+        logger.debug(f"Raffle eligibility check skipped: {exc}")
+        return False
+
+
 async def show_developer_main_menu(
     message: types.Message,
     *,
@@ -314,7 +333,13 @@ async def show_developer_main_menu(
         "🛠 <b>Панель управління BULKA</b>\n\n"
         "Вітаємо в системі! Оберіть дію:"
     )
-    keyboard = main_menu_keyboard(is_hr=is_hr, is_developer=is_developer, is_territorial=is_territorial)
+    has_active_raffle = await _check_has_active_raffle(message)
+    keyboard = main_menu_keyboard(
+        is_hr=is_hr,
+        is_developer=is_developer,
+        is_territorial=is_territorial,
+        has_active_raffle=has_active_raffle,
+    )
     
     photo_file = (
         "ter_manager/ter_menu.jpg"
@@ -353,7 +378,8 @@ async def show_observer_main_menu(
         "👁 <b>Панель управління BULKA (Наглядач)</b>\n\n"
         "Вітаємо в системі! Оберіть дію:"
     )
-    keyboard = main_menu_keyboard(is_observer=True)
+    has_active_raffle = await _check_has_active_raffle(message)
+    keyboard = main_menu_keyboard(is_observer=True, has_active_raffle=has_active_raffle)
     
     if force_new_message:
         if message:
@@ -775,11 +801,13 @@ async def show_student_main_menu(
         f"🔹 Сьогоднішній день: <b>#{available_day if not is_worker else role_days}</b>\n\n"
         f"🌟{'Ви стали частиною команди BULKA!' if is_worker else ('Розпочнімо' if is_new_user else 'Продовжимо') + ' твій шлях до нових знань!'}"
     )
+    has_active_raffle = await _check_has_active_raffle(message, explicit_uid=user_id)
     keyboard = main_menu_keyboard(
         is_new_user=is_new_user,
         is_hr=is_hr,
         is_developer=is_developer,
         can_search=can_search,
+        has_active_raffle=has_active_raffle,
     )
 
     photo_file = "b_start.jpg" if (IMG_DIR / "b_start.jpg").exists() else "start.png"
@@ -817,7 +845,13 @@ async def show_manager_main_menu(
         "🥖 Ви увійшли як керівник команди BULKA!\n"
         "Час дбати про розвиток стажерів. Що робимо далі?"
     )
-    keyboard = main_menu_keyboard(is_manager=True, is_hr=is_hr, is_developer=is_developer)
+    has_active_raffle = await _check_has_active_raffle(message)
+    keyboard = main_menu_keyboard(
+        is_manager=True,
+        is_hr=is_hr,
+        is_developer=is_developer,
+        has_active_raffle=has_active_raffle,
+    )
     photo_file = (
         "manager/kerivn_option1_bakery.jpg"
         if (IMG_DIR / "manager" / "kerivn_option1_bakery.jpg").exists()

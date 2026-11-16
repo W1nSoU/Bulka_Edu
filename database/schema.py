@@ -278,3 +278,7 @@ async def init_db():
     from .knowledge_chunks import init_knowledge_chunks_db
     await init_knowledge_chunks_db(DB_PATH)
 
+    # Ініціалізація підсистеми розіграшів
+    from .raffles import init_raffles_db
+    await init_raffles_db(DB_PATH)
+

@@ -309,6 +309,7 @@ def _admin_broadcasts_keyboard(is_admin: bool = True, is_observer: bool = False)
         buttons.append([InlineKeyboardButton(text="🎓 Атестація", callback_data="dev_attestation_menu")])
     if is_admin or is_observer:
         buttons.append([InlineKeyboardButton(text="📰 Новини", callback_data="dev_news_menu")])
+        buttons.append([InlineKeyboardButton(text="🎁 Розіграші", callback_data="dev_raffles_menu")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -12275,3 +12276,7 @@ def register_developer_menu_handlers(dp: Dispatcher):
     # Attestation Handlers
     from bot.menus.attestation import register_attestation_handlers
     register_attestation_handlers(dp)
+
+    # Raffles Handlers
+    from bot.menus.raffles import register_raffle_handlers
+    register_raffle_handlers(dp)
