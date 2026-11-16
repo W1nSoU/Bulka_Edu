@@ -99,6 +99,7 @@ async def _deliver_next_or_complete(
     next_q = next((q for q in questions if q["question_idx"] not in answered_indices), None)
     survey_id = survey["id"]
     total_q = len(questions)
+    survey_photo_id = survey.get("photo_file_id")
 
     if next_q:
         next_q_idx = next_q["question_idx"]
@@ -115,7 +116,45 @@ async def _deliver_next_or_complete(
         else:
             await state.clear()
 
-        if use_edit:
+        if survey_photo_id:
+            if use_edit:
+                if len(next_text) <= 1024:
+                    try:
+                        await target_message.edit_caption(
+                            caption=next_text, reply_markup=next_kb, parse_mode="HTML"
+                        )
+                    except TelegramBadRequest as e:
+                        if "message is not modified" in str(e).lower():
+                            pass
+                        else:
+                            try:
+                                await target_message.edit_text(next_text, reply_markup=next_kb, parse_mode="HTML")
+                            except Exception:
+                                await target_message.answer_photo(
+                                    photo=survey_photo_id,
+                                    caption=next_text,
+                                    reply_markup=next_kb,
+                                    parse_mode="HTML",
+                                )
+                else:
+                    try:
+                        await target_message.delete()
+                    except Exception:
+                        pass
+                    await target_message.answer_photo(photo=survey_photo_id)
+                    await target_message.answer(next_text, reply_markup=next_kb, parse_mode="HTML")
+            else:
+                if len(next_text) <= 1024:
+                    await target_message.answer_photo(
+                        photo=survey_photo_id,
+                        caption=next_text,
+                        reply_markup=next_kb,
+                        parse_mode="HTML",
+                    )
+                else:
+                    await target_message.answer_photo(photo=survey_photo_id)
+                    await target_message.answer(next_text, reply_markup=next_kb, parse_mode="HTML")
+        elif use_edit:
             await target_message.edit_text(next_text, reply_markup=next_kb, parse_mode="HTML")
         else:
             await target_message.answer(next_text, reply_markup=next_kb, parse_mode="HTML")
@@ -126,7 +165,15 @@ async def _deliver_next_or_complete(
 
     await state.clear()
     await mark_survey_recipient_completed(survey_id, user_id)
-    if use_edit:
+    if survey_photo_id and use_edit:
+        try:
+            await target_message.edit_caption(caption=SURVEY_COMPLETED_TEXT, reply_markup=None, parse_mode="HTML")
+        except Exception:
+            try:
+                await target_message.edit_text(SURVEY_COMPLETED_TEXT, parse_mode="HTML")
+            except Exception:
+                await target_message.answer(SURVEY_COMPLETED_TEXT, parse_mode="HTML")
+    elif use_edit:
         await target_message.edit_text(SURVEY_COMPLETED_TEXT, parse_mode="HTML")
     else:
         await target_message.answer(SURVEY_COMPLETED_TEXT, parse_mode="HTML")

@@ -96,7 +96,8 @@ async def send_survey_wave_batch(
     bot: Bot,
     survey_id: int,
     recipients: List[Dict[str, Any]],
-    survey_title: str
+    survey_title: str,
+    photo_file_id: Optional[str] = None
 ) -> Tuple[int, int]:
     """Надсилає опитування одній хвилі користувачів (до 50 чол.)."""
     sent_count = 0
@@ -109,12 +110,21 @@ async def send_survey_wave_batch(
         rec_id = rec["id"]
 
         try:
-            await bot.send_message(
-                chat_id=user_id,
-                text=text,
-                reply_markup=kb,
-                parse_mode="HTML"
-            )
+            if photo_file_id:
+                await bot.send_photo(
+                    chat_id=user_id,
+                    photo=photo_file_id,
+                    caption=text,
+                    reply_markup=kb,
+                    parse_mode="HTML"
+                )
+            else:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    reply_markup=kb,
+                    parse_mode="HTML"
+                )
             next_rem = calculate_next_survey_reminder_time()
             await mark_survey_recipient_sent(rec_id, next_rem)
             sent_count += 1
@@ -139,6 +149,7 @@ async def dispatch_survey_waves(bot: Bot, survey_id: int) -> None:
         return
 
     title = survey.get("title", "Опитування BULKA")
+    photo_file_id = survey.get("photo_file_id")
     await update_survey_status(survey_id, "broadcasting")
 
     max_waves = await get_max_wave_for_survey(survey_id)
@@ -148,7 +159,9 @@ async def dispatch_survey_waves(bot: Bot, survey_id: int) -> None:
         pending = await get_pending_wave_recipients(survey_id, wave)
         if pending:
             logger.info(f"Dispatching survey {survey_id} wave {wave}/{max_waves} ({len(pending)} users)...")
-            sent, failed = await send_survey_wave_batch(bot, survey_id, pending, title)
+            sent, failed = await send_survey_wave_batch(
+                bot, survey_id, pending, title, photo_file_id=photo_file_id
+            )
             logger.info(f"Survey wave {wave} finished: {sent} sent, {failed} failed.")
 
         # Якщо це не остання хвиля, очікуємо випадково 5-10 хвилин (300 - 600 секунд)
@@ -196,14 +209,24 @@ async def survey_reminder_worker(bot: Bot) -> None:
                     next_num = reminders_sent + 1
                     text = format_survey_reminder_text(survey_title, next_num)
                     kb = get_survey_invite_keyboard(survey_id)
+                    photo_file_id = rec.get("photo_file_id")
 
                     try:
-                        await bot.send_message(
-                            chat_id=user_id,
-                            text=text,
-                            reply_markup=kb,
-                            parse_mode="HTML"
-                        )
+                        if photo_file_id:
+                            await bot.send_photo(
+                                chat_id=user_id,
+                                photo=photo_file_id,
+                                caption=text,
+                                reply_markup=kb,
+                                parse_mode="HTML"
+                            )
+                        else:
+                            await bot.send_message(
+                                chat_id=user_id,
+                                text=text,
+                                reply_markup=kb,
+                                parse_mode="HTML"
+                            )
                         # Якщо це було 1-ше чи 2-ге нагадування, призначаємо наступне
                         if next_num < 3:
                             next_rem = calculate_next_survey_reminder_time()

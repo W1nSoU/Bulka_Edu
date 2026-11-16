@@ -32,7 +32,8 @@ async def init_surveys_db(db_path: str = DB_PATH) -> None:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             closed_at TIMESTAMP,
             launched_at TIMESTAMP,
-            total_recipients INTEGER DEFAULT 0
+            total_recipients INTEGER DEFAULT 0,
+            photo_file_id TEXT
         )
         ''')
 
@@ -87,6 +88,8 @@ async def init_surveys_db(db_path: str = DB_PATH) -> None:
             await db.execute("ALTER TABLE surveys ADD COLUMN launched_at TIMESTAMP")
         if "total_recipients" not in survey_cols:
             await db.execute("ALTER TABLE surveys ADD COLUMN total_recipients INTEGER DEFAULT 0")
+        if "photo_file_id" not in survey_cols:
+            await db.execute("ALTER TABLE surveys ADD COLUMN photo_file_id TEXT")
 
         # Міграція колонок survey_recipients (current_question_idx / current_q_idx та додаткові)
         cursor = await db.execute("PRAGMA table_info(survey_recipients)")
@@ -145,9 +148,10 @@ async def create_survey(
     template_text: Optional[str] = None,
     questions: Optional[List[Any]] = None,
     recipient_uids: Optional[List[int]] = None,
+    photo_file_id: Optional[str] = None,
     db_path: str = DB_PATH
 ) -> int:
-    """Створює нове опитування в БД та повертає його ID. Опціонально додає питання та реципієнтів."""
+    """Створює нове опитування в БД та повертає його ID. Опціонально додає фото, питання та реципієнтів."""
     final_template = template_text if template_text is not None else (raw_template or "")
     target_roles = target_roles or []
     now_str = get_current_kyiv_time_str()
@@ -155,10 +159,10 @@ async def create_survey(
         roles_json = json.dumps(target_roles, ensure_ascii=False)
         cursor = await db.execute(
             """
-            INSERT INTO surveys (title, raw_template, created_by, target_roles, target_city, status, created_at)
-            VALUES (?, ?, ?, ?, ?, 'draft', ?)
+            INSERT INTO surveys (title, raw_template, created_by, target_roles, target_city, status, created_at, photo_file_id)
+            VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)
             """,
-            (title, final_template, created_by, roles_json, target_city, now_str)
+            (title, final_template, created_by, roles_json, target_city, now_str, photo_file_id)
         )
         survey_id = cursor.lastrowid
         await db.commit()
@@ -968,7 +972,7 @@ async def get_due_survey_reminders(now_dt: Optional[datetime] = None, db_path: s
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
-            SELECT r.*, s.title as survey_title, s.launched_at, u.full_name, u.username
+            SELECT r.*, s.title as survey_title, s.photo_file_id, s.launched_at, u.full_name, u.username
             FROM survey_recipients r
             JOIN surveys s ON r.survey_id = s.id
             LEFT JOIN users u ON r.user_id = u.user_id

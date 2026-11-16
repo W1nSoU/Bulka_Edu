@@ -14,18 +14,27 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, User
 
 from bot.menus.developer import (
+    SurveyCreationStates,
+    dev_survey_ask_photo_skip,
+    dev_survey_ask_photo_yes,
     dev_survey_preview_look,
+    dev_survey_process_photo,
     dev_survey_process_template,
+    dev_survey_process_title,
+    dev_survey_remove_photo,
     dev_survey_toggle_qtype,
 )
 from bot.menus.survey_taking import (
     SURVEY_COMPLETED_TEXT,
     SurveyTakingState,
     _build_question_render,
+    survey_choice_answer_callback,
+    survey_free_text_answer_message,
     survey_multi_confirm_callback,
     survey_multi_toggle_callback,
     survey_start_callback,
 )
+from bot.services.survey_broadcaster import send_survey_wave_batch
 from bot.services.survey_excel import generate_survey_results_xlsx
 from bot.services.survey_parser import SurveyParser
 from database import surveys as surveys_db
@@ -501,6 +510,155 @@ class TestSurveyMultiChoiceHandlers(unittest.IsolatedAsyncioTestCase):
             answers = await surveys_db.get_survey_answers_for_user(survey_id, 500, db_path=self.db_path)
             self.assertEqual(answers[0]["answer_text"], "а. Так")
             self.assertEqual(json.loads(answers[1]["answer_text"]), ["а. Кава", "б. Знижки"])
+
+
+class TestSurveyPhotoSupport(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.temp_dir.name, "test_surveys_photo.db")
+        await surveys_db.init_surveys_db(self.db_path)
+        self.storage = MemoryStorage()
+        self.state = FSMContext(storage=self.storage, key=StorageKey(bot_id=1, chat_id=777, user_id=777))
+
+    async def asyncTearDown(self):
+        self.temp_dir.cleanup()
+
+    def _make_callback(self, data: str, user_id: int = 777) -> MagicMock:
+        cb = MagicMock(spec=CallbackQuery)
+        cb.data = data
+        cb.from_user = MagicMock(spec=User)
+        cb.from_user.id = user_id
+        cb.message = MagicMock(spec=Message)
+        cb.message.edit_text = AsyncMock()
+        cb.message.edit_caption = AsyncMock()
+        cb.message.edit_reply_markup = AsyncMock()
+        cb.message.answer = AsyncMock()
+        cb.message.answer_photo = AsyncMock()
+        cb.answer = AsyncMock()
+        return cb
+
+    async def test_wizard_photo_question_upload_skip_and_remove(self):
+        # 1. Введення назви переводить у стан вибору щодо фото
+        title_msg = MagicMock(spec=Message)
+        title_msg.text = "Оцінка нової випічки"
+        title_msg.answer = AsyncMock()
+
+        await dev_survey_process_title(title_msg, self.state)
+        self.assertEqual(await self.state.get_state(), SurveyCreationStates.waiting_photo_decision.state)
+        kb: InlineKeyboardMarkup = title_msg.answer.call_args.kwargs["reply_markup"]
+        cb_datas = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        self.assertIn("dev_survey_ask_photo_yes", cb_datas)
+        self.assertIn("dev_survey_ask_photo_skip", cb_datas)
+
+        # 2. Якщо натиснути «Додати фото», бот переходить у waiting_photo і приймає фото
+        with patch("bot.menus.developer._check_access", return_value=(True, True, False)), \
+             patch("bot.menus.developer._edit_or_answer", new_callable=AsyncMock):
+            await dev_survey_ask_photo_yes(self._make_callback("dev_survey_ask_photo_yes"), self.state)
+        self.assertEqual(await self.state.get_state(), SurveyCreationStates.waiting_photo.state)
+
+        photo_obj = MagicMock()
+        photo_obj.file_id = "AgACAgPhotoTest123"
+        photo_msg = MagicMock(spec=Message)
+        photo_msg.photo = [photo_obj]
+        photo_msg.answer = AsyncMock()
+
+        await dev_survey_process_photo(photo_msg, self.state)
+        self.assertEqual(await self.state.get_state(), SurveyCreationStates.waiting_template.state)
+        self.assertEqual((await self.state.get_data())["photo_file_id"], "AgACAgPhotoTest123")
+
+        # 3. Після шаблону на екрані резюме видно статус фото та кнопки керування фото
+        tpl_msg = MagicMock(spec=Message)
+        tpl_msg.text = "1. Смак круасанів?\nа. Супер\nб. Можна краще"
+        tpl_msg.answer = AsyncMock()
+        await dev_survey_process_template(tpl_msg, self.state)
+        summary_text = tpl_msg.answer.call_args[0][0]
+        summary_kb: InlineKeyboardMarkup = tpl_msg.answer.call_args.kwargs["reply_markup"]
+        self.assertIn("Прикріплено ✅", summary_text)
+        summary_cbs = [btn.callback_data for row in summary_kb.inline_keyboard for btn in row]
+        self.assertIn("dev_survey_remove_photo", summary_cbs)
+
+        # 4. Видалення фото
+        with patch("bot.menus.developer._edit_or_answer", new_callable=AsyncMock):
+            await dev_survey_remove_photo(self._make_callback("dev_survey_remove_photo"), self.state)
+        self.assertIsNone((await self.state.get_data())["photo_file_id"])
+
+        # 5. Пропуск фото з waiting_photo_decision
+        await self.state.set_state(SurveyCreationStates.waiting_photo_decision)
+        with patch("bot.menus.developer._check_access", return_value=(True, True, False)), \
+             patch("bot.menus.developer._edit_or_answer", new_callable=AsyncMock):
+            await dev_survey_ask_photo_skip(self._make_callback("dev_survey_ask_photo_skip"), self.state)
+        self.assertEqual(await self.state.get_state(), SurveyCreationStates.waiting_template.state)
+
+    async def test_broadcast_and_taking_with_photo(self):
+        survey_id = await surveys_db.create_survey(
+            title="Дегустація кави",
+            template_text="...",
+            created_by=1,
+            target_roles=["Працівник"],
+            questions=[
+                {"question_idx": 1, "text": "Напишіть враження (вільна відповідь)", "question_type": "text", "options": []},
+                {"question_idx": 2, "text": "Порекомендуєте іншим?", "question_type": "choice", "options": ["а. Так", "б. Ні"]},
+            ],
+            recipient_uids=[777],
+            photo_file_id="PhotoFileId_777",
+            db_path=self.db_path,
+        )
+        await surveys_db.update_survey_status(survey_id, "active", db_path=self.db_path)
+
+        saved_survey = await surveys_db.get_survey_by_id(survey_id, db_path=self.db_path)
+        self.assertEqual(saved_survey["photo_file_id"], "PhotoFileId_777")
+
+        # Розсилка запрошення з фото
+        mock_bot = MagicMock()
+        mock_bot.send_photo = AsyncMock()
+        mock_bot.send_message = AsyncMock()
+        with patch("bot.services.survey_broadcaster.mark_survey_recipient_sent", new_callable=AsyncMock):
+            sent, failed = await send_survey_wave_batch(
+                mock_bot, survey_id, [{"id": 1, "user_id": 777}], "Дегустація кави", photo_file_id="PhotoFileId_777"
+            )
+        self.assertEqual((sent, failed), (1, 0))
+        mock_bot.send_photo.assert_awaited_once()
+        self.assertEqual(mock_bot.send_photo.call_args.kwargs["photo"], "PhotoFileId_777")
+        mock_bot.send_message.assert_not_called()
+
+        def bind_db(fn):
+            async def _wrapped(*args, **kwargs):
+                kwargs.setdefault("db_path", self.db_path)
+                return await fn(*args, **kwargs)
+            return _wrapped
+
+        with (
+            patch("bot.menus.survey_taking.get_survey_by_id", side_effect=bind_db(surveys_db.get_survey_by_id)),
+            patch("bot.menus.survey_taking.get_survey_questions", side_effect=bind_db(surveys_db.get_survey_questions)),
+            patch("bot.menus.survey_taking.get_survey_recipient", side_effect=bind_db(surveys_db.get_survey_recipient)),
+            patch("bot.menus.survey_taking.update_survey_recipient_progress", side_effect=bind_db(surveys_db.update_survey_recipient_progress)),
+            patch("bot.menus.survey_taking.mark_survey_recipient_completed", side_effect=bind_db(surveys_db.mark_survey_recipient_completed)),
+            patch("bot.menus.survey_taking.save_survey_answer", side_effect=bind_db(surveys_db.save_survey_answer)),
+            patch("bot.menus.survey_taking.get_survey_answers_for_user", side_effect=bind_db(surveys_db.get_survey_answers_for_user)),
+        ):
+            # 1. Старт: має оновити підпис під фото (edit_caption) для питання 1 (text)
+            cb_start = self._make_callback(f"survey_start:{survey_id}", user_id=777)
+            await survey_start_callback(cb_start, self.state)
+            cb_start.message.edit_caption.assert_awaited_once()
+            self.assertIn("Напишіть враження", cb_start.message.edit_caption.call_args.kwargs["caption"])
+
+            # 2. Відповідь текстом на питання 1 -> нове повідомлення з питанням 2 теж з фото (answer_photo)
+            txt_msg = MagicMock(spec=Message)
+            txt_msg.from_user = MagicMock(spec=User)
+            txt_msg.from_user.id = 777
+            txt_msg.text = "Дуже смачно!"
+            txt_msg.answer_photo = AsyncMock()
+            txt_msg.answer = AsyncMock()
+            await survey_free_text_answer_message(txt_msg, self.state)
+            txt_msg.answer_photo.assert_awaited_once()
+            self.assertEqual(txt_msg.answer_photo.call_args.kwargs["photo"], "PhotoFileId_777")
+            self.assertIn("Порекомендуєте іншим?", txt_msg.answer_photo.call_args.kwargs["caption"])
+
+            # 3. Завершення на питанні 2 (choice) -> edit_caption фінального тексту
+            cb_finish = self._make_callback(f"survey_ans:{survey_id}:2:0", user_id=777)
+            await survey_choice_answer_callback(cb_finish, self.state)
+            cb_finish.message.edit_caption.assert_awaited_once()
+            self.assertEqual(cb_finish.message.edit_caption.call_args.kwargs["caption"], SURVEY_COMPLETED_TEXT)
 
 
 if __name__ == "__main__":

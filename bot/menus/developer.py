@@ -202,6 +202,8 @@ class DeveloperStates(StatesGroup):
 
 class SurveyCreationStates(StatesGroup):
     waiting_title = State()
+    waiting_photo_decision = State()
+    waiting_photo = State()
     waiting_template = State()
     waiting_roles = State()
     waiting_city = State()
@@ -6827,7 +6829,7 @@ async def dev_survey_create_start(callback: CallbackQuery, state: FSMContext):
 
 
 async def dev_survey_process_title(message: Message, state: FSMContext):
-    """Обробка введеної назви опитування."""
+    """Обробка введеної назви опитування та запит щодо додавання фото."""
     title = (message.text or "").strip()
     if len(title) < 3 or len(title) > 150:
         await message.answer(
@@ -6838,14 +6840,122 @@ async def dev_survey_process_title(message: Message, state: FSMContext):
         )
         return
 
-    await state.update_data(title=title)
+    await state.update_data(title=title, photo_file_id=None)
+    await state.set_state(SurveyCreationStates.waiting_photo_decision)
+
+    text = (
+        f"🖼 <b>Створення опитування - Додавання фото</b>\n"
+        f"📌 Тема: <b>{html.escape(title)}</b>\n"
+        "───────────────────\n\n"
+        "Чи бажаєте додати фото до цього опитування?\n"
+        "<i>Фото буде показано в запрошенні та залишатиметься над питаннями під час усього проходження.</i>"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="🖼 Додати фото", callback_data="dev_survey_ask_photo_yes")],
+        [InlineKeyboardButton(text="➡️ Пропустити (без фото)", callback_data="dev_survey_ask_photo_skip")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_surveys_menu")]
+    ]
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+
+async def dev_survey_ask_photo_skip(callback: CallbackQuery, state: FSMContext):
+    """Пропуск додавання фото та перехід до шаблону запитань."""
+    has_access, is_admin, _ = await _check_access(callback)
+    if not has_access or not is_admin:
+        await callback.answer("⛔️ Доступ дозволено лише адміністраторам.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    title = data.get("title", "Опитування")
+    await state.update_data(photo_file_id=None)
     await state.set_state(SurveyCreationStates.waiting_template)
 
     text = _render_survey_step2_template_text(title)
     buttons = [
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_surveys_menu")]
     ]
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_survey_ask_photo_yes(callback: CallbackQuery, state: FSMContext):
+    """Запит на відправку фото для опитування."""
+    has_access, is_admin, _ = await _check_access(callback)
+    if not has_access or not is_admin:
+        await callback.answer("⛔️ Доступ дозволено лише адміністраторам.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    title = data.get("title", "Опитування")
+    has_questions = bool(data.get("questions"))
+    await state.set_state(SurveyCreationStates.waiting_photo)
+
+    text = (
+        f"📸 <b>Надішліть фото для опитування</b>\n"
+        f"📌 Тема: <b>{html.escape(title)}</b>\n"
+        "───────────────────\n\n"
+        "Прикріпіть і надішліть одне зображення у цей чат:"
+    )
+    if has_questions:
+        buttons = [
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_survey_back_to_summary")]
+        ]
+    else:
+        buttons = [
+            [InlineKeyboardButton(text="➡️ Пропустити (без фото)", callback_data="dev_survey_ask_photo_skip")],
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_surveys_menu")]
+        ]
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_survey_process_photo(message: Message, state: FSMContext):
+    """Прийом фото для опитування та повернення до шаблону або підсумку."""
+    if not message.photo:
+        data = await state.get_data()
+        has_questions = bool(data.get("questions"))
+        fallback_btn = (
+            InlineKeyboardButton(text="🔙 Назад", callback_data="dev_survey_back_to_summary")
+            if has_questions
+            else InlineKeyboardButton(text="➡️ Пропустити (без фото)", callback_data="dev_survey_ask_photo_skip")
+        )
+        await message.answer(
+            "⚠️ Будь ласка, надішліть саме <b>фотографію</b> або натисніть кнопку нижче:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[fallback_btn]]),
+            parse_mode="HTML",
+        )
+        return
+
+    photo_file_id = message.photo[-1].file_id
+    await state.update_data(photo_file_id=photo_file_id)
+
+    data = await state.get_data()
+    title = data.get("title", "Опитування")
+    questions = data.get("questions")
+
+    if questions:
+        roles = data.get("selected_roles", ["Працівник"])
+        await state.set_state(SurveyCreationStates.waiting_roles)
+        await _show_survey_summary_view(message, title, questions, roles, photo_file_id=photo_file_id)
+        return
+
+    await state.set_state(SurveyCreationStates.waiting_template)
+    text = "✅ <b>Фото додано!</b>\n\n" + _render_survey_step2_template_text(title)
+    buttons = [
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_surveys_menu")]
+    ]
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+
+async def dev_survey_remove_photo(callback: CallbackQuery, state: FSMContext):
+    """Видаляє прикріплене фото з чернетки опитування."""
+    data = await state.get_data()
+    await state.update_data(photo_file_id=None)
+    title = data.get("title", "Опитування")
+    questions = data.get("questions", [])
+    roles = data.get("selected_roles", ["Працівник"])
+    await callback.answer("Фото видалено з опитування.")
+    await _show_survey_summary_view(callback, title, questions, roles, photo_file_id=None)
 
 
 def _render_survey_step2_template_text(title: str) -> str:
@@ -6908,10 +7018,22 @@ async def dev_survey_process_template(message: Message, state: FSMContext):
     )
     await state.set_state(SurveyCreationStates.waiting_roles)
 
-    await _show_survey_summary_view(message, title, questions_dicts, ["Працівник"])
+    await _show_survey_summary_view(
+        message,
+        title,
+        questions_dicts,
+        ["Працівник"],
+        photo_file_id=data.get("photo_file_id"),
+    )
 
 
-async def _show_survey_summary_view(target_obj: Union[Message, CallbackQuery], title: str, questions: list, roles: list):
+async def _show_survey_summary_view(
+    target_obj: Union[Message, CallbackQuery],
+    title: str,
+    questions: list,
+    roles: list,
+    photo_file_id: Optional[str] = None,
+):
     """Відображає результат розпізнавання шаблону та кнопки переходу."""
     type_labels = {
         "choice": "один варіант",
@@ -6930,10 +7052,13 @@ async def _show_survey_summary_view(target_obj: Union[Message, CallbackQuery], t
     if choice_questions:
         toggle_hint = "\n\n<i>Для перемикання «один / кілька варіантів» натисніть на питання нижче:</i>"
 
+    photo_status = "Прикріплено ✅" if photo_file_id else "Без фото"
+
     text = (
         f"✅ <b>Шаблон успішно розпізнано!</b>\n"
         f"───────────────────\n"
         f"📌 <b>Назва:</b> {html.escape(title)}\n"
+        f"🖼 <b>Фото:</b> {photo_status}\n"
         f"❓ <b>Кількість питань:</b> {len(questions)}\n\n"
         f"📋 <b>Питання:</b>\n" + "\n".join(q_preview_lines) + "\n\n"
         "Чи правильно сформовано опитування?" + toggle_hint
@@ -6963,6 +7088,14 @@ async def _show_survey_summary_view(target_obj: Union[Message, CallbackQuery], t
                 buttons.append([btn])
         if row:
             buttons.append(row)
+
+    if photo_file_id:
+        buttons.append([
+            InlineKeyboardButton(text="🖼 Змінити фото", callback_data="dev_survey_ask_photo_yes"),
+            InlineKeyboardButton(text="🗑 Прибрати фото", callback_data="dev_survey_remove_photo"),
+        ])
+    else:
+        buttons.append([InlineKeyboardButton(text="🖼 Додати фото", callback_data="dev_survey_ask_photo_yes")])
 
     buttons.extend([
         [InlineKeyboardButton(text="👁 Переглянути вигляд", callback_data="dev_survey_preview_look")],
@@ -7014,7 +7147,9 @@ async def dev_survey_toggle_qtype(callback: CallbackQuery, state: FSMContext):
     await state.update_data(questions=updated_questions)
     title = data.get("title", "Опитування")
     roles = data.get("selected_roles", ["Працівник"])
-    await _show_survey_summary_view(callback, title, updated_questions, roles)
+    await _show_survey_summary_view(
+        callback, title, updated_questions, roles, photo_file_id=data.get("photo_file_id")
+    )
 
 
 async def dev_survey_back_to_summary(callback: CallbackQuery, state: FSMContext):
@@ -7023,7 +7158,9 @@ async def dev_survey_back_to_summary(callback: CallbackQuery, state: FSMContext)
     title = data.get("title", "Опитування")
     questions = data.get("questions", [])
     roles = data.get("selected_roles", ["Працівник"])
-    await _show_survey_summary_view(callback, title, questions, roles)
+    await _show_survey_summary_view(
+        callback, title, questions, roles, photo_file_id=data.get("photo_file_id")
+    )
 
 
 async def dev_survey_reenter_template(callback: CallbackQuery, state: FSMContext):
@@ -7054,10 +7191,14 @@ async def dev_survey_preview_look(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Питань не знайдено.", show_alert=True)
         return
 
+    photo_file_id = data.get("photo_file_id")
+    photo_note = "🖼 <i>До опитування прикріплено фото (буде над питаннями).</i>\n" if photo_file_id else ""
+
     lines = [
         f"👁 <b>Попередній перегляд опитування:</b>",
         f"───────────────────",
         f"📋 <b>{html.escape(title)}</b>\n",
+        f"{photo_note}"
         f"<i>Ваші щирі відповіді допоможуть команді BULKA ставати ще кращою! 💛</i>",
         f"───────────────────\n"
     ]
@@ -7210,11 +7351,13 @@ async def dev_survey_select_city(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SurveyCreationStates.confirm_launch)
 
     city_label = "🌐 Всі міста" if not target_city else f"🏙 {target_city}"
+    photo_status = "Прикріплено ✅" if data.get("photo_file_id") else "Без фото"
 
     text = (
         "🚀 <b>Підтвердження запуску опитування</b>\n"
         "───────────────────\n\n"
         f"📌 <b>Назва:</b> {html.escape(title)}\n"
+        f"🖼 <b>Фото:</b> {photo_status}\n"
         f"❓ <b>Питань:</b> {len(questions)}\n"
         f"👥 <b>Цільова аудиторія:</b> {', '.join(roles)}\n"
         f"🏙 <b>Місто:</b> {city_label}\n"
@@ -7258,7 +7401,8 @@ async def dev_survey_launch(callback: CallbackQuery, state: FSMContext):
         target_roles=roles,
         target_city=target_city,
         questions=questions,
-        recipient_uids=recipient_uids
+        recipient_uids=recipient_uids,
+        photo_file_id=data.get("photo_file_id"),
     )
 
     await state.clear()
@@ -12233,6 +12377,11 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(dev_surveys_menu_handler, lambda c: c.data == "dev_surveys_menu")
     dp.callback_query.register(dev_survey_create_start, lambda c: c.data == "dev_survey_create_start")
     dp.message.register(dev_survey_process_title, SurveyCreationStates.waiting_title)
+    dp.callback_query.register(dev_survey_ask_photo_yes, lambda c: c.data == "dev_survey_ask_photo_yes")
+    dp.callback_query.register(dev_survey_ask_photo_skip, lambda c: c.data == "dev_survey_ask_photo_skip")
+    dp.callback_query.register(dev_survey_remove_photo, lambda c: c.data == "dev_survey_remove_photo")
+    dp.message.register(dev_survey_process_photo, SurveyCreationStates.waiting_photo_decision)
+    dp.message.register(dev_survey_process_photo, SurveyCreationStates.waiting_photo)
     dp.message.register(dev_survey_process_template, SurveyCreationStates.waiting_template)
     dp.callback_query.register(dev_survey_back_to_summary, lambda c: c.data == "dev_survey_back_to_summary")
     dp.callback_query.register(dev_survey_toggle_qtype, lambda c: c.data and c.data.startswith("dev_survey_toggle_qtype:"))
