@@ -8146,8 +8146,8 @@ async def _show_news_roles_selection(callback: CallbackQuery, state: FSMContext)
         "Керівник",
         "Територіал",
         "Наглядач",
-        "Сегеда",
-        "Радецький",
+        "Сегеда Олександр Леонідович",
+        "Радецький Владислав Леонідович",
         "Адміністратор",
     ]
     buttons = []

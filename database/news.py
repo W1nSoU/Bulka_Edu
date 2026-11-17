@@ -225,10 +225,12 @@ async def delete_news_category(category_id: int, db_path: str = DB_PATH) -> bool
 
 
 SPECIAL_NEWS_RECIPIENTS = {
+    "Сегеда Олександр Леонідович": 440984923,
+    "Радецький Владислав Леонідович": 201151447,
     "Сегеда": 440984923,
     "Радецький": 201151447,
 }
-EXCLUDED_OBSERVER_IDS = set(SPECIAL_NEWS_RECIPIENTS.values())
+EXCLUDED_OBSERVER_IDS = {440984923, 201151447}
 
 
 async def get_matching_news_recipients(

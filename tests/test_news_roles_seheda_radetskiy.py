@@ -78,7 +78,7 @@ class TestNewsRolesSehedaRadetskiy(unittest.IsolatedAsyncioTestCase):
     async def test_seheda_button_includes_seheda_only(self):
         with patch("database.managers.MANAGERS_DB_PATH", self.managers_db_path):
             recipients = await get_matching_news_recipients(
-                roles=["Сегеда"],
+                roles=["Сегеда Олександр Леонідович"],
                 target_city="all",
                 db_path=self.db_path
             )
@@ -90,7 +90,7 @@ class TestNewsRolesSehedaRadetskiy(unittest.IsolatedAsyncioTestCase):
     async def test_radetskiy_button_includes_radetskiy_only(self):
         with patch("database.managers.MANAGERS_DB_PATH", self.managers_db_path):
             recipients = await get_matching_news_recipients(
-                roles=["Радецький"],
+                roles=["Радецький Владислав Леонідович"],
                 target_city="all",
                 db_path=self.db_path
             )
@@ -102,7 +102,7 @@ class TestNewsRolesSehedaRadetskiy(unittest.IsolatedAsyncioTestCase):
     async def test_observer_plus_radetskiy_includes_both_without_seheda(self):
         with patch("database.managers.MANAGERS_DB_PATH", self.managers_db_path):
             recipients = await get_matching_news_recipients(
-                roles=["Наглядач", "Радецький"],
+                roles=["Наглядач", "Радецький Владислав Леонідович"],
                 target_city="all",
                 db_path=self.db_path
             )
@@ -114,7 +114,7 @@ class TestNewsRolesSehedaRadetskiy(unittest.IsolatedAsyncioTestCase):
     async def test_both_seheda_and_radetskiy_selected(self):
         with patch("database.managers.MANAGERS_DB_PATH", self.managers_db_path):
             recipients = await get_matching_news_recipients(
-                roles=["Сегеда", "Радецький"],
+                roles=["Сегеда Олександр Леонідович", "Радецький Владислав Леонідович"],
                 target_city="all",
                 db_path=self.db_path
             )
@@ -130,7 +130,7 @@ class TestNewsRolesSehedaRadetskiy(unittest.IsolatedAsyncioTestCase):
         callback.answer = AsyncMock()
 
         state = AsyncMock()
-        state.get_data.return_value = {"selected_roles": ["Працівник", "Сегеда"]}
+        state.get_data.return_value = {"selected_roles": ["Працівник", "Сегеда Олександр Леонідович"]}
 
         with patch("bot.menus.developer._edit_or_answer", AsyncMock()) as mock_edit:
             await _show_news_roles_selection(callback, state)
@@ -149,13 +149,13 @@ class TestNewsRolesSehedaRadetskiy(unittest.IsolatedAsyncioTestCase):
         self.assertIn("⬜️ Керівник", button_texts)
         self.assertIn("⬜️ Територіал", button_texts)
         self.assertIn("⬜️ Наглядач", button_texts)
-        self.assertIn("✅ Сегеда", button_texts)
-        self.assertIn("⬜️ Радецький", button_texts)
+        self.assertIn("✅ Сегеда Олександр Леонідович", button_texts)
+        self.assertIn("⬜️ Радецький Владислав Леонідович", button_texts)
         self.assertIn("⬜️ Адміністратор", button_texts)
 
         # Перевіряємо callback_data
-        self.assertIn("dev_news_toggle_role:Сегеда", button_cbs)
-        self.assertIn("dev_news_toggle_role:Радецький", button_cbs)
+        self.assertIn("dev_news_toggle_role:Сегеда Олександр Леонідович", button_cbs)
+        self.assertIn("dev_news_toggle_role:Радецький Владислав Леонідович", button_cbs)
 
 
 if __name__ == "__main__":
