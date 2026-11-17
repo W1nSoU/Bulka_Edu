@@ -509,6 +509,67 @@ async def update_manager_shops(uid: int, city: str, new_shops: list) -> bool:
         print(f"Error updating manager shops: {e}")
         return False
 
+async def update_manager_process(uid: int, new_process: str) -> bool:
+    """Оновлює process керівника (наприклад, 'Керівник' або 'Керівник Стажер')."""
+    try:
+        async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+            await db.execute("UPDATE managers SET process = ? WHERE uid = ?", (new_process, uid))
+            await db.commit()
+        return True
+    except Exception as e:
+        print(f"Error updating manager process: {e}")
+        return False
+
+async def update_territorial_city(uid: int, new_city: str) -> bool:
+    """Оновлює закріплене місто територіального керівника."""
+    try:
+        async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+            await db.execute("UPDATE managers SET city = ? WHERE uid = ?", (new_city, uid))
+            await db.commit()
+        return True
+    except Exception as e:
+        print(f"Error updating territorial city: {e}")
+        return False
+
+async def update_territorial_type(uid: int, new_type: str) -> bool:
+    """Оновлює напрям територіального керівника ('ТЗ' або 'ВВ')."""
+    try:
+        async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+            await db.execute("UPDATE managers SET territorial_type = ? WHERE uid = ?", (new_type, uid))
+            await db.commit()
+        return True
+    except Exception as e:
+        print(f"Error updating territorial type: {e}")
+        return False
+
+async def update_observer_name(uid: int, new_name: str) -> bool:
+    """Оновлює ПІБ наглядача в таблицях observers, managers та users."""
+    try:
+        async with aiosqlite.connect(MANAGERS_DB_PATH) as m_db, aiosqlite.connect(DB_PATH) as u_db:
+            try:
+                await m_db.execute("UPDATE observers SET full_name = ? WHERE uid = ?", (new_name, uid))
+            except Exception:
+                pass
+            await m_db.execute("UPDATE managers SET full_name = ? WHERE uid = ?", (new_name, uid))
+            await m_db.commit()
+            await u_db.execute("UPDATE users SET full_name = ? WHERE user_id = ?", (new_name, uid))
+            await u_db.commit()
+        return True
+    except Exception as e:
+        print(f"Error updating observer name: {e}")
+        return False
+
+async def update_observer_responsible(uid: int, resp_uid: int) -> bool:
+    """Оновлює відповідального куратора для наглядача."""
+    try:
+        async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+            await db.execute("UPDATE observers SET responsible_uid = ? WHERE uid = ?", (resp_uid, uid))
+            await db.commit()
+        return True
+    except Exception as e:
+        print(f"Error updating observer responsible: {e}")
+        return False
+
 async def fire_manager(uid: int) -> dict:
     """
     Звільняє керівника:

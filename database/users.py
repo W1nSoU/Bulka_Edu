@@ -410,6 +410,8 @@ async def update_user_role(user_id: int, new_role: str, actor_id: Optional[int] 
             manager_id=user["manager_id"],
         )
 
+update_user_status = update_user_role
+
 async def get_user_details(user_id):
     """Отримує детальну інформацію про користувача"""
     async with aiosqlite.connect(DB_PATH) as db:

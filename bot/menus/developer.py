@@ -90,6 +90,11 @@ from database.managers import (
     count_users_in_shops,
     transfer_users_by_shops,
     update_manager_responsible,
+    update_manager_process,
+    update_territorial_city,
+    update_territorial_type,
+    update_observer_name,
+    update_observer_responsible,
 )
 
 from bot.services.developer_actions import (
@@ -198,6 +203,9 @@ class DeveloperStates(StatesGroup):
     waiting_search_manager = State()
     waiting_edit_manager_name = State()
     waiting_edit_manager_shops = State()
+    waiting_edit_territorial_name = State()
+    waiting_edit_observer_name = State()
+    waiting_edit_developer_name = State()
 
 
 class SurveyCreationStates(StatesGroup):
@@ -949,12 +957,96 @@ async def developer_admin_view(callback: CallbackQuery, state: FSMContext):
     
     is_obs = await is_observer_user(callback.from_user.id)
     buttons = []
-    if admin_uid != MAIN_DEVELOPER_ID and not is_obs:
-        buttons.append([InlineKeyboardButton(text="❌ Видалити адміністратора", callback_data=f"dev_remove_confirm:{admin_uid}")])
+    if not is_obs:
+        buttons.append([InlineKeyboardButton(text="✍️ Редагувати", callback_data=f"dev_admin_edit_menu:{admin_uid}")])
+        if admin_uid != MAIN_DEVELOPER_ID:
+            buttons.append([InlineKeyboardButton(text="❌ Видалити адміністратора", callback_data=f"dev_remove_confirm:{admin_uid}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад до списку", callback_data="dev_team_menu")])
     
     photo_input = await get_user_avatar_input(bot, admin_uid)
     await _send_or_edit_card_photo(callback, photo_input, caption, InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+# EDITING DEVELOPER / ADMIN (ПІБ)
+async def developer_admin_edit_menu(callback: CallbackQuery, state: FSMContext):
+    """Підменю редагування адміністратора."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    try:
+        admin_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+
+    devs = await get_all_devs_from_managers_db()
+    admin_info = next((d for d in devs if d["uid"] == admin_uid), None)
+    admin_name = admin_info.get("full_name") if admin_info else str(admin_uid)
+
+    await state.clear()
+    text = (
+        f"✏️ <b>Редагування адміністратора {html.escape(admin_name)}</b>\n\n"
+        f"Оберіть дію:"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="👤 Змінити ПІБ", callback_data=f"dev_admin_ch_name:{admin_uid}")],
+        [InlineKeyboardButton(text="⬅️ Назад до картки", callback_data=f"dev_admin_view:{admin_uid}")]
+    ]
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_admin_change_name_start(callback: CallbackQuery, state: FSMContext):
+    """Початок зміни ПІБ адміністратора."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    try:
+        admin_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+
+    devs = await get_all_devs_from_managers_db()
+    admin_info = next((d for d in devs if d["uid"] == admin_uid), None)
+    admin_name = admin_info.get("full_name") if admin_info else str(admin_uid)
+
+    await state.update_data(edit_admin_uid=admin_uid)
+    await state.set_state(DeveloperStates.waiting_edit_developer_name)
+    await _edit_or_answer(
+        callback.message,
+        f"Введіть нове ПІБ для адміністратора <b>{html.escape(admin_name)}</b> (мінімум 2 слова):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_admin_edit_menu:{admin_uid}")]
+        ])
+    )
+    await callback.answer()
+
+
+async def dev_admin_change_name_process(message: Message, state: FSMContext):
+    """Обробка нового ПІБ адміністратора."""
+    data = await state.get_data()
+    admin_uid = data.get("edit_admin_uid")
+    if not admin_uid:
+        await state.clear()
+        return
+
+    new_name = (message.text or "").strip()
+    if len(new_name.split()) < 2:
+        await message.answer(
+            "Будь ласка, введіть повне ім'я та прізвище (мінімум 2 слова).\nСпробуйте ще раз:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_admin_edit_menu:{admin_uid}")]
+            ])
+        )
+        return
+
+    await update_manager_name(admin_uid, new_name)
+    await state.clear()
+    await message.answer(
+        f"✅ ПІБ адміністратора успішно змінено на <b>{html.escape(new_name)}</b>!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ До картки адміністратора", callback_data=f"dev_admin_view:{admin_uid}")]
+        ])
+    )
 
 async def developer_remove_dev_menu(callback: CallbackQuery, state: FSMContext):
     """Shows a menu to select a developer to remove."""
@@ -3439,6 +3531,10 @@ async def dev_mgr_edit_menu(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Керівника не знайдено!", show_alert=True)
         return
     
+    curr_proc = (mgr.get("process") or "Керівник").strip()
+    target_proc = "Керівник Стажер" if curr_proc == "Керівник" else "Керівник"
+    status_btn_text = f"🎓 Роль: {curr_proc} ➔ {target_proc}"
+
     text = f"✏️ <b>Редагування керівника {html.escape(mgr.get('full_name') or str(manager_uid))}</b>\nОберіть дію:"
     buttons = [
         [
@@ -3447,12 +3543,42 @@ async def dev_mgr_edit_menu(callback: CallbackQuery, state: FSMContext):
         ],
         [
             InlineKeyboardButton(text="👤 Змінити ПІБ", callback_data=f"dev_mgr_ch_name:{manager_uid}"),
-            InlineKeyboardButton(text="🚫 Звільнити", callback_data=f"dev_mgr_fire_ask:{manager_uid}")
+            InlineKeyboardButton(text=status_btn_text, callback_data=f"dev_mgr_ch_status:{manager_uid}")
         ],
+        [InlineKeyboardButton(text="🚫 Звільнити", callback_data=f"dev_mgr_fire_ask:{manager_uid}")],
         [InlineKeyboardButton(text="⬅️ Назад до картки", callback_data=f"dev_mgr_view:{manager_uid}")]
     ]
     await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
+
+
+async def dev_mgr_toggle_status_handler(callback: CallbackQuery, state: FSMContext):
+    """Перемикач ролі керівника ('Керівник' <-> 'Керівник Стажер')."""
+    has_access, is_admin, is_territorial = await _check_access(callback)
+    if not has_access:
+        return
+    try:
+        manager_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+
+    mgr = await get_manager_by_uid(manager_uid)
+    if not mgr:
+        await callback.answer("Керівника не знайдено!", show_alert=True)
+        return
+
+    curr_proc = (mgr.get("process") or "Керівник").strip()
+    target_proc = "Керівник Стажер" if curr_proc == "Керівник" else "Керівник"
+
+    success = await update_manager_process(manager_uid, target_proc)
+    if success:
+        await callback.answer(f"✅ Роль оновлено: {target_proc}", show_alert=True)
+    else:
+        await callback.answer("⚠️ Не вдалося оновити роль у базі.", show_alert=True)
+
+    callback.data = f"dev_mgr_edit_menu:{manager_uid}"
+    await dev_mgr_edit_menu(callback, state)
 
 
 async def dev_mgr_change_name_start(callback: CallbackQuery, state: FSMContext):
@@ -8813,15 +8939,45 @@ async def developer_user_modify_menu(callback: CallbackQuery, state: FSMContext)
         return
 
     await state.clear()
+    user_details = await get_user_details(user_id) or {}
+    current_status = user_details.get("status") or "Стажер"
+    target_status = "Працівник" if current_status == "Стажер" else "Стажер"
+    status_btn_text = f"🎓 Статус: {current_status} ➔ {target_status}"
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 Змінити ПІБ", callback_data=f"dev_change_fullname:{user_id}")],
         [InlineKeyboardButton(text="Змінити керівника", callback_data=f"dev_change_manager:{user_id}")],
         [InlineKeyboardButton(text="Змінити посаду", callback_data=f"dev_change_role:{user_id}")],
         [InlineKeyboardButton(text="Змінити місто", callback_data=f"dev_change_city:{user_id}")],
+        [InlineKeyboardButton(text=status_btn_text, callback_data=f"dev_change_status:{user_id}:{ret_code}")],
         [InlineKeyboardButton(text="⬅️ Назад до профілю", callback_data=f"dev_user_profile_back:{user_id}:{ret_code}")]
     ])
     await _send_text_screen(callback, "✍️ <b>Що саме ви хочете змінити?</b>", reply_markup=kb)
     await callback.answer()
+
+
+async def developer_toggle_user_status(callback: CallbackQuery, state: FSMContext):
+    try:
+        parts = callback.data.split(":")
+        user_id = int(parts[1])
+        ret_code = parts[2] if len(parts) > 2 else "menu"
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ID користувача.", show_alert=True)
+        return
+
+    user_details = await get_user_details(user_id)
+    if not user_details:
+        await callback.answer("Користувача не знайдено.", show_alert=True)
+        return
+
+    current_status = user_details.get("status") or "Стажер"
+    new_status = "Працівник" if current_status == "Стажер" else "Стажер"
+
+    await update_user_role(user_id, new_status, actor_id=callback.from_user.id)
+    await callback.answer(f"✅ Статус оновлено: {new_status}", show_alert=True)
+
+    callback.data = f"dev_user_modify:{user_id}:{ret_code}"
+    await developer_user_modify_menu(callback, state)
 
 async def developer_change_fullname_start(callback: CallbackQuery, state: FSMContext):
     try:
@@ -11341,6 +11497,7 @@ async def developer_territorial_view(callback: CallbackQuery):
         [InlineKeyboardButton(text="👔 Керівники Територіала", callback_data=f"dev_territorial_managers:{t_uid}:0")],
     ]
     if not is_obs:
+        buttons.append([InlineKeyboardButton(text="✍️ Редагувати", callback_data=f"dev_terr_edit_menu:{t_uid}")])
         buttons.append([InlineKeyboardButton(text="🔄 Перенести керівників", callback_data=f"dev_territorial_reassign_prompt:{t_uid}")])
         buttons.append([InlineKeyboardButton(text="🗑 Видалити", callback_data=f"dev_territorial_del:{t_uid}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_territorials_menu")])
@@ -11518,6 +11675,203 @@ async def developer_territorial_del_confirm(callback: CallbackQuery):
     await delete_manager_by_uid(t_uid)
     await callback.answer("Територіала видалено! Підлеглих передано Адміністратору.", show_alert=True)
     await developer_list_territorials(callback)
+
+
+# EDITING TERRITORIAL (ПІБ, місто, напрям)
+async def developer_territorial_edit_menu(callback: CallbackQuery, state: FSMContext):
+    """Підменю редагування територіального керівника."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    try:
+        t_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+
+    manager = await get_manager_by_uid(t_uid)
+    if not manager:
+        await callback.answer("Територіала не знайдено!", show_alert=True)
+        return
+
+    await state.clear()
+    curr_type = (manager.get("territorial_type") or "ТЗ").strip()
+    target_type = "ВВ" if curr_type == "ТЗ" else "ТЗ"
+    type_btn_text = f"🏷 Напрям: {curr_type} ➔ {target_type}"
+
+    text = (
+        f"✏️ <b>Редагування територіала {html.escape(manager.get('full_name') or str(t_uid))}</b>\n\n"
+        f"🏙 Місто: <b>{html.escape(manager.get('city') or 'Не вказано')}</b>\n"
+        f"🏷 Напрям: <b>{curr_type}</b>\n\n"
+        f"Оберіть дію:"
+    )
+    buttons = [
+        [
+            InlineKeyboardButton(text="👤 Змінити ПІБ", callback_data=f"dev_terr_ch_name:{t_uid}"),
+            InlineKeyboardButton(text="🏙 Змінити місто", callback_data=f"dev_terr_ch_city:{t_uid}")
+        ],
+        [
+            InlineKeyboardButton(text=type_btn_text, callback_data=f"dev_terr_ch_type:{t_uid}")
+        ],
+        [
+            InlineKeyboardButton(text="⬅️ Назад до картки", callback_data=f"dev_territorial_view:{t_uid}")
+        ]
+    ]
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_terr_change_name_start(callback: CallbackQuery, state: FSMContext):
+    """Початок зміни ПІБ територіала."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    try:
+        t_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+
+    mgr = await get_manager_by_uid(t_uid)
+    if not mgr:
+        await callback.answer("Територіала не знайдено!", show_alert=True)
+        return
+
+    await state.update_data(edit_terr_uid=t_uid)
+    await state.set_state(DeveloperStates.waiting_edit_territorial_name)
+    await _edit_or_answer(
+        callback.message,
+        f"Введіть нове ПІБ для територіального керівника <b>{html.escape(mgr.get('full_name') or '')}</b> (мінімум 2 слова):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_terr_edit_menu:{t_uid}")]
+        ])
+    )
+    await callback.answer()
+
+
+async def dev_terr_change_name_process(message: Message, state: FSMContext):
+    """Обробка нового ПІБ територіала."""
+    data = await state.get_data()
+    t_uid = data.get("edit_terr_uid")
+    if not t_uid:
+        await state.clear()
+        return
+
+    new_name = (message.text or "").strip()
+    if len(new_name.split()) < 2:
+        await message.answer(
+            "Будь ласка, введіть повне ім'я та прізвище (мінімум 2 слова).\nСпробуйте ще раз:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_terr_edit_menu:{t_uid}")]
+            ])
+        )
+        return
+
+    await update_manager_name(t_uid, new_name)
+    await state.clear()
+    await message.answer(
+        f"✅ ПІБ територіала успішно змінено на <b>{html.escape(new_name)}</b>!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ До картки територіала", callback_data=f"dev_territorial_view:{t_uid}")]
+        ])
+    )
+
+
+async def dev_terr_change_city_start(callback: CallbackQuery, state: FSMContext):
+    """Початок зміни міста територіала."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    try:
+        t_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+
+    mgr = await get_manager_by_uid(t_uid)
+    if not mgr:
+        await callback.answer("Територіала не знайдено!", show_alert=True)
+        return
+
+    current_city = (mgr.get("city") or "").strip()
+    active_cities = await _get_active_city_names()
+
+    buttons = []
+    all_net_label = "🌐 Вся мережа (поточне)" if current_city in ('Всі міста', 'all', 'Мережа', 'Вся мережа', '🌐 Вся мережа') else "🌐 Вся мережа"
+    buttons.append([InlineKeyboardButton(text=all_net_label, callback_data=f"dev_terr_city_set:{t_uid}:all_network")])
+
+    for idx, c in enumerate(active_cities):
+        label = f"🏙️ {c} (поточне)" if c.lower() == current_city.lower() else c
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"dev_terr_city_set:{t_uid}:{idx}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Скасувати", callback_data=f"dev_terr_edit_menu:{t_uid}")])
+
+    await _edit_or_answer(
+        callback.message,
+        f"🏙️ <b>Зміна міста для територіала {html.escape(mgr.get('full_name') or str(t_uid))}</b>\n\n"
+        f"Поточне місто: <b>{html.escape(current_city or 'Не вказано')}</b>\n\n"
+        f"Оберіть нове місто або закріплення на всю мережу:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+
+async def dev_terr_process_city_set(callback: CallbackQuery, state: FSMContext):
+    """Обробка вибору міста територіала."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    try:
+        parts = callback.data.split(":")
+        t_uid = int(parts[1])
+        raw_city = parts[2]
+    except (ValueError, IndexError):
+        return await callback.answer("Помилка ідентифікатора.", show_alert=True)
+
+    mgr = await get_manager_by_uid(t_uid)
+    if not mgr:
+        return await callback.answer("Територіала не знайдено!", show_alert=True)
+
+    if raw_city == "all_network":
+        new_city = "🌐 Вся мережа"
+    else:
+        new_city = await _resolve_city_from_callback_val(raw_city)
+        if not new_city:
+            return await callback.answer("Помилка розпізнавання міста.", show_alert=True)
+
+    current_city = (mgr.get("city") or "").strip()
+    if new_city.lower() == current_city.lower():
+        return await callback.answer("Територіал уже закріплений за цим містом.", show_alert=True)
+
+    success = await update_territorial_city(t_uid, new_city)
+    if success:
+        await callback.answer(f"✅ Місто змінено на: {new_city}", show_alert=True)
+    else:
+        await callback.answer("⚠️ Помилка оновлення міста.", show_alert=True)
+
+    callback.data = f"dev_terr_edit_menu:{t_uid}"
+    await developer_territorial_edit_menu(callback, state)
+
+
+async def dev_terr_toggle_type_handler(callback: CallbackQuery, state: FSMContext):
+    """Перемикання напряму територіала (ТЗ <-> ВВ)."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    try:
+        t_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        return await callback.answer("Помилка ідентифікатора.", show_alert=True)
+
+    mgr = await get_manager_by_uid(t_uid)
+    if not mgr:
+        return await callback.answer("Територіала не знайдено!", show_alert=True)
+
+    curr_type = (mgr.get("territorial_type") or "ТЗ").strip()
+    target_type = "ВВ" if curr_type == "ТЗ" else "ТЗ"
+
+    success = await update_territorial_type(t_uid, target_type)
+    if success:
+        await callback.answer(f"✅ Напрям оновлено: {target_type}", show_alert=True)
+    else:
+        await callback.answer("⚠️ Помилка оновлення напряму.", show_alert=True)
+
+    callback.data = f"dev_terr_edit_menu:{t_uid}"
+    await developer_territorial_edit_menu(callback, state)
 
 # ADDING TERRITORIAL — 24H INVITE LINK WIZARD: city → type → transfer prompt → generate link
 async def developer_add_territorial_start(callback: CallbackQuery, state: FSMContext):
@@ -11884,6 +12238,7 @@ async def developer_observer_view(callback: CallbackQuery):
     is_obs = await is_observer_user(callback.from_user.id)
     buttons = []
     if not is_obs:
+        buttons.append([InlineKeyboardButton(text="✍️ Редагувати", callback_data=f"dev_obs_edit_menu:{obs_uid}")])
         buttons.append([InlineKeyboardButton(text="🗑 Видалити наглядача", callback_data=f"dev_obs_del_confirm:{obs_uid}")])
     buttons.append([InlineKeyboardButton(text="⬅️ До списку наглядачів", callback_data="dev_observers_menu")])
     
@@ -11937,6 +12292,90 @@ async def developer_observer_delete_do(callback: CallbackQuery):
     await callback.answer("✅ Наглядача успішно видалено.", show_alert=True)
     text, kb = await _build_observers_menu_view(page=0)
     await _edit_or_answer(callback.message, text, reply_markup=kb)
+
+
+# EDITING OBSERVER (ПІБ)
+async def developer_observer_edit_menu(callback: CallbackQuery, state: FSMContext):
+    """Підменю редагування наглядача."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    try:
+        obs_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+
+    obs = await get_observer_by_uid(obs_uid)
+    if not obs:
+        await callback.answer("Наглядача не знайдено!", show_alert=True)
+        return
+
+    await state.clear()
+    text = (
+        f"✏️ <b>Редагування наглядача {html.escape(obs.get('full_name') or str(obs_uid))}</b>\n\n"
+        f"Оберіть дію:"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="👤 Змінити ПІБ", callback_data=f"dev_obs_ch_name:{obs_uid}")],
+        [InlineKeyboardButton(text="⬅️ Назад до картки", callback_data=f"dev_obs_view:{obs_uid}")]
+    ]
+    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+async def dev_obs_change_name_start(callback: CallbackQuery, state: FSMContext):
+    """Початок зміни ПІБ наглядача."""
+    if not await _ensure_developer(callback, allow_observer=False):
+        return
+    try:
+        obs_uid = int(callback.data.split(":")[1])
+    except (ValueError, IndexError):
+        await callback.answer("Помилка ідентифікатора.", show_alert=True)
+        return
+
+    obs = await get_observer_by_uid(obs_uid)
+    if not obs:
+        await callback.answer("Наглядача не знайдено!", show_alert=True)
+        return
+
+    await state.update_data(edit_obs_uid=obs_uid)
+    await state.set_state(DeveloperStates.waiting_edit_observer_name)
+    await _edit_or_answer(
+        callback.message,
+        f"Введіть нове ПІБ для наглядача <b>{html.escape(obs.get('full_name') or '')}</b> (мінімум 2 слова):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_obs_edit_menu:{obs_uid}")]
+        ])
+    )
+    await callback.answer()
+
+
+async def dev_obs_change_name_process(message: Message, state: FSMContext):
+    """Обробка нового ПІБ наглядача."""
+    data = await state.get_data()
+    obs_uid = data.get("edit_obs_uid")
+    if not obs_uid:
+        await state.clear()
+        return
+
+    new_name = (message.text or "").strip()
+    if len(new_name.split()) < 2:
+        await message.answer(
+            "Будь ласка, введіть повне ім'я та прізвище (мінімум 2 слова).\nСпробуйте ще раз:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"dev_obs_edit_menu:{obs_uid}")]
+            ])
+        )
+        return
+
+    await update_observer_name(obs_uid, new_name)
+    await state.clear()
+    await message.answer(
+        f"✅ ПІБ наглядача успішно змінено на <b>{html.escape(new_name)}</b>!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ До картки наглядача", callback_data=f"dev_obs_view:{obs_uid}")]
+        ])
+    )
 
 
 async def developer_promote_manager_handler(callback: CallbackQuery):
@@ -12038,6 +12477,9 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_observer_view, lambda c: c.data and c.data.startswith("dev_obs_view:"))
     dp.callback_query.register(developer_observer_delete_confirm, lambda c: c.data and c.data.startswith("dev_obs_del_confirm:"))
     dp.callback_query.register(developer_observer_delete_do, lambda c: c.data and c.data.startswith("dev_obs_del_do:"))
+    dp.callback_query.register(developer_observer_edit_menu, lambda c: c.data and c.data.startswith("dev_obs_edit_menu:"))
+    dp.callback_query.register(dev_obs_change_name_start, lambda c: c.data and c.data.startswith("dev_obs_ch_name:"))
+    dp.message.register(dev_obs_change_name_process, DeveloperStates.waiting_edit_observer_name)
 
     # Territorials
     dp.callback_query.register(developer_territorials_menu, lambda c: c.data == "dev_territorials_menu")
@@ -12048,6 +12490,12 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_territorial_reassign_confirm, lambda c: c.data and c.data.startswith("dev_territorial_reassign_confirm:"))
     dp.callback_query.register(developer_territorial_del, lambda c: c.data and c.data.startswith("dev_territorial_del:") and not c.data.startswith("dev_territorial_del_confirm:"))
     dp.callback_query.register(developer_territorial_del_confirm, lambda c: c.data and c.data.startswith("dev_territorial_del_confirm:"))
+    dp.callback_query.register(developer_territorial_edit_menu, lambda c: c.data and c.data.startswith("dev_terr_edit_menu:"))
+    dp.callback_query.register(dev_terr_change_name_start, lambda c: c.data and c.data.startswith("dev_terr_ch_name:"))
+    dp.message.register(dev_terr_change_name_process, DeveloperStates.waiting_edit_territorial_name)
+    dp.callback_query.register(dev_terr_change_city_start, lambda c: c.data and c.data.startswith("dev_terr_ch_city:"))
+    dp.callback_query.register(dev_terr_process_city_set, lambda c: c.data and c.data.startswith("dev_terr_city_set:"))
+    dp.callback_query.register(dev_terr_toggle_type_handler, lambda c: c.data and c.data.startswith("dev_terr_ch_type:"))
 
     dp.callback_query.register(developer_add_territorial_start, lambda c: c.data == "dev_territorial_add")
     dp.callback_query.register(developer_add_territorial_city, DeveloperStates.waiting_add_territorial_city, lambda c: c.data and c.data.startswith("dev_t_city:"))
@@ -12194,6 +12642,7 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(dev_mgr_change_shops_start, lambda c: c.data and c.data.startswith("dev_mgr_ch_shops:"))
     dp.callback_query.register(dev_mgr_change_city_start, lambda c: c.data and c.data.startswith("dev_mgr_ch_city:"))
     dp.callback_query.register(dev_mgr_process_city_set, lambda c: c.data and c.data.startswith("dev_mgr_city_set:"))
+    dp.callback_query.register(dev_mgr_toggle_status_handler, lambda c: c.data and c.data.startswith("dev_mgr_ch_status:"))
     dp.callback_query.register(dev_mgr_edit_shop_toggle, DeveloperStates.waiting_edit_manager_shops, lambda c: c.data and c.data.startswith("dev_mgr_eshop_toggle:"))
     dp.callback_query.register(dev_mgr_edit_shop_done, DeveloperStates.waiting_edit_manager_shops, lambda c: c.data and c.data.startswith("dev_mgr_eshop_done:"))
     dp.callback_query.register(dev_mgr_transfer_shops_yes, lambda c: c.data and c.data.startswith("dev_mgr_tr_yes:"))
@@ -12311,6 +12760,9 @@ def register_developer_menu_handlers(dp: Dispatcher):
     # Dev Team Management
     dp.callback_query.register(developer_dev_team_menu, lambda c: c.data == "dev_team_menu")
     dp.callback_query.register(developer_admin_view, lambda c: c.data and c.data.startswith("dev_admin_view:"))
+    dp.callback_query.register(developer_admin_edit_menu, lambda c: c.data and c.data.startswith("dev_admin_edit_menu:"))
+    dp.callback_query.register(dev_admin_change_name_start, lambda c: c.data and c.data.startswith("dev_admin_ch_name:"))
+    dp.message.register(dev_admin_change_name_process, DeveloperStates.waiting_edit_developer_name)
     dp.callback_query.register(developer_request_add_dev, lambda c: c.data == "dev_add_dev")
     dp.callback_query.register(developer_remove_dev_menu, lambda c: c.data == "dev_remove_dev_menu")
     dp.callback_query.register(developer_remove_dev, lambda c: c.data and c.data.startswith("dev_remove_confirm:"))
@@ -12323,6 +12775,7 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_toggle_day_status, lambda c: c.data and c.data.startswith("dev_toggle_day:"))
     dp.callback_query.register(developer_user_profile_back, lambda c: c.data and c.data.startswith("dev_user_profile_back:"))
     dp.callback_query.register(developer_user_modify_menu, lambda c: c.data and c.data.startswith("dev_user_modify:"))
+    dp.callback_query.register(developer_toggle_user_status, lambda c: c.data and c.data.startswith("dev_change_status:"))
     dp.callback_query.register(developer_change_fullname_start, lambda c: c.data and c.data.startswith("dev_change_fullname:"))
     dp.message.register(developer_process_change_fullname, DeveloperStates.waiting_change_fullname)
     dp.callback_query.register(developer_change_manager_start, lambda c: c.data and c.data.startswith("dev_change_manager:"))
