@@ -2275,13 +2275,18 @@ async def manager_intern_profile_handler(callback: CallbackQuery):
         f"🕒 Остання активність: <b>{last_activity_str}</b>"
     )
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+    card_buttons = [
         [InlineKeyboardButton(text="✉️ Надіслати повідомлення", callback_data=f"reply_to_{intern_id}")],
         [InlineKeyboardButton(text="🔔 Нагадати", callback_data=f"remind_{intern_id}")],
+    ]
+    if intern and intern.get("status") != "Працівник":
+        card_buttons.append([InlineKeyboardButton(text="🎓 Перевести на працівника", callback_data=f"mgr_promote_prompt:{intern_id}:profile")])
+    card_buttons.extend([
         [InlineKeyboardButton(text="📅 Навчальні дні", callback_data=f"manager_intern_learning_{intern_id}")],
         [InlineKeyboardButton(text="⬅️ Повернутися до списку", callback_data="manager_interns_list")],
         [InlineKeyboardButton(text="🏠 Головне меню", callback_data="main_menu")],
     ])
+    kb = InlineKeyboardMarkup(inline_keyboard=card_buttons)
     photo_input = await get_user_avatar_input(callback.bot, intern_id)
     await _send_or_edit_card_photo(callback, photo_input, text, reply_markup=kb)
 

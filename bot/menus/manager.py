@@ -1740,9 +1740,10 @@ async def manager_promote_prompt_handler(callback: CallbackQuery):
         f"Ви дійсно бажаєте перевести стажера <b>{html.escape(name)}</b> у статус <b>Працівника</b>?\n\n"
         f"ℹ️ <i>Всі навчальні дні посади буде автоматично відкрито та зараховано як успішно пройдені. Співробітник отримає святкове повідомлення у боті.</i>"
     )
+    cancel_cb = f"manager_intern_profile_{intern_id}" if back_cb == "profile" else f"mgr_view_intern_{intern_id}:{back_cb}"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Так, перевести", callback_data=f"mgr_promote_confirm:{intern_id}:{back_cb}")],
-        [InlineKeyboardButton(text="⬅️ Скасувати", callback_data=f"mgr_view_intern_{intern_id}:{back_cb}")]
+        [InlineKeyboardButton(text="⬅️ Скасувати", callback_data=cancel_cb)]
     ])
     await _edit_menu_message(callback.message, text, reply_markup=kb, photo_path=PHOTO_MGR_TEAM)
     await callback.answer()
@@ -1780,7 +1781,12 @@ async def manager_promote_confirm_handler(callback: CallbackQuery):
         pass
 
     await callback.answer("✅ Статус оновлено: Працівник", show_alert=False)
-    await _show_intern_details(callback, intern_id, back_callback=back_cb)
+    if back_cb == "profile":
+        from bot.handlers import manager_intern_profile_handler
+        callback.data = f"manager_intern_profile_{intern_id}"
+        await manager_intern_profile_handler(callback)
+    else:
+        await _show_intern_details(callback, intern_id, back_callback=back_cb)
 
 # --- Register ---
 def register_manager_handlers(dp: Dispatcher):
