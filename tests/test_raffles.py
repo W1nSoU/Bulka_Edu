@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import zipfile
 from datetime import timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
 import openpyxl
@@ -420,6 +420,105 @@ class TestRafflesSystem(unittest.IsolatedAsyncioTestCase):
         dp = Dispatcher(storage=MemoryStorage())
         register_handlers(dp)
         self.assertEqual(sanitize_participant_filename("Іваненко Петро!", 5), "Іваненко_Петро")
+
+    async def test_news_reaction_keyboard_with_extra_buttons(self):
+        from aiogram.types import InlineKeyboardButton
+        from bot.services.news_broadcaster import get_news_reaction_keyboard
+
+        extra = [[InlineKeyboardButton(text="🎁 Взяти участь у розіграші", callback_data="user_raffle_menu")]]
+        kb = get_news_reaction_keyboard(news_id=77, current_reaction="🔥", extra_buttons=extra)
+        self.assertEqual(len(kb.inline_keyboard), 2)
+        self.assertEqual(kb.inline_keyboard[0][0].callback_data, "user_raffle_menu")
+        self.assertTrue(any("✅" in btn.text for btn in kb.inline_keyboard[1]))
+
+    async def test_raffle_launch_creates_news_and_broadcasts_by_default(self):
+        from bot.menus.raffles import dev_raffle_launch_handler
+
+        callback = AsyncMock()
+        callback.from_user = MagicMock(id=999)
+        callback.message = MagicMock()
+        callback.message.chat = MagicMock(id=999)
+        callback.bot = MagicMock()
+        callback.answer = AsyncMock()
+
+        state = AsyncMock()
+        # send_announcement не задано -> має бути True за замовчуванням
+        state.get_data.return_value = {
+            "title": "Тестовий розіграш",
+            "text_content": "Умови розіграшу",
+            "participation_type": "text",
+            "selected_roles": ["Працівник"],
+            "selected_city": "all",
+            "deadline": "2026-12-01 18:00:00",
+        }
+
+        raffle_mock = {
+            "id": 10,
+            "title": "Тестовий розіграш",
+            "text": "Умови розіграшу",
+            "participation_type": "text",
+            "text_format": None,
+            "deadline": "2026-12-01 18:00:00",
+            "media_type": None,
+            "photo_file_id": None,
+            "video_file_id": None,
+        }
+
+        with (
+            patch("bot.menus.raffles._check_raffle_write_access", AsyncMock(return_value=True)),
+            patch("bot.menus.raffles.create_raffle", AsyncMock(return_value=10)),
+            patch("bot.menus.raffles.get_raffle_by_id", AsyncMock(return_value=raffle_mock)),
+            patch("bot.menus.raffles.get_matching_news_recipients", AsyncMock(return_value=[101, 102])),
+            patch("bot.menus.raffles.create_news", AsyncMock(return_value=55)) as mock_create_news,
+            patch("bot.menus.raffles.start_news_wave_broadcast") as mock_broadcast,
+            patch("bot.menus.raffles._render_admin_raffle_card", AsyncMock()),
+        ):
+            await dev_raffle_launch_handler(callback, state)
+
+            mock_create_news.assert_awaited_once()
+            _, news_kwargs = mock_create_news.call_args
+            self.assertIn("СТАРТУВАВ НОВИЙ РОЗІГРАШ!", news_kwargs["text"])
+            self.assertEqual(news_kwargs["total_recipients"], 2)
+
+            mock_broadcast.assert_called_once()
+            _, b_kwargs = mock_broadcast.call_args
+            self.assertEqual(b_kwargs["news_id"], 55)
+            self.assertEqual(b_kwargs["recipient_uids"], [101, 102])
+            self.assertIsNotNone(b_kwargs["extra_buttons"])
+            self.assertEqual(b_kwargs["extra_buttons"][0][0].callback_data, "user_raffle_menu")
+
+    async def test_confirm_sub_rejects_empty_text_when_state_lost(self):
+        from bot.menus.raffles import user_raffle_confirm_sub_handler
+
+        callback = AsyncMock()
+        callback.from_user = MagicMock(id=501, username="u501", full_name="Тест Юзер")
+        callback.message = MagicMock()
+        callback.answer = AsyncMock()
+
+        state = AsyncMock()
+        state.get_data.return_value = {"active_raffle_id": 10}  # draft_text втрачено
+
+        raffle_mock = {
+            "id": 10,
+            "title": "Тестовий розіграш",
+            "text": "Введіть число",
+            "participation_type": "text",
+            "text_format": None,
+            "deadline": "2026-12-01 18:00:00",
+        }
+
+        with (
+            patch("bot.menus.raffles.is_user_eligible_for_active_raffle", AsyncMock(return_value=raffle_mock)),
+            patch("bot.menus.raffles.get_user_raffle_submission", AsyncMock(return_value=None)),
+            patch("bot.menus.raffles.add_raffle_submission", AsyncMock()) as mock_add,
+            patch("bot.menus.raffles._show_user_raffle_screen", AsyncMock()),
+        ):
+            await user_raffle_confirm_sub_handler(callback, state)
+            mock_add.assert_not_awaited()
+            callback.answer.assert_awaited_with(
+                "⚠️ Текст відповіді не знайдено. Надішліть відповідь ще раз.",
+                show_alert=True,
+            )
 
 
 if __name__ == "__main__":

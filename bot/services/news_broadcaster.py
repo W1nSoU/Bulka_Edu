@@ -41,16 +41,24 @@ def classify_telegram_error(error_str: str) -> str:
     return f"⚠️ {error_str[:80]}"
 
 
-def get_news_reaction_keyboard(news_id: int, current_reaction: Optional[str] = None) -> InlineKeyboardMarkup:
+def get_news_reaction_keyboard(
+    news_id: int,
+    current_reaction: Optional[str] = None,
+    extra_buttons: Optional[List[List[InlineKeyboardButton]]] = None,
+) -> InlineKeyboardMarkup:
     """
-    Формує інлайн-клавіатуру з 4 реакціями для новини.
+    Формує інлайн-клавіатуру з 4 реакціями для новини (та опціональними додатковими кнопками зверху).
     Якщо користувач уже обрав реакцію, додає позначку ✅ біля неї.
     """
+    rows: List[List[InlineKeyboardButton]] = []
+    if extra_buttons:
+        rows.extend(extra_buttons)
     buttons = []
     for r in NEWS_REACTIONS:
         text = f"{r} ✅" if current_reaction == r else r
         buttons.append(InlineKeyboardButton(text=text, callback_data=f"news_react:{news_id}:{r}"))
-    return InlineKeyboardMarkup(inline_keyboard=[buttons])
+    rows.append(buttons)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def send_news_batch(
@@ -60,7 +68,8 @@ async def send_news_batch(
     photo_file_id: Optional[str] = None,
     news_id: Optional[int] = None,
     video_file_id: Optional[str] = None,
-    media_type: Optional[str] = None
+    media_type: Optional[str] = None,
+    extra_buttons: Optional[List[List[InlineKeyboardButton]]] = None,
 ) -> Tuple[int, int]:
     """
     Надсилає новину одній пачці (хвилі) користувачів (до 50 осіб)
@@ -75,7 +84,12 @@ async def send_news_batch(
     if news_id:
         initial_line = format_news_reactions_line({})
         clean_text = update_text_with_reactions_line(clean_text, initial_line)
-    reply_markup = get_news_reaction_keyboard(news_id) if news_id else None
+    if news_id:
+        reply_markup = get_news_reaction_keyboard(news_id, extra_buttons=extra_buttons)
+    elif extra_buttons:
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=extra_buttons)
+    else:
+        reply_markup = None
 
     effective_media_type = media_type
     if not effective_media_type:
@@ -165,7 +179,8 @@ async def dispatch_news_waves(
     min_wave_delay: int = 300,
     max_wave_delay: int = 600,
     video_file_id: Optional[str] = None,
-    media_type: Optional[str] = None
+    media_type: Optional[str] = None,
+    extra_buttons: Optional[List[List[InlineKeyboardButton]]] = None,
 ) -> Tuple[int, int]:
     """
     Фонова задача хвильової розсилки новини:
@@ -200,7 +215,8 @@ async def dispatch_news_waves(
             photo_file_id,
             news_id=news_id,
             video_file_id=video_file_id,
-            media_type=media_type
+            media_type=media_type,
+            extra_buttons=extra_buttons,
         )
         total_sent += sent
         total_failed += failed
@@ -294,7 +310,8 @@ def start_news_wave_broadcast(
     min_wave_delay: int = 300,
     max_wave_delay: int = 600,
     video_file_id: Optional[str] = None,
-    media_type: Optional[str] = None
+    media_type: Optional[str] = None,
+    extra_buttons: Optional[List[List[InlineKeyboardButton]]] = None,
 ) -> asyncio.Task:
     """Запускає фонову похвильову розсилку новини."""
     return asyncio.create_task(
@@ -308,7 +325,8 @@ def start_news_wave_broadcast(
             min_wave_delay=min_wave_delay,
             max_wave_delay=max_wave_delay,
             video_file_id=video_file_id,
-            media_type=media_type
+            media_type=media_type,
+            extra_buttons=extra_buttons,
         )
     )
 
@@ -413,7 +431,12 @@ class NewsReactionSyncQueue:
                 continue
 
             user_reaction = user_reactions.get(uid)
-            kb = get_news_reaction_keyboard(news_id, current_reaction=user_reaction)
+            raffle_extra = (
+                [[InlineKeyboardButton(text="🎁 Взяти участь у розіграші", callback_data="user_raffle_menu")]]
+                if "СТАРТУВАВ НОВИЙ РОЗІГРАШ!" in (news_row.get("text") or "")
+                else None
+            )
+            kb = get_news_reaction_keyboard(news_id, current_reaction=user_reaction, extra_buttons=raffle_extra)
 
             try:
                 try:

@@ -2936,9 +2936,17 @@ async def news_reaction_handler(callback: CallbackQuery):
     # Розраховуємо новий лічильник для оновлення поточного повідомлення
     summary = await get_news_reactions_summary(news_id)
     reactions_line = format_news_reactions_line(summary.get("breakdown", {}))
-    new_kb = get_news_reaction_keyboard(news_id, current_reaction=emoji)
-
     msg = callback.message
+    extra_buttons = None
+    if msg and msg.reply_markup and getattr(msg.reply_markup, "inline_keyboard", None):
+        non_reaction_rows = [
+            row for row in msg.reply_markup.inline_keyboard
+            if not any((btn.callback_data or "").startswith("news_react:") for btn in row)
+        ]
+        if non_reaction_rows:
+            extra_buttons = non_reaction_rows
+    new_kb = get_news_reaction_keyboard(news_id, current_reaction=emoji, extra_buttons=extra_buttons)
+
     if not msg:
         return
 

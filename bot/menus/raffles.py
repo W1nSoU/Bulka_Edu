@@ -22,6 +22,7 @@ from aiogram.types import (
 )
 
 from bot.config import TIMEZONE
+from bot.services.news_broadcaster import start_news_wave_broadcast
 from bot.services.raffle_exporter import (
     describe_raffle_participation,
     dispatch_raffle_announcement_waves,
@@ -38,7 +39,7 @@ from database.managers import (
     is_observer_user,
     is_territorial_user,
 )
-from database.news import get_matching_news_recipients
+from database.news import create_news, get_matching_news_recipients
 from database.raffles import (
     RAFFLES_MEDIA_DIR,
     add_raffle_submission,
@@ -318,7 +319,7 @@ async def dev_raffle_create_start(callback: CallbackQuery, state: FSMContext):
         deadline_label="",
         selected_roles=["Працівник", "Стажер"],
         selected_city="all",
-        send_announcement=False,
+        send_announcement=True,
     )
 
     text = (
@@ -712,8 +713,8 @@ async def _show_raffle_launch_preview(callback: CallbackQuery, state: FSMContext
     recipients = await get_matching_news_recipients(selected_roles, selected_city)
     rec_count = len(recipients)
 
-    send_ann = bool(data.get("send_announcement", False))
-    ann_label = "🔔 Анонс в особисті: Увімкнено ✅" if send_ann else "🔕 Анонс в особисті: Вимкнено"
+    send_ann = bool(data.get("send_announcement", True))
+    ann_label = "🔔 Новина про старт: Увімкнено ✅" if send_ann else "🔕 Новина про старт: Вимкнено"
 
     fmt_label = describe_raffle_participation(
         data.get("participation_type", "button"),
@@ -781,7 +782,7 @@ async def dev_raffle_toggle_ann_handler(callback: CallbackQuery, state: FSMConte
         return
 
     data = await state.get_data()
-    new_val = not bool(data.get("send_announcement", False))
+    new_val = not bool(data.get("send_announcement", True))
     await state.update_data(send_announcement=new_val)
     await _show_raffle_launch_preview(callback, state)
 
@@ -794,7 +795,7 @@ async def dev_raffle_launch_handler(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     selected_roles = data.get("selected_roles", [])
     selected_city = data.get("selected_city", "all")
-    send_ann = bool(data.get("send_announcement", False))
+    send_ann = bool(data.get("send_announcement", True))
     text_content = sanitize_telegram_html(data.get("text_content") or "")
 
     try:
@@ -825,13 +826,47 @@ async def dev_raffle_launch_handler(callback: CallbackQuery, state: FSMContext):
     if send_ann and raffle:
         recipients = await get_matching_news_recipients(selected_roles, selected_city)
         if recipients:
-            asyncio.create_task(
-                dispatch_raffle_announcement_waves(
-                    bot=callback.bot,
-                    recipient_uids=recipients,
-                    raffle=raffle,
-                    admin_chat_id=callback.message.chat.id if callback.message else None,
-                )
+            deadline_display = str(raffle.get("deadline", ""))[:16]
+            fmt_label = describe_raffle_participation(
+                raffle.get("participation_type", "button"),
+                raffle.get("text_format"),
+            )
+            title_escaped = html.escape(str(raffle.get("title") or "Розіграш BULKA"))
+            terms_html = sanitize_telegram_html(raffle.get("text") or "")
+            news_text = (
+                f"✨ <b>Вам надійшла новина від BULKA</b> ✨\n"
+                f"───────────────────\n"
+                f"🎁 <b>СТАРТУВАВ НОВИЙ РОЗІГРАШ!</b>\n"
+                f"<b>{title_escaped}</b>\n\n"
+                f"{terms_html}\n\n"
+                f"📌 <b>Формат участі:</b> {fmt_label}\n"
+                f"⏳ <b>Дедлайн:</b> {deadline_display}\n\n"
+                f"<i>Тисніть кнопку нижче, щоб взяти участь!</i>"
+            )
+
+            total_waves = len(range(0, len(recipients), 50))
+            news_id = await create_news(
+                text=news_text,
+                photo_file_id=raffle.get("photo_file_id"),
+                selected_roles=selected_roles,
+                selected_city=selected_city,
+                total_recipients=len(recipients),
+                total_waves=total_waves,
+                created_by=callback.from_user.id,
+                video_file_id=raffle.get("video_file_id"),
+                media_type=raffle.get("media_type"),
+            )
+            raffle_btn = [[InlineKeyboardButton(text="🎁 Взяти участь у розіграші", callback_data="user_raffle_menu")]]
+            start_news_wave_broadcast(
+                bot=callback.bot,
+                recipient_uids=recipients,
+                text=news_text,
+                photo_file_id=raffle.get("photo_file_id"),
+                admin_chat_id=callback.message.chat.id if callback.message else None,
+                news_id=news_id,
+                video_file_id=raffle.get("video_file_id"),
+                media_type=raffle.get("media_type"),
+                extra_buttons=raffle_btn,
             )
 
     await _render_admin_raffle_card(callback, raffle_id, back_target="menu")
@@ -1451,6 +1486,22 @@ async def user_raffle_confirm_sub_handler(callback: CallbackQuery, state: FSMCon
     file_size = data.get("draft_file_size") or 0
     draft_text = data.get("draft_text")
     local_file_path: Optional[str] = None
+
+    ptype = raffle.get("participation_type")
+    if ptype in ("text", "formatted_text") and not (draft_text or "").strip():
+        await callback.answer("⚠️ Текст відповіді не знайдено. Надішліть відповідь ще раз.", show_alert=True)
+        await state.set_state(RaffleParticipationStates.waiting_submission)
+        await state.update_data(active_raffle_id=raffle["id"])
+        if callback.message:
+            await _show_user_raffle_screen(callback.message, raffle, user_id, state, delete_old=False)
+        return
+    if ptype in ("media", "document") and not (media_type and file_id):
+        await callback.answer("⚠️ Файл або медіа не знайдено. Надішліть ще раз.", show_alert=True)
+        await state.set_state(RaffleParticipationStates.waiting_submission)
+        await state.update_data(active_raffle_id=raffle["id"])
+        if callback.message:
+            await _show_user_raffle_screen(callback.message, raffle, user_id, state, delete_old=False)
+        return
 
     if media_type and file_id:
         await callback.answer("⏳ Зберігаємо файл...")
