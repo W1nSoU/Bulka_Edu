@@ -1528,11 +1528,12 @@ async def remind_topic_global_callback(callback: CallbackQuery, state: FSMContex
     is_dev = await is_developer_user(user_id)
     is_obs = await is_observer_user(user_id)
     is_mgr = await is_manager_user(user_id)
-    if not (is_hr or is_dev or is_obs or is_mgr):
+    is_terr = await is_territorial_user(user_id)
+    if not (is_hr or is_dev or is_obs or is_mgr or is_terr):
         await callback.answer("Ця функція доступна лише для керівництва.", show_alert=True)
         return
 
-    exclude_mgr = is_mgr and not (is_hr or is_dev or is_obs)
+    exclude_mgr = is_mgr and not (is_hr or is_dev or is_obs or is_terr)
     roles = await get_searchable_roles(exclude_manager_roles=exclude_mgr)
     await state.update_data(remind_roles_list=roles)
 
@@ -1542,7 +1543,7 @@ async def remind_topic_global_callback(callback: CallbackQuery, state: FSMContex
     ]
     buttons.append([InlineKeyboardButton(text="🌐 Всі посади", callback_data="remind_role_select:ALL")])
 
-    back_button_cb = "mgr_materials_catalog" if exclude_mgr else ("dev_main_study" if (is_dev or is_obs) else "manager_menu")
+    back_button_cb = "mgr_materials_catalog" if exclude_mgr else ("dev_main_study" if (is_dev or is_obs or is_terr) else "manager_menu")
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_button_cb)])
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -1564,8 +1565,9 @@ async def remind_role_select_callback(callback: CallbackQuery, state: FSMContext
     is_dev = await is_developer_user(user_id)
     is_obs = await is_observer_user(user_id)
     is_mgr = await is_manager_user(user_id)
+    is_terr = await is_territorial_user(user_id)
 
-    if not (is_hr or is_dev or is_obs or is_mgr):
+    if not (is_hr or is_dev or is_obs or is_mgr or is_terr):
         await callback.answer("Ця функція доступна лише для керівництва.", show_alert=True)
         return
 
@@ -1581,7 +1583,7 @@ async def remind_role_select_callback(callback: CallbackQuery, state: FSMContext
         data = await state.get_data()
         roles = data.get("remind_roles_list")
         if not roles:
-            exclude_mgr = is_mgr and not (is_hr or is_dev or is_obs)
+            exclude_mgr = is_mgr and not (is_hr or is_dev or is_obs or is_terr)
             roles = await get_searchable_roles(exclude_manager_roles=exclude_mgr)
         try:
             role_index = int(role_part)
@@ -1633,8 +1635,9 @@ async def remind_topic_for_intern_callback(callback: CallbackQuery, state: FSMCo
     caller_id = callback.from_user.id
     is_caller_privileged = await is_privileged_user(caller_id)
     manager_info = await get_manager_by_uid(caller_id)
+    is_terr = await is_territorial_user(caller_id)
     
-    if not is_caller_privileged and not manager_info:
+    if not is_caller_privileged and not manager_info and not is_terr:
         logger.warning(f"Unauthorized remind_topic call from {caller_id}")
         await callback.answer("Ця функція доступна лише керівникам.", show_alert=True)
         return

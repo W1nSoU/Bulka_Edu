@@ -220,7 +220,7 @@ class NewsCreationStates(StatesGroup):
     selecting_roles = State()
     confirm_dispatch = State()
 
-async def _ensure_developer(callback: CallbackQuery, require_main: bool = False, allow_observer: bool = False) -> bool:
+async def _ensure_developer(callback: CallbackQuery, require_main: bool = False, allow_observer: bool = False, allow_territorial: bool = False) -> bool:
     user_id = callback.from_user.id
     is_dev = await is_developer_user(user_id)
     
@@ -230,6 +230,10 @@ async def _ensure_developer(callback: CallbackQuery, require_main: bool = False,
     
     if allow_observer and not is_dev:
         if await is_observer_user(user_id):
+            return True
+
+    if allow_territorial and not is_dev:
+        if await is_territorial_user(user_id):
             return True
             
     if not is_dev:
@@ -4128,7 +4132,7 @@ def _materials_menu_keyboard() -> InlineKeyboardMarkup:
 
 async def developer_materials_menu(callback: CallbackQuery):
     """Головне меню редагування матеріалів — вибір посади."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
     # Використовуємо AVAILABLE_ROLES з constants
@@ -4185,7 +4189,7 @@ async def _build_dev_days_picker_keyboard(role: str, callback_prefix: str, back_
 
 async def developer_materials_select_day(callback: CallbackQuery, state: FSMContext):
     """Вибір дня для редагування."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
     try:
@@ -4215,7 +4219,7 @@ async def developer_materials_select_day(callback: CallbackQuery, state: FSMCont
 
 async def developer_materials_select_type(callback: CallbackQuery, state: FSMContext):
     """Вибір типу контенту (текст/відео)."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
     try:
@@ -4284,7 +4288,7 @@ def parse_material_content(content: str) -> list[dict]:
 
 async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
     """Показ поточного матеріалу з можливістю редагування."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
     try:
@@ -4300,7 +4304,7 @@ async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
     
     # Отримуємо матеріал з БД
     material = await get_material_by_role_day_type(role, day, content_type)
-    is_obs = await is_observer_user(callback.from_user.id)
+    is_obs = await is_observer_user(callback.from_user.id) or await is_territorial_user(callback.from_user.id)
     
     if material:
         current_content = material.get("content", "")
@@ -4369,7 +4373,7 @@ async def developer_materials_view(callback: CallbackQuery, state: FSMContext):
 async def developer_material_complement_menu(callback: CallbackQuery, state: FSMContext):
     """Shows the menu to choose how to complement the material."""
     if not await _ensure_developer(callback): return
-    if await is_observer_user(callback.from_user.id):
+    if await is_observer_user(callback.from_user.id) or await is_territorial_user(callback.from_user.id):
         await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
         return
     
@@ -4953,7 +4957,7 @@ def _get_dev_pagination_keyboard(current_page, total_pages, material_id, day, co
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 async def developer_pagination_handler(callback: CallbackQuery):
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     try:
         _, mid_str, day_str, page_str, ctype = callback.data.split(":")
@@ -4984,7 +4988,7 @@ async def developer_pagination_handler(callback: CallbackQuery):
         from bot.utils.paginator import split_text
         pages = [{"text": p} for p in split_text(material.get("content", ""))]
 
-    is_obs = await is_observer_user(callback.from_user.id)
+    is_obs = await is_observer_user(callback.from_user.id) or await is_territorial_user(callback.from_user.id)
     if 0 <= page < len(pages):
         kb = _get_dev_pagination_keyboard(page, len(pages), material_id, day, ctype, is_observer=is_obs)
         
@@ -5016,7 +5020,7 @@ async def developer_pagination_handler(callback: CallbackQuery):
 
 async def developer_materials_full_view(callback: CallbackQuery, state: FSMContext):
     """Надсилає повний текст матеріалу розробнику з пагінацією."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
 
     try:
@@ -5054,7 +5058,7 @@ async def developer_materials_full_view(callback: CallbackQuery, state: FSMConte
         pages = [{"text": "(Матеріал порожній)"}]
     
     # Show page 0
-    is_obs = await is_observer_user(callback.from_user.id)
+    is_obs = await is_observer_user(callback.from_user.id) or await is_territorial_user(callback.from_user.id)
     kb = _get_dev_pagination_keyboard(0, len(pages), material_id, day, content_type, is_observer=is_obs)
     
     # Always delete the old message (which might be a menu) and send a new message
@@ -5273,7 +5277,7 @@ async def _finalize_video_update(message: Message, state: FSMContext, video_file
 
 async def developer_tests_menu(callback: CallbackQuery):
     """Головне меню редагування тестів — вибір посади."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
     buttons = []
@@ -5297,7 +5301,7 @@ async def developer_tests_menu(callback: CallbackQuery):
 
 async def developer_tests_select_day(callback: CallbackQuery, state: FSMContext):
     """Вибір дня для тесту."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
     try:
@@ -5324,7 +5328,7 @@ async def developer_tests_select_day(callback: CallbackQuery, state: FSMContext)
 
 async def developer_videos_select_day(callback: CallbackQuery, state: FSMContext):
     """Вибір дня для редагування відео."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
     try:
@@ -5354,7 +5358,7 @@ async def developer_videos_select_day(callback: CallbackQuery, state: FSMContext
 
 async def developer_tests_view(callback: CallbackQuery, state: FSMContext, day: Optional[int] = None, role_index: Optional[int] = None):
     """Перегляд поточного тесту."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
     data = await state.get_data()
@@ -5379,7 +5383,7 @@ async def developer_tests_view(callback: CallbackQuery, state: FSMContext, day: 
     await state.update_data(test_day=day, test_role=role, test_role_index=role_index)
     
     test_material = await get_test_by_role_and_day(role, day)
-    is_obs = await is_observer_user(callback.from_user.id)
+    is_obs = await is_observer_user(callback.from_user.id) or await is_territorial_user(callback.from_user.id)
     
     display_text = "Тест ще не створено."
     is_enabled = True # Default enabled
@@ -5427,7 +5431,7 @@ async def developer_tests_view(callback: CallbackQuery, state: FSMContext, day: 
 
 async def developer_test_toggle(callback: CallbackQuery, state: FSMContext):
     if not await _ensure_developer(callback): return
-    if await is_observer_user(callback.from_user.id):
+    if await is_observer_user(callback.from_user.id) or await is_territorial_user(callback.from_user.id):
         await callback.answer("⛔️ У вас режим перегляду (тільки читання).", show_alert=True)
         return
     
@@ -5464,7 +5468,7 @@ async def developer_test_toggle(callback: CallbackQuery, state: FSMContext):
 
 async def developer_videos_view(callback: CallbackQuery, state: FSMContext):
     """Показ поточного відео матеріалу з можливістю редагування."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
     try:
@@ -5480,7 +5484,7 @@ async def developer_videos_view(callback: CallbackQuery, state: FSMContext):
     
     # Отримуємо матеріал з БД, використовуючи новий тип для завантажених відео
     video_material = await get_material_by_role_day_type(role, day, "video_files")
-    is_obs = await is_observer_user(callback.from_user.id)
+    is_obs = await is_observer_user(callback.from_user.id) or await is_territorial_user(callback.from_user.id)
     
     current_file_ids = []
     video_material_id = None
@@ -5696,7 +5700,7 @@ async def developer_process_video_uploads(message: Message, state: FSMContext):
 
 async def developer_videos_menu(callback: CallbackQuery):
     """Головне меню редагування відео матеріалів — вибір посади."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
     buttons = []
@@ -5720,7 +5724,7 @@ async def developer_videos_menu(callback: CallbackQuery):
 
 async def developer_photos_menu(callback: CallbackQuery):
     """Головне меню редагування фото матеріалів — вибір посади."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
     buttons = []
@@ -5743,7 +5747,7 @@ async def developer_photos_menu(callback: CallbackQuery):
 
 async def developer_photos_select_day(callback: CallbackQuery, state: FSMContext):
     """Вибір дня для редагування фото."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
     try:
@@ -5773,7 +5777,7 @@ async def developer_photos_select_day(callback: CallbackQuery, state: FSMContext
 
 async def developer_days_page_callback(callback: CallbackQuery, state: FSMContext):
     """Обробляє пагінацію вибору днів у панелі розробника."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     try:
         prefix, page_str = callback.data.split("|", 1)
@@ -5809,7 +5813,7 @@ async def developer_days_page_callback(callback: CallbackQuery, state: FSMContex
 
 async def developer_photos_view(callback: CallbackQuery, state: FSMContext):
     """Показ поточного фото матеріалу з можливістю редагування."""
-    if not await _ensure_developer(callback, allow_observer=True):
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
     try:
@@ -5825,7 +5829,7 @@ async def developer_photos_view(callback: CallbackQuery, state: FSMContext):
     
     # Отримуємо матеріал з БД, використовуючи новий тип для завантажених фото
     photo_material = await get_material_by_role_day_type(role, day, "photo_files")
-    is_obs = await is_observer_user(callback.from_user.id)
+    is_obs = await is_observer_user(callback.from_user.id) or await is_territorial_user(callback.from_user.id)
     
     current_file_ids = []
     photo_material_id = None

@@ -22,6 +22,9 @@ async def is_privileged_user(user_id: int) -> bool:
     if manager_info:
         return True
 
+    if await is_territorial_user(user_id):
+        return True
+
     if await is_hr_user(user_id):
         return True
 
