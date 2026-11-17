@@ -224,6 +224,13 @@ async def delete_news_category(category_id: int, db_path: str = DB_PATH) -> bool
         return cursor.rowcount > 0
 
 
+SPECIAL_NEWS_RECIPIENTS = {
+    "Сегеда": 440984923,
+    "Радецький": 201151447,
+}
+EXCLUDED_OBSERVER_IDS = set(SPECIAL_NEWS_RECIPIENTS.values())
+
+
 async def get_matching_news_recipients(
     roles: List[str],
     target_city: str = "all",
@@ -232,11 +239,24 @@ async def get_matching_news_recipients(
     """
     Повертає список унікальних telegram user_id для розсилки новини.
     Виключає звільнених (status == 'fired' у managers.db) та неактивних користувачів.
+    При виборі ролі 'Наглядач' Сегеда (440984923) та Радецький (201151447) виключаються,
+    і отримують новину ТІЛЬКИ якщо їхні кнопки 'Сегеда' / 'Радецький' обрано окремо.
     """
     from database.surveys import get_matching_survey_recipients
     from database.managers import MANAGERS_DB_PATH
 
-    recipients = await get_matching_survey_recipients(roles, target_city, db_path=db_path)
+    # Базові ролі без персональних кнопок
+    base_roles = [r for r in roles if r not in SPECIAL_NEWS_RECIPIENTS]
+    recipients = await get_matching_survey_recipients(base_roles, target_city, db_path=db_path)
+    recipients_set = set(recipients)
+
+    # За замовчуванням Сегеда та Радецький НЕ отримують новини наглядачів
+    recipients_set.difference_update(EXCLUDED_OBSERVER_IDS)
+
+    # Додаємо Сегеду та Радецького лише якщо вони обрані явно
+    for special_name, special_uid in SPECIAL_NEWS_RECIPIENTS.items():
+        if special_name in roles:
+            recipients_set.add(special_uid)
     
     # Додаткова перевірка звільнених менеджерів/керівників у managers.db
     try:
@@ -244,11 +264,11 @@ async def get_matching_news_recipients(
             cur = await m_db.execute("SELECT uid FROM managers WHERE status = 'fired'")
             fired_uids = {r[0] for r in await cur.fetchall() if r[0]}
             if fired_uids:
-                recipients = [uid for uid in recipients if uid not in fired_uids]
+                recipients_set.difference_update(fired_uids)
     except Exception:
         pass
 
-    return recipients
+    return list(recipients_set)
 
 
 async def create_news(
