@@ -8135,6 +8135,13 @@ async def dev_news_toggle_cat_handler(callback: CallbackQuery, state: FSMContext
     await _show_news_categories_selection(callback, state)
 
 
+NEWS_ROLE_CALLBACK_ALIASES = {
+    "Сегеда Олександр Леонідович": "seheda",
+    "Радецький Владислав Леонідович": "radetskiy",
+}
+NEWS_CALLBACK_TO_ROLE = {v: k for k, v in NEWS_ROLE_CALLBACK_ALIASES.items()}
+
+
 async def _show_news_roles_selection(callback: CallbackQuery, state: FSMContext):
     """Відображає екран вибору ролей для новини."""
     data = await state.get_data()
@@ -8153,7 +8160,8 @@ async def _show_news_roles_selection(callback: CallbackQuery, state: FSMContext)
     buttons = []
     for r in all_roles:
         mark = "✅ " if r in selected_roles else "⬜️ "
-        buttons.append([InlineKeyboardButton(text=f"{mark}{r}", callback_data=f"dev_news_toggle_role:{r}")])
+        cb_key = NEWS_ROLE_CALLBACK_ALIASES.get(r, r)
+        buttons.append([InlineKeyboardButton(text=f"{mark}{r}", callback_data=f"dev_news_toggle_role:{cb_key}")])
 
     buttons.append([InlineKeyboardButton(text="➡️ Далі (вибір міста)", callback_data="dev_news_to_city")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="dev_news_back_to_cats")])
@@ -8192,7 +8200,8 @@ async def dev_news_toggle_role_handler(callback: CallbackQuery, state: FSMContex
         await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
         return
 
-    role = callback.data.split(":", 1)[1]
+    raw_role = callback.data.split(":", 1)[1]
+    role = NEWS_CALLBACK_TO_ROLE.get(raw_role, raw_role)
     data = await state.get_data()
     selected_roles = list(data.get("selected_roles", ["Працівник", "Стажер"]))
 

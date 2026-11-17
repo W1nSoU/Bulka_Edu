@@ -153,9 +153,11 @@ class TestNewsRolesSehedaRadetskiy(unittest.IsolatedAsyncioTestCase):
         self.assertIn("⬜️ Радецький Владислав Леонідович", button_texts)
         self.assertIn("⬜️ Адміністратор", button_texts)
 
-        # Перевіряємо callback_data
-        self.assertIn("dev_news_toggle_role:Сегеда Олександр Леонідович", button_cbs)
-        self.assertIn("dev_news_toggle_role:Радецький Владислав Леонідович", button_cbs)
+        # Перевіряємо callback_data (усі мають бути <= 64 байти для Telegram API)
+        self.assertIn("dev_news_toggle_role:seheda", button_cbs)
+        self.assertIn("dev_news_toggle_role:radetskiy", button_cbs)
+        for cb in button_cbs:
+            self.assertLessEqual(len(cb.encode("utf-8")), 64, f"callback_data занадто довгий: {cb}")
 
 
 if __name__ == "__main__":
