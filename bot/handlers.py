@@ -62,7 +62,7 @@ from database.materials import get_materials_for_day, get_material_by_id, get_ma
 from database.positions import get_searchable_roles
 from bot.constants import is_valid_role, is_valid_city
 from typing import List, Optional, cast
-from bot.utils.message_utils import SAFE_MESSAGE_LENGTH, sanitize_telegram_html
+from bot.utils.message_utils import SAFE_MESSAGE_LENGTH, extract_message_html, sanitize_telegram_html
 from bot.utils.paginator import split_text
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -2986,7 +2986,7 @@ async def news_reaction_handler(callback: CallbackQuery):
     if not msg:
         return
 
-    caption_or_text = msg.caption if msg.photo else msg.text
+    caption_or_text = extract_message_html(msg)
     if not caption_or_text:
         return
 

@@ -38,7 +38,7 @@ from database.shops import (
 from bot.services.logger import get_logger
 logger = get_logger()
 from bot.services.semantic_search import build_and_reset_embeddings
-from bot.utils.message_utils import sanitize_telegram_html
+from bot.utils.message_utils import extract_message_html, sanitize_telegram_html
 from database.users import (
     get_all_users,
     get_user_details,
@@ -8035,7 +8035,7 @@ async def dev_news_process_content(message: Message, state: FSMContext):
 
     if message.video:
         video_file_id = message.video.file_id
-        caption = (message.caption or "").strip()
+        caption = extract_message_html(message)
         if caption:
             await state.update_data(
                 photo_file_id=None,
@@ -8060,7 +8060,7 @@ async def dev_news_process_content(message: Message, state: FSMContext):
 
     if message.photo:
         photo_file_id = message.photo[-1].file_id
-        caption = (message.caption or "").strip()
+        caption = extract_message_html(message)
         if caption:
             await state.update_data(
                 photo_file_id=photo_file_id,
@@ -8084,7 +8084,7 @@ async def dev_news_process_content(message: Message, state: FSMContext):
         return
 
     if message.text:
-        text_content = message.text.strip()
+        text_content = extract_message_html(message)
         if not text_content:
             await message.answer("⚠️ Текст новини не може бути порожнім. Надішліть повідомлення ще раз.")
             return

@@ -31,7 +31,7 @@ from bot.services.raffle_exporter import (
     sanitize_participant_filename,
     validate_raffle_text_submission,
 )
-from bot.utils.message_utils import sanitize_telegram_html
+from bot.utils.message_utils import extract_message_html, sanitize_telegram_html
 from database.hr import is_developer_user, is_hr_user
 from database.managers import (
     get_manager_by_uid,
@@ -374,7 +374,7 @@ async def dev_raffle_process_content(message: Message, state: FSMContext):
     stored_media = data.get("media_type")
 
     if message.video:
-        caption = (message.caption or "").strip()
+        caption = extract_message_html(message)
         if caption:
             await state.update_data(
                 photo_file_id=None,
@@ -395,7 +395,7 @@ async def dev_raffle_process_content(message: Message, state: FSMContext):
         return
 
     if message.photo:
-        caption = (message.caption or "").strip()
+        caption = extract_message_html(message)
         photo_id = message.photo[-1].file_id
         if caption:
             await state.update_data(
@@ -417,7 +417,7 @@ async def dev_raffle_process_content(message: Message, state: FSMContext):
         return
 
     if message.text:
-        text_content = message.text.strip()
+        text_content = extract_message_html(message)
         if not text_content:
             await message.answer("⚠️ Текст не може бути порожнім. Надішліть умови розіграшу ще раз:")
             return

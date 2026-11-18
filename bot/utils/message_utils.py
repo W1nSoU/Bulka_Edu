@@ -122,6 +122,51 @@ def sanitize_telegram_html(text: str) -> str:
     return clean.strip()
 
 
+_FORMATTING_ENTITY_TYPES = frozenset(
+    {
+        "bold",
+        "italic",
+        "underline",
+        "strikethrough",
+        "spoiler",
+        "code",
+        "pre",
+        "text_link",
+        "text_mention",
+        "custom_emoji",
+        "blockquote",
+        "expandable_blockquote",
+    }
+)
+
+
+def extract_message_html(message: Optional[Message]) -> str:
+    """
+    Витягує текст або підпис (caption) повідомлення Telegram із збереженням HTML-форматування
+    (зокрема вбудованих посилань <a href="...">, жирного тексту, курсиву тощо),
+    якщо повідомлення містить Telegram formatting entities.
+    """
+    if not message:
+        return ""
+
+    raw_text = getattr(message, "text", None)
+    raw_caption = getattr(message, "caption", None)
+    entities = getattr(message, "entities", None) or getattr(message, "caption_entities", None) or []
+
+    if isinstance(entities, (list, tuple)) and any(
+        getattr(ent, "type", None) in _FORMATTING_ENTITY_TYPES for ent in entities
+    ):
+        html_text = getattr(message, "html_text", None)
+        if isinstance(html_text, str) and html_text.strip():
+            return html_text.strip()
+
+    if isinstance(raw_text, str) and raw_text.strip():
+        return raw_text.strip()
+    if isinstance(raw_caption, str) and raw_caption.strip():
+        return raw_caption.strip()
+    return ""
+
+
 
 async def send_long_message(
     message: Message,

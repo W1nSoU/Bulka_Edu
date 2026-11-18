@@ -1,9 +1,13 @@
+from datetime import datetime
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 import os
 import tempfile
 import aiosqlite
+from aiogram.types import Chat, Message, MessageEntity, PhotoSize, User
 
+from bot.handlers import news_reaction_handler
+from bot.utils.message_utils import extract_message_html
 from database.news import (
     init_news_db,
     create_news,
@@ -15,6 +19,7 @@ from bot.services.news_broadcaster import (
 )
 from bot.menus.developer import (
     NewsCreationStates,
+    _show_news_preview,
     dev_news_create_start,
     dev_news_process_content,
     dev_news_ai_improve_handler,
@@ -303,6 +308,193 @@ class TestNewsMediaBroadcaster(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored_data.get("video_file_id"), "video_vid_999")
         self.assertEqual(stored_data.get("media_type"), "video")
         mock_preview_revert.assert_called_once()
+
+    def test_extract_message_html_entities_and_raw_html(self):
+        user = User(id=1, is_bot=False, first_name="Admin")
+        chat = Chat(id=1, type="private")
+
+        # 1. Текст із Telegram-гіперпосиланням (Ctrl+K / text_link)
+        link_label = "Анкета рекомендації кандидата"
+        prefix = "1. Заповніть коротку форму: 👉 "
+        txt = f"{prefix}{link_label}\nTelegram: @BULKA_HR"
+        msg_link = Message(
+            message_id=10,
+            date=datetime.now(),
+            chat=chat,
+            from_user=user,
+            text=txt,
+            entities=[
+                MessageEntity(
+                    type="text_link",
+                    offset=len(prefix.encode("utf-16-le")) // 2,
+                    length=len(link_label.encode("utf-16-le")) // 2,
+                    url="https://forms.gle/bulka123",
+                ),
+                MessageEntity(
+                    type="mention",
+                    offset=len(f"{prefix}{link_label}\nTelegram: ".encode("utf-16-le")) // 2,
+                    length=len("@BULKA_HR".encode("utf-16-le")) // 2,
+                ),
+            ],
+        )
+        extracted = extract_message_html(msg_link)
+        self.assertIn('<a href="https://forms.gle/bulka123">Анкета рекомендації кандидата</a>', extracted)
+
+        # 2. Підпис до фото з text_link (caption_entities)
+        cap_msg = Message(
+            message_id=11,
+            date=datetime.now(),
+            chat=chat,
+            from_user=user,
+            photo=[PhotoSize(file_id="p1", file_unique_id="u1", width=10, height=10)],
+            caption=f"{prefix}{link_label}",
+            caption_entities=[
+                MessageEntity(
+                    type="text_link",
+                    offset=len(prefix.encode("utf-16-le")) // 2,
+                    length=len(link_label.encode("utf-16-le")) // 2,
+                    url="https://forms.gle/photo123",
+                ),
+            ],
+        )
+        self.assertIn('<a href="https://forms.gle/photo123">Анкета рекомендації кандидата</a>', extract_message_html(cap_msg))
+
+        # 3. Сирий HTML разом з авто-entity @BULKA_HR та #HR — теги <b> не повинні екрануватися
+        raw_txt = "<b>Важлива новина</b>\nTelegram: @BULKA_HR\n#HR"
+        raw_msg = Message(
+            message_id=12,
+            date=datetime.now(),
+            chat=chat,
+            from_user=user,
+            text=raw_txt,
+            entities=[
+                MessageEntity(type="mention", offset=30, length=9),
+                MessageEntity(type="hashtag", offset=40, length=3),
+            ],
+        )
+        self.assertEqual(extract_message_html(raw_msg), raw_txt)
+
+    async def test_news_text_link_preserved_across_create_preview_broadcast_and_react(self):
+        user = User(id=1, is_bot=False, first_name="Admin")
+        chat = Chat(id=1, type="private")
+        link_label = "Анкета рекомендації кандидата"
+        prefix = "1. Заповніть коротку форму: 👉 "
+        msg = Message(
+            message_id=20,
+            date=datetime.now(),
+            chat=chat,
+            from_user=user,
+            text=f"{prefix}{link_label}",
+            entities=[
+                MessageEntity(
+                    type="text_link",
+                    offset=len(prefix.encode("utf-16-le")) // 2,
+                    length=len(link_label.encode("utf-16-le")) // 2,
+                    url="https://forms.gle/bulka-hr",
+                )
+            ],
+        )
+
+        stored_data = {}
+
+        async def fake_update_data(**kwargs):
+            stored_data.update(kwargs)
+
+        async def fake_get_data():
+            return dict(stored_data)
+
+        state = MagicMock()
+        state.update_data = AsyncMock(side_effect=fake_update_data)
+        state.get_data = AsyncMock(side_effect=fake_get_data)
+        state.set_state = AsyncMock()
+
+        # 1. Введення тексту з посиланням у dev_news_process_content
+        with (
+            patch("bot.menus.developer._check_news_access", new_callable=AsyncMock, return_value=True),
+            patch("bot.menus.developer._show_news_categories_selection", new_callable=AsyncMock),
+        ):
+            await dev_news_process_content(msg, state)
+
+        expected_anchor = '<a href="https://forms.gle/bulka-hr">Анкета рекомендації кандидата</a>'
+        self.assertIn(expected_anchor, stored_data.get("text_content", ""))
+
+        # 2. Прев'ю (_show_news_preview) зберігає <a href="..."> у full_text
+        cb_preview = AsyncMock()
+        cb_preview.message = AsyncMock()
+        cb_preview.message.photo = None
+        cb_preview.message.video = None
+        cb_preview.answer = AsyncMock()
+        with (
+            patch("database.news.get_news_category_by_id", new_callable=AsyncMock, return_value={"hashtag": "HR"}),
+            patch("database.news.get_matching_news_recipients", new_callable=AsyncMock, return_value=[101]),
+            patch("bot.menus.developer._edit_or_answer", new_callable=AsyncMock) as mock_edit_preview,
+        ):
+            await _show_news_preview(cb_preview, state)
+
+        self.assertIn(expected_anchor, stored_data.get("full_text", ""))
+        self.assertIn(expected_anchor, mock_edit_preview.call_args.args[1])
+
+        # 3. Розсилка (send_news_batch) надсилає повідомлення з <a href="...">
+        news_id = await create_news(
+            text=stored_data["full_text"],
+            photo_file_id=None,
+            selected_roles=["Працівник"],
+            selected_city="all",
+            total_recipients=1,
+            total_waves=1,
+            created_by=1,
+            db_path=self.db_path,
+        )
+        bot = MagicMock()
+        sent_msg_obj = MagicMock(message_id=501)
+        bot.send_message = AsyncMock(return_value=sent_msg_obj)
+        with patch("bot.services.news_broadcaster.record_deliveries_batch", new_callable=AsyncMock):
+            sent, failed = await send_news_batch(bot, [101], stored_data["full_text"], news_id=news_id)
+
+        self.assertEqual((sent, failed), (1, 0))
+        sent_text = bot.send_message.call_args.kwargs["text"]
+        self.assertIn(expected_anchor, sent_text)
+
+        # 4. Натискання реакції користувачем (news_reaction_handler) не губить <a href="...">
+        delivered_text = f"✨ Вам надійшла новина від BULKA ✨\n\n{prefix}{link_label}\n\n#HR\n\n0 👍 | 0 🔥 | 0 😁 | 0 ❤️ | 0 🤔"
+        delivered_msg = Message(
+            message_id=501,
+            date=datetime.now(),
+            chat=Chat(id=101, type="private"),
+            from_user=User(id=1, is_bot=True, first_name="Bot"),
+            text=delivered_text,
+            entities=[
+                MessageEntity(
+                    type="text_link",
+                    offset=len(f"✨ Вам надійшла новина від BULKA ✨\n\n{prefix}".encode("utf-16-le")) // 2,
+                    length=len(link_label.encode("utf-16-le")) // 2,
+                    url="https://forms.gle/bulka-hr",
+                )
+            ],
+        )
+        cb_react = MagicMock()
+        cb_react.from_user = User(id=101, is_bot=False, first_name="Worker")
+        cb_react.data = f"news_react:{news_id}:🔥"
+        cb_react.message = delivered_msg
+        cb_react.bot = bot
+        cb_react.answer = AsyncMock()
+
+        with (
+            patch("database.news.upsert_news_reaction", new_callable=AsyncMock, return_value=True),
+            patch(
+                "database.news.get_news_reactions_summary",
+                new_callable=AsyncMock,
+                return_value={"breakdown": {"🔥": 1}},
+            ),
+            patch("bot.services.news_broadcaster.news_reaction_sync_queue.schedule_sync"),
+            patch.object(Message, "edit_text", new_callable=AsyncMock) as mock_msg_edit,
+        ):
+            await news_reaction_handler(cb_react)
+
+        mock_msg_edit.assert_awaited_once()
+        edited_text = mock_msg_edit.call_args.kwargs["text"]
+        self.assertIn(expected_anchor, edited_text)
+        self.assertIn("1 🔥", edited_text)
 
 
 if __name__ == "__main__":
