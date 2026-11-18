@@ -841,8 +841,16 @@ def format_sources_label(chunk: dict, scope: str = "global", max_labels: int = 5
         role = src.get("display_role") or src.get("role") or UNASSIGNED_ROLE_LABEL
         if role == UNASSIGNED_ROLE:
             role = UNASSIGNED_ROLE_LABEL
-        day = int(src.get("day") or 1)
+        day = int(src.get("day") or 0)
         title = (src.get("title") or "").strip()
+        if day == 0 and (title.startswith("Інструкція:") or role.startswith("Інструкція:")):
+            clean_inst = title or role
+            key = (clean_inst, 0, clean_inst)
+            if key not in seen:
+                seen.add(key)
+                labels.append(clean_inst)
+            continue
+        day = max(1, day)
         generic_title = f"День {day} — Текст"
         clean_title = title if (title and title != generic_title and title != f"День {day} - Текст") else ""
         key = (role, day, clean_title)

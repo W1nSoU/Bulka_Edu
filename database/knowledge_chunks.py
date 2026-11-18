@@ -30,7 +30,7 @@ async def init_knowledge_chunks_db(db_path: str = DB_PATH) -> None:
 
 
 async def get_materials_fingerprint(db_path: str = DB_PATH) -> str:
-    """Computes a lightweight deterministic fingerprint of materials table contents."""
+    """Computes a lightweight deterministic fingerprint of materials and instructions contents."""
     try:
         async with aiosqlite.connect(db_path) as db:
             cursor = await db.execute(
@@ -43,6 +43,20 @@ async def get_materials_fingerprint(db_path: str = DB_PATH) -> str:
                 """
             )
             rows = await cursor.fetchall()
+
+            inst_rows: list = []
+            try:
+                icursor = await db.execute(
+                    """
+                    SELECT id, coalesce(title, ''), coalesce(updated_at, ''),
+                           length(coalesce(content, ''))
+                    FROM instructions
+                    ORDER BY id ASC
+                    """
+                )
+                inst_rows = await icursor.fetchall()
+            except aiosqlite.OperationalError:
+                inst_rows = []
     except aiosqlite.OperationalError:
         return ""
 
@@ -50,16 +64,47 @@ async def get_materials_fingerprint(db_path: str = DB_PATH) -> str:
     for row in rows:
         h.update("|".join(str(col) for col in row).encode("utf-8"))
         h.update(b"\n")
+    for irow in inst_rows:
+        h.update(("inst|" + "|".join(str(col) for col in irow)).encode("utf-8"))
+        h.update(b"\n")
     return h.hexdigest()
 
 
 async def get_materials_rows(db_path: str = DB_PATH) -> list[dict]:
-    """Reads all rows from materials table for a specific SQLite path."""
+    """Reads all rows from materials and non-empty instructions for a specific SQLite path."""
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT * FROM materials ORDER BY id ASC")
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        rows = [dict(row) for row in await cursor.fetchall()]
+
+        try:
+            icursor = await db.execute(
+                """
+                SELECT *
+                FROM instructions
+                WHERE length(trim(coalesce(content, ''))) > 0
+                ORDER BY id ASC
+                """
+            )
+            inst_rows = await icursor.fetchall()
+            for inst in inst_rows:
+                title = (inst["title"] or "").strip() or f"Інструкція #{inst['id']}"
+                rows.append(
+                    {
+                        "id": -int(inst["id"]),
+                        "role": "ALL",
+                        "day": 0,
+                        "content_type": "instruction",
+                        "title": f"Інструкція: {title}",
+                        "content": inst["content"],
+                        "updated_at": inst["updated_at"],
+                        "is_instruction": True,
+                    }
+                )
+        except aiosqlite.OperationalError:
+            pass
+
+        return rows
 
 
 async def get_all_knowledge_chunks(db_path: str = DB_PATH) -> list[dict]:

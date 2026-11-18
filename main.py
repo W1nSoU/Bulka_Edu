@@ -34,6 +34,7 @@ from database.raffles import (
     check_and_complete_expired_raffles,
     cleanup_expired_raffle_media,
 )
+from database.instructions import init_instructions_db
 
 
 
@@ -158,6 +159,8 @@ async def start_bot():
     await init_raffles_db()
     await raffle_maintenance_loop()
     print_status("✅", "База розіграшів")
+    await init_instructions_db()
+    print_status("✅", "База інструкцій")
     await perform_monthly_reset_if_due()
     print_status("✅", "Перевірено та оновлено статистику помилок тестів (якщо потрібно)")
     await load_all_progress()

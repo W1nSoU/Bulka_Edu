@@ -178,17 +178,28 @@ def build_deduplicated_chunks(materials: list[dict]) -> list[dict]:
 
     for record in materials or []:
         content_type = (record.get("content_type") or "text").strip()
+        is_instruction = content_type == "instruction" or bool(record.get("is_instruction"))
         clean_text = extract_clean_text(record.get("content"), content_type=content_type)
         if len(clean_text) < MIN_CLEAN_TEXT_LENGTH:
             continue
 
-        scope_role, display_role = normalize_source_role(record.get("role"))
+        title_str = (record.get("title") or "").strip()
+        if is_instruction:
+            if title_str and not clean_text.lower().startswith(title_str.lower()):
+                clean_text = f"{title_str}\n\n{clean_text}"
+            scope_role = "ALL"
+            display_role = title_str or "Інструкція"
+            day_val = 0
+        else:
+            scope_role, display_role = normalize_source_role(record.get("role"))
+            day_val = int(record.get("day") or 1)
+
         source_entry = {
             "material_id": record.get("id"),
             "role": scope_role,
             "display_role": display_role,
-            "day": int(record.get("day") or 1),
-            "title": (record.get("title") or "").strip(),
+            "day": day_val,
+            "title": title_str,
         }
         source_key = (source_entry["material_id"], scope_role, source_entry["day"], source_entry["title"])
 

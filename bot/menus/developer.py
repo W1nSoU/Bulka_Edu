@@ -345,8 +345,10 @@ def _admin_study_keyboard(is_observer: bool = False, is_territorial: bool = Fals
             InlineKeyboardButton(text="🖼 Фото", callback_data="dev_photos_menu")
         ],
         row3,
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")]
     ]
+    if not is_readonly:
+        buttons.append([InlineKeyboardButton(text="📋 Інструкції", callback_data="dev_instructions_menu")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="developer_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -12904,3 +12906,7 @@ def register_developer_menu_handlers(dp: Dispatcher):
     # Raffles Handlers
     from bot.menus.raffles import register_raffle_handlers
     register_raffle_handlers(dp)
+
+    # Instructions Handlers
+    from bot.menus.instructions import register_instructions_handlers
+    register_instructions_handlers(dp)
