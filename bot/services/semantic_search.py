@@ -635,6 +635,37 @@ def filter_chunks_by_scope(
     return matched
 
 
+def _is_one_edit_away(a: str, b: str) -> bool:
+    """True if strings `a` and `b` are within Damerau-Levenshtein distance 1."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        diffs = [i for i in range(la) if a[i] != b[i]]
+        if len(diffs) == 1:
+            return True
+        if len(diffs) == 2:
+            i, j = diffs
+            return j == i + 1 and a[i] == b[j] and a[j] == b[i]
+        return False
+
+    shorter, longer = (a, b) if la < lb else (b, a)
+    i = j = 0
+    skipped = False
+    while i < len(shorter) and j < len(longer):
+        if shorter[i] != longer[j]:
+            if skipped:
+                return False
+            skipped = True
+            j += 1
+        else:
+            i += 1
+            j += 1
+    return True
+
+
 def _token_matches_chunk(
     q_token: str,
     q_stem: str,
@@ -662,6 +693,16 @@ def _token_matches_chunk(
 
     if len(q_stem) >= 5 and q_stem in chunk_lower:
         return True, True
+
+    if len(q_stem) >= 5:
+        for c_stem in chunk_stems_set:
+            if len(c_stem) >= 5 and _is_one_edit_away(q_stem, c_stem):
+                return True, True
+
+    if len(q_token) >= 5:
+        for c_tok in chunk_tokens_set:
+            if len(c_tok) >= 5 and _is_one_edit_away(q_token, c_tok):
+                return True, True
 
     return False, False
 
@@ -746,7 +787,27 @@ def _score_chunk(
         base_score = lexical_score
 
     exact_boost = 0.30 if is_exact_match else (0.12 if has_partial_exact else 0.0)
-    final_score = base_score + exact_boost
+
+    title_matched_count = 0
+    if titles_text:
+        titles_lower = _APOSTROPHES_RE.sub("'", titles_text.lower())
+        t_tokens = tokenize_text(titles_lower, drop_stop_words=False)
+        t_tokens_set = set(t_tokens)
+        t_stems_set = {uk_stem(t) for t in t_tokens}
+        for concept in concepts:
+            t_hit, _ = _concept_matches_text(
+                concept, titles_lower, t_tokens, t_tokens_set, t_stems_set
+            )
+            if t_hit:
+                title_matched_count += 1
+
+    is_instruction_chunk = any(
+        s.get("day") is not None and int(s.get("day") or 0) == 0
+        for s in sources
+    )
+    title_boost = 0.20 * (title_matched_count / total_q)
+    instruction_boost = 0.08 if (is_instruction_chunk and matched_count > 0) else 0.0
+    final_score = base_score + exact_boost + title_boost + instruction_boost
 
     return {
         "chunk": chunk,

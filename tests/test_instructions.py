@@ -711,6 +711,91 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
         self.assertIn("remind_topic_global", cbs)
         self.assertIn("main_menu", cbs)
 
+    async def test_typo_query_prioritizes_matching_instruction_over_incidental_materials(self):
+        with patch("database.materials.DB_PATH", self.db_path):
+            await init_materials_db()
+            await add_or_update_material(
+                role="Старший продавець",
+                day=4,
+                content_type="text",
+                title="День 4",
+                content=(
+                    "Увечері товар із транзитної зони переноситься на склад СНТ. "
+                    "Також проводиться переміщення простроченого товару у списання."
+                ),
+                resource_url=None,
+            )
+
+        orig_pdf_path = os.path.join(self.files_dir, "transfer_typo.pdf")
+        with open(orig_pdf_path, "wb") as f:
+            f.write(b"%PDF-1.4 transfer")
+
+        inst_id = await create_instruction(
+            title="Інструкція з переміщення товару",
+            content="Переміщення товару між ТТ та РЦ оформлюється через ТЗД у розділі Документи.",
+            original_file_path=orig_pdf_path,
+            original_telegram_file_id="tg_typo_transfer",
+            original_file_name="Інструкція_переміщення.pdf",
+            created_by=1,
+            db_path=self.db_path,
+        )
+
+        # Офлайн-перевірка з одруківкою «Перміщення товару» (пропущено 'е')
+        with (
+            patch("bot.services.openai_ai.is_openai_configured", return_value=False),
+            patch("bot.services.openai_ai.get_client", return_value=None),
+        ):
+            res = await hybrid_search_chunks(
+                query="Перміщення товару",
+                role_filter=None,
+                scope="global",
+                db_path=self.db_path,
+                client=None,
+            )
+            self.assertTrue(res["has_relevant_match"])
+            self.assertGreaterEqual(len(res["results"]), 1)
+            self.assertIn("Інструкція: Інструкція з переміщення товару", res["results"][0]["sources_label"])
+
+            ans = await answer_remind_topic(
+                question="Перміщення товару",
+                role_filter=None,
+                user_id=777,
+                db_path=self.db_path,
+                client=None,
+            )
+            self.assertEqual(ans["used_instruction_ids"], [inst_id])
+
+        # Перевірка форматування контексту у GPT без [Джерело N]
+        captured = []
+
+        async def _fake_create(**kwargs):
+            captured.append(kwargs["messages"])
+            msg_obj = MagicMock()
+            msg_obj.content = "Переміщення товару оформлюється через ТЗД [Інструкція: Інструкція з переміщення товару]."
+            choice = MagicMock()
+            choice.message = msg_obj
+            resp = MagicMock()
+            resp.choices = [choice]
+            resp.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+            return resp
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create = AsyncMock(side_effect=_fake_create)
+        fake_client.embeddings.create = AsyncMock(return_value=MagicMock(data=[]))
+
+        with patch("bot.services.openai_ai.is_openai_configured", return_value=True):
+            gpt_ans = await answer_remind_topic(
+                question="Перміщення товару",
+                role_filter=None,
+                user_id=777,
+                db_path=self.db_path,
+                client=fake_client,
+            )
+            self.assertEqual(gpt_ans["used_instruction_ids"], [inst_id])
+            sys_prompt = captured[0][0]["content"]
+            self.assertIn("Фрагмент 1 [Інструкція: Інструкція з переміщення товару]:", sys_prompt)
+            self.assertIn("НЕ пиши [Джерело N]", sys_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
