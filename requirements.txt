@@ -10,4 +10,5 @@ openai
 
 cryptography
 psutil
+python-docx
 pyinstaller

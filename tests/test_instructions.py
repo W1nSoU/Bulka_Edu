@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -29,6 +30,8 @@ from bot.menus.instructions import (
     dev_instructions_page_handler,
 )
 from bot.services.instructions_docx import (
+    _extract_text_from_docx_bytes_stdlib,
+    _generate_instruction_template_docx_stdlib,
     extract_text_from_docx_bytes,
     generate_instruction_template_docx,
 )
@@ -91,6 +94,29 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(ValueError):
             extract_text_from_docx_bytes(b"not a valid docx")
+
+    def test_docx_stdlib_fallback_and_cross_compatibility(self):
+        stdlib_stream = _generate_instruction_template_docx_stdlib("Резервний режим")
+        stdlib_bytes = stdlib_stream.getvalue()
+
+        # Файл, згенерований без python-docx, коректно відкривається як через stdlib, так і через python-docx
+        extracted_stdlib = _extract_text_from_docx_bytes_stdlib(stdlib_bytes)
+        self.assertIn("Резервний режим", extracted_stdlib)
+        self.assertIn("Ситуація / Проблема | Правильна дія співробітника", extracted_stdlib)
+
+        extracted_via_docx = extract_text_from_docx_bytes(stdlib_bytes)
+        self.assertIn("Резервний режим", extracted_via_docx)
+        self.assertIn("Ситуація / Проблема | Правильна дія співробітника", extracted_via_docx)
+
+        # Публічні функції прозоро працюють без встановленого python-docx
+        with patch.dict(sys.modules, {"docx": None}):
+            fallback_tpl = generate_instruction_template_docx("Без python-docx").getvalue()
+            extracted = extract_text_from_docx_bytes(fallback_tpl)
+            self.assertIn("Без python-docx", extracted)
+            self.assertIn("Ситуація / Проблема | Правильна дія співробітника", extracted)
+
+        with self.assertRaises(ValueError):
+            _extract_text_from_docx_bytes_stdlib(b"not a valid docx")
 
     async def test_db_crud_and_pagination(self):
         for i in range(1, 11):
