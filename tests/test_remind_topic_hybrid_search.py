@@ -14,14 +14,17 @@ import aiosqlite
 from bot.services.knowledge_chunker import (
     UNASSIGNED_ROLE,
     build_deduplicated_chunks,
+    extract_clean_pages,
     extract_clean_text,
     split_into_chunks,
 )
 from bot.services.openai_ai import NO_ANSWER_MARKER, answer_remind_topic
 from bot.services.semantic_search import (
+    format_sources_label,
     hybrid_search_chunks,
     reset_semantic_search_index,
     sync_knowledge_index,
+    uk_stem,
 )
 from database.knowledge_chunks import get_all_knowledge_chunks, init_knowledge_chunks_db
 from database.positions import get_searchable_roles
@@ -175,6 +178,48 @@ class TestKnowledgeChunker(unittest.TestCase):
         unassigned = next(c for c in chunks if "без призначеної ролі" in c["chunk_text"])
         self.assertEqual(unassigned["sources"][0]["role"], UNASSIGNED_ROLE)
         self.assertEqual(unassigned["sources"][0]["display_role"], "Загальні матеріали")
+
+    def test_extract_clean_pages_and_page_citations(self):
+        pages_json = json.dumps(
+            [
+                {"text": "Сторінка перша: загальний вступ та інструктаж персоналу."},
+                {"photo": "AgACAgPhotoOnly"},
+                {"text": "Сторінка третя: робота з касою та терміналом."},
+                {"text": "Сторінка четверта: робота з актами переміщення товару на склад."},
+            ],
+            ensure_ascii=False,
+        )
+        extracted_pages = extract_clean_pages(pages_json, content_type="text")
+        self.assertEqual([p[0] for p in extracted_pages], [1, 3, 4])
+
+        chunks = build_deduplicated_chunks(
+            [
+                {
+                    "id": 7,
+                    "role": "Старший продавець",
+                    "day": 2,
+                    "content_type": "text",
+                    "title": "День 2 — Текст",
+                    "content": pages_json,
+                }
+            ]
+        )
+        page4_chunk = next(c for c in chunks if "актами переміщення" in c["chunk_text"])
+        self.assertEqual(page4_chunk["sources"][0]["page"], 4)
+        self.assertEqual(
+            format_sources_label(page4_chunk, scope="global"),
+            "Старший продавець (День 2, сторінка 4)",
+        )
+
+    def test_uk_stem_inflections_for_peremishchennya(self):
+        for word in (
+            "переміщення",
+            "переміщенням",
+            "переміщенні",
+            "переміщується",
+            "переміщуються",
+        ):
+            self.assertEqual(uk_stem(word), "переміщ", f"Unexpected stem for {word}")
 
 
 class TestHybridSearchAndSqliteCache(unittest.IsolatedAsyncioTestCase):

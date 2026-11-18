@@ -83,33 +83,91 @@ _STOP_WORDS = frozenset(
         "чому",
         "буде",
         "є",
+        "яких",
+        "якому",
+        "якій",
+        "якого",
+        "якими",
+        "посада",
+        "посади",
+        "посадах",
+        "посаді",
+        "посаду",
+        "посад",
+        "день",
+        "дні",
+        "дня",
+        "днях",
+        "днів",
+        "сторінка",
+        "сторінки",
+        "сторінці",
+        "сторінках",
+        "сторінок",
+        "згадується",
+        "описано",
+        "розповідається",
+        "знаходиться",
+        "міститься",
     }
 )
 
 # Longest suffixes first; only applied when resulting stem stays >= 3-4 chars.
 _UK_LONG_SUFFIXES = (
+    "уваннями",
+    "юваннями",
+    "ованнями",
     "уватися",
     "юватися",
+    "уванням",
+    "юванням",
+    "уваннях",
+    "юваннях",
+    "аннями",
+    "еннями",
     "ування",
     "ювання",
     "овання",
+    "уванні",
+    "юванні",
+    "уванню",
+    "ується",
+    "юється",
+    "уються",
+    "юються",
+    "ається",
+    "яється",
+    "аються",
+    "яються",
+    "аннях",
+    "еннях",
+    "увати",
+    "ювати",
+    "овати",
+    "анням",
+    "енням",
+    "інням",
+    "ються",
+    "ється",
+    "иться",
+    "яться",
+    "ового",
+    "овому",
+    "овими",
     "ання",
     "ення",
     "єння",
     "іння",
-    "увати",
-    "ювати",
-    "овати",
-    "ться",
+    "анні",
+    "енні",
+    "інні",
+    "анню",
+    "енню",
     "тися",
+    "ться",
     "ості",
     "ість",
     "овий",
-    "ового",
-    "овому",
-    "ого",
-    "ому",
-    "ий",
     "овою",
     "ових",
     "овим",
@@ -130,8 +188,13 @@ _UK_LONG_SUFFIXES = (
     "ами",
     "ями",
     "іми",
+    "ого",
+    "ому",
+    "ий",
     "ях",
     "ах",
+    "ам",
+    "ям",
     "ом",
     "ем",
     "єм",
@@ -753,12 +816,14 @@ def _score_chunk(
 
     matched_count = 0
     strict_count = 0
+    matched_concept_keys: set[str] = set()
     for concept in concepts:
         hit, strict_hit = _concept_matches_text(
             concept, searchable_lower, c_tokens, c_tokens_set, c_stems_set
         )
         if hit:
             matched_count += 1
+            matched_concept_keys.add(concept.key)
         if strict_hit:
             strict_count += 1
 
@@ -817,8 +882,10 @@ def _score_chunk(
         "matched_ratio": matched_count / total_q,
         "matched_count": matched_count,
         "strict_count": strict_count,
+        "matched_concept_keys": matched_concept_keys,
         "is_exact_match": is_exact_match,
         "has_partial_exact": has_partial_exact,
+        "matches_primary": True,
     }
 
 
@@ -912,12 +979,15 @@ def format_sources_label(chunk: dict, scope: str = "global", max_labels: int = 5
                 labels.append(clean_inst)
             continue
         day = max(1, day)
+        raw_page = src.get("page")
+        page_num = int(raw_page) if raw_page is not None and int(raw_page) > 0 else None
         generic_title = f"День {day} — Текст"
         clean_title = title if (title and title != generic_title and title != f"День {day} - Текст") else ""
-        key = (role, day, clean_title)
+        key = (role, day, page_num, clean_title)
         if key not in seen:
             seen.add(key)
-            label = f"{role} (День {day}: {clean_title})" if clean_title else f"{role} (День {day})"
+            day_part = f"День {day}, сторінка {page_num}" if page_num else f"День {day}"
+            label = f"{role} ({day_part}: {clean_title})" if clean_title else f"{role} ({day_part})"
             labels.append(label)
 
     if len(labels) > max_labels:
@@ -997,8 +1067,48 @@ async def hybrid_search_chunks(
         _score_chunk(c, q_lower, concepts, active_q_emb)
         for c in scoped
     ]
+
+    # Для багатослівних запитів (не списків тем) визначаємо найбільш специфічні (рідкісні)
+    # концепти запиту, щоб загальні фонові слова (на кшталт «товару» без «переміщення») не засмічували вибірку.
+    generic_topic_stems = frozenset(
+        {"товар", "продукц", "магазин", "робот", "правил", "порядок", "процедур", "процес", "питан"}
+    )
+    primary_filter_active = False
+    if len(concepts) >= 2 and not analysis["is_topic_list"]:
+        concept_df: dict[str, int] = {c.key: 0 for c in concepts}
+        concept_by_key = {c.key: c for c in concepts}
+        for item in scored:
+            for ck in item["matched_concept_keys"]:
+                if ck in concept_df:
+                    concept_df[ck] += 1
+        positive_keys = [k for k, cnt in concept_df.items() if cnt > 0]
+        if len(positive_keys) >= 2:
+            specific_keys = [
+                k
+                for k in positive_keys
+                if concept_by_key[k].stem not in generic_topic_stems
+                and not any(concept_by_key[k].stem.startswith(g) for g in generic_topic_stems)
+            ]
+            basis_keys = specific_keys if specific_keys else positive_keys
+            min_df = min(concept_df[k] for k in basis_keys)
+            cutoff = max(min_df, math.floor(min_df * 1.25))
+            primary_keys = {k for k in basis_keys if concept_df[k] <= cutoff}
+            if primary_keys and len(primary_keys) < len(positive_keys):
+                has_primary_hit = any(
+                    bool(item["matched_concept_keys"] & primary_keys) for item in scored
+                )
+                if has_primary_hit:
+                    primary_filter_active = True
+                    for item in scored:
+                        hits_primary = bool(item["matched_concept_keys"] & primary_keys)
+                        item["matches_primary"] = hits_primary
+                        if not hits_primary:
+                            item["is_exact_match"] = False
+                            item["has_partial_exact"] = False
+
     scored.sort(
         key=lambda item: (
+            1 if item["matches_primary"] else 0,
             1 if item["is_exact_match"] else 0,
             item["final_score"],
             item["lexical_score"],
@@ -1048,6 +1158,8 @@ async def hybrid_search_chunks(
 
     # 1. Include top relevant full chunks (always consider #0; filter clear zero-signal tail).
     for idx, item in enumerate(scored[:TOP_FULL_CHUNKS]):
+        if primary_filter_active and not item["matches_primary"]:
+            continue
         if (
             idx == 0
             or item["is_exact_match"]
@@ -1058,13 +1170,19 @@ async def hybrid_search_chunks(
             _add_entry(item, item["chunk"]["chunk_text"])
 
     # 2. Guarantee coverage for ALL remaining chunks containing exact term matches.
-    exact_overflow = [item for item in scored[TOP_FULL_CHUNKS:] if item["is_exact_match"]]
+    exact_overflow = [
+        item
+        for item in scored[TOP_FULL_CHUNKS:]
+        if item["is_exact_match"] and (not primary_filter_active or item["matches_primary"])
+    ]
     # For multi-word queries or comma-separated topic lists, also bring partial exact hits within budget.
-    if len(concepts) > 2 or analysis["is_topic_list"]:
+    if len(concepts) > 2 or analysis["is_topic_list"] or primary_filter_active:
         exact_overflow.extend(
             item
             for item in scored[TOP_FULL_CHUNKS:]
-            if not item["is_exact_match"] and item["has_partial_exact"]
+            if not item["is_exact_match"]
+            and item["has_partial_exact"]
+            and (not primary_filter_active or item["matches_primary"])
         )
 
     for item in exact_overflow:

@@ -20,14 +20,17 @@ def _normalize_line_breaks(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", joined)
 
 
-def extract_clean_text(raw_content: Optional[str], content_type: str = "text") -> str:
-    """Extracts human-readable instructional text, stripping media JSON payloads."""
+def extract_clean_pages(
+    raw_content: Optional[str],
+    content_type: str = "text",
+) -> list[tuple[Optional[int], str]]:
+    """Extracts (page_number, clean_text) pairs for paginated JSON materials or plain text."""
     if not raw_content or (content_type or "text") in IGNORED_CONTENT_TYPES:
-        return ""
+        return []
 
     stripped = str(raw_content).strip()
     if not stripped:
-        return ""
+        return []
 
     if (stripped.startswith("[") and stripped.endswith("]")) or (
         stripped.startswith("{") and stripped.endswith("}")
@@ -37,21 +40,31 @@ def extract_clean_text(raw_content: Optional[str], content_type: str = "text") -
             if isinstance(parsed, dict):
                 parsed = [parsed]
             if isinstance(parsed, list):
-                parts: list[str] = []
-                for item in parsed:
+                pages: list[tuple[Optional[int], str]] = []
+                for page_idx, item in enumerate(parsed, 1):
+                    txt = ""
                     if isinstance(item, dict):
                         txt = str(item.get("text") or "").strip()
-                        if txt:
-                            parts.append(txt)
                     elif isinstance(item, str):
                         txt = item.strip()
-                        if txt:
-                            parts.append(txt)
-                return _normalize_line_breaks("\n\n".join(parts))
+                    if txt:
+                        norm_txt = _normalize_line_breaks(txt)
+                        if norm_txt:
+                            pages.append((page_idx, norm_txt))
+                return pages
         except json.JSONDecodeError:
             pass
 
-    return _normalize_line_breaks(stripped)
+    norm = _normalize_line_breaks(stripped)
+    return [(None, norm)] if norm else []
+
+
+def extract_clean_text(raw_content: Optional[str], content_type: str = "text") -> str:
+    """Extracts human-readable instructional text, stripping media JSON payloads."""
+    pages = extract_clean_pages(raw_content, content_type=content_type)
+    if not pages:
+        return ""
+    return _normalize_line_breaks("\n\n".join(page_text for _, page_text in pages))
 
 
 def _split_oversized_unit(unit: str, max_chars: int) -> list[str]:
@@ -172,48 +185,62 @@ def normalize_source_role(raw_role: Optional[str]) -> tuple[str, str]:
 
 
 def build_deduplicated_chunks(materials: list[dict]) -> list[dict]:
-    """Parses, chunks, and deduplicates material texts while tracking all (role, day) sources."""
+    """Parses, chunks per page, and deduplicates material texts while tracking all (role, day, page) sources."""
     by_hash: dict[str, dict] = {}
     seen_source_keys: dict[str, set[tuple]] = {}
 
     for record in materials or []:
         content_type = (record.get("content_type") or "text").strip()
         is_instruction = content_type == "instruction" or bool(record.get("is_instruction"))
-        clean_text = extract_clean_text(record.get("content"), content_type=content_type)
-        if len(clean_text) < MIN_CLEAN_TEXT_LENGTH:
+        pages = extract_clean_pages(record.get("content"), content_type=content_type)
+        if not pages:
             continue
 
         title_str = (record.get("title") or "").strip()
-        if is_instruction:
-            if title_str and not clean_text.lower().startswith(title_str.lower()):
-                clean_text = f"{title_str}\n\n{clean_text}"
-            scope_role = "ALL"
-            display_role = title_str or "Інструкція"
-            day_val = 0
-        else:
-            scope_role, display_role = normalize_source_role(record.get("role"))
-            day_val = int(record.get("day") or 1)
+        for page_num, page_text in pages:
+            if len(page_text) < MIN_CLEAN_TEXT_LENGTH:
+                continue
 
-        source_entry = {
-            "material_id": record.get("id"),
-            "role": scope_role,
-            "display_role": display_role,
-            "day": day_val,
-            "title": title_str,
-        }
-        source_key = (source_entry["material_id"], scope_role, source_entry["day"], source_entry["title"])
+            chunk_input = page_text
+            effective_page: Optional[int] = page_num
+            if is_instruction:
+                if title_str and not chunk_input.lower().startswith(title_str.lower()):
+                    chunk_input = f"{title_str}\n\n{chunk_input}"
+                scope_role = "ALL"
+                display_role = title_str or "Інструкція"
+                day_val = 0
+                effective_page = None
+            else:
+                scope_role, display_role = normalize_source_role(record.get("role"))
+                day_val = int(record.get("day") or 1)
 
-        for chunk_text in split_into_chunks(clean_text):
-            chunk_hash = compute_chunk_hash(chunk_text)
-            if chunk_hash not in by_hash:
-                by_hash[chunk_hash] = {
-                    "chunk_hash": chunk_hash,
-                    "chunk_text": chunk_text,
-                    "sources": [source_entry],
-                }
-                seen_source_keys[chunk_hash] = {source_key}
-            elif source_key not in seen_source_keys[chunk_hash]:
-                by_hash[chunk_hash]["sources"].append(source_entry)
-                seen_source_keys[chunk_hash].add(source_key)
+            source_entry = {
+                "material_id": record.get("id"),
+                "role": scope_role,
+                "display_role": display_role,
+                "day": day_val,
+                "page": effective_page,
+                "title": title_str,
+            }
+            source_key = (
+                source_entry["material_id"],
+                scope_role,
+                source_entry["day"],
+                effective_page,
+                source_entry["title"],
+            )
+
+            for chunk_text in split_into_chunks(chunk_input):
+                chunk_hash = compute_chunk_hash(chunk_text)
+                if chunk_hash not in by_hash:
+                    by_hash[chunk_hash] = {
+                        "chunk_hash": chunk_hash,
+                        "chunk_text": chunk_text,
+                        "sources": [source_entry],
+                    }
+                    seen_source_keys[chunk_hash] = {source_key}
+                elif source_key not in seen_source_keys[chunk_hash]:
+                    by_hash[chunk_hash]["sources"].append(source_entry)
+                    seen_source_keys[chunk_hash].add(source_key)
 
     return list(by_hash.values())

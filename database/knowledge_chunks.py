@@ -60,7 +60,7 @@ async def get_materials_fingerprint(db_path: str = DB_PATH) -> str:
     except aiosqlite.OperationalError:
         return ""
 
-    h = hashlib.sha256()
+    h = hashlib.sha256(b"v2_pages\n")
     for row in rows:
         h.update("|".join(str(col) for col in row).encode("utf-8"))
         h.update(b"\n")

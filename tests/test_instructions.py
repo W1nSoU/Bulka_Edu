@@ -43,7 +43,7 @@ from bot.services.instructions_docx import (
     generate_instruction_template_docx,
 )
 from bot.services.openai_ai import _extract_used_instruction_ids, answer_remind_topic
-from bot.services.semantic_search import hybrid_search_chunks, reset_semantic_search_index
+from bot.services.semantic_search import analyze_query_concepts, hybrid_search_chunks, reset_semantic_search_index
 from database.instructions import (
     create_instruction,
     delete_instruction,
@@ -795,6 +795,134 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
             sys_prompt = captured[0][0]["content"]
             self.assertIn("Фрагмент 1 [Інструкція: Інструкція з переміщення товару]:", sys_prompt)
             self.assertIn("НЕ пиши [Джерело N]", sys_prompt)
+
+    async def test_meta_question_lists_all_matching_role_pages_and_excludes_topic_noise(self):
+        import json as _json
+
+        query = "В яких посадах і в яких днях є переміщення товару"
+        analysis = analyze_query_concepts(query)
+        concept_keys = {c.key for c in analysis["concepts"]}
+        self.assertEqual(concept_keys, {"tok:переміщення", "tok:товару"})
+
+        with patch("database.materials.DB_PATH", self.db_path):
+            await init_materials_db()
+            # Реальні сторінки, що описують переміщення в різних словоформах
+            await add_or_update_material(
+                role="Продавець-приймальник",
+                day=1,
+                content_type="text",
+                title="День 1 — Текст",
+                content=_json.dumps(
+                    [
+                        {"text": "Сторінка 1: вступ у посаду приймальника."},
+                        {"text": "Сторінка 2: графік зміни."},
+                        {"text": "Сторінка 3: робота зі складом."},
+                        {"text": "Сторінка 4: є зовнішнє та внутрішнє переміщення між ТТ та СНТ."},
+                    ],
+                    ensure_ascii=False,
+                ),
+                resource_url=None,
+            )
+            await add_or_update_material(
+                role="Старший продавець",
+                day=1,
+                content_type="text",
+                title="День 1 — Текст",
+                content=_json.dumps(
+                    [
+                        {"text": "Сторінка 1: правила відкриття магазину."},
+                        {"text": "Сторінка 2: касова дисципліна."},
+                        {"text": "Сторінка 3: робота з покупцями."},
+                        {"text": "Сторінка 4: нова партія товару переміщується на склад за принципом FIFO."},
+                    ],
+                    ensure_ascii=False,
+                ),
+                resource_url=None,
+            )
+            await add_or_update_material(
+                role="Старший продавець",
+                day=2,
+                content_type="text",
+                title="День 2 — Текст",
+                content=_json.dumps(
+                    [
+                        {"text": "Сторінка 1: ранковий чек-лист."},
+                        {"text": "Сторінка 2: робота з персоналом."},
+                        {"text": "Сторінка 3: контроль цінників."},
+                        {"text": "Сторінка 4: при прийманні товару переміщенням з іншого підрозділу складається акт."},
+                    ],
+                    ensure_ascii=False,
+                ),
+                resource_url=None,
+            )
+            await add_or_update_material(
+                role="Продавець відділу гастрономії",
+                day=2,
+                content_type="text",
+                title="День 2 — Текст",
+                content=_json.dumps(
+                    [
+                        {"text": "Сторінка 1: санітарні норми гастрономії."},
+                        {"text": "Сторінка 2: принцип FIFO дотримується при зберіганні та переміщенні на реалізацію продукції."},
+                    ],
+                    ensure_ascii=False,
+                ),
+                resource_url=None,
+            )
+            # Нерелевантні матеріали, що містять ЛИШЕ загальне слово «товар» або мета-слова («посада», «день»)
+            await add_or_update_material(
+                role="Продавець-консультант (каса)",
+                day=1,
+                content_type="text",
+                title="День 1 — Текст",
+                content=_json.dumps(
+                    [{"text": "Посада касира в перший день: викладка товару біля каси та сканування товару на касі."}],
+                    ensure_ascii=False,
+                ),
+                resource_url=None,
+            )
+            await add_or_update_material(
+                role="Керівник ТТ",
+                day=2,
+                content_type="text",
+                title="День 2 — Текст",
+                content=_json.dumps(
+                    [{"text": "Викладка та повернення протермінованого товару на полиці в торговій залі."}],
+                    ensure_ascii=False,
+                ),
+                resource_url=None,
+            )
+
+        await create_instruction(
+            title="Інструкція з переміщення товару",
+            content="Переміщення товару оформлюється в ТЗД та вивантажується в 1С.",
+            created_by=1,
+            db_path=self.db_path,
+        )
+
+        with (
+            patch("bot.services.openai_ai.is_openai_configured", return_value=False),
+            patch("bot.services.openai_ai.get_client", return_value=None),
+        ):
+            res = await hybrid_search_chunks(
+                query=query,
+                role_filter=None,
+                scope="global",
+                db_path=self.db_path,
+                client=None,
+            )
+
+        labels = [r["sources_label"] for r in res["results"]]
+        joined_labels = "\n".join(labels)
+
+        self.assertIn("Інструкція: Інструкція з переміщення товару", joined_labels)
+        self.assertIn("Продавець-приймальник (День 1, сторінка 4)", joined_labels)
+        self.assertIn("Старший продавець (День 1, сторінка 4)", joined_labels)
+        self.assertIn("Старший продавець (День 2, сторінка 4)", joined_labels)
+        self.assertIn("Продавець відділу гастрономії (День 2, сторінка 2)", joined_labels)
+        # Матеріали без «переміщення» (тільки «товар»/«посада») не повинні потрапляти у вибірку!
+        self.assertNotIn("Продавець-консультант (каса)", joined_labels)
+        self.assertNotIn("Керівник ТТ", joined_labels)
 
 
 if __name__ == "__main__":
