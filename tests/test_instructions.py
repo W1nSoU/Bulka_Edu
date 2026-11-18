@@ -395,6 +395,50 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Інструкція: Аварійне відключення світла", ans["text"])
             self.assertIn("генератор запускається протягом 3 хвилин", ans["text"])
 
+        # Перевіряємо логування instruction_chunks/instruction_sources та інструкції цитування у GPT-промпті
+        captured_messages = []
+
+        async def _fake_create(**kwargs):
+            captured_messages.append(kwargs["messages"])
+            msg_obj = MagicMock()
+            msg_obj.content = "Діяти згідно з [Інструкція: Аварійне відключення світла]."
+            choice = MagicMock()
+            choice.message = msg_obj
+            resp = MagicMock()
+            resp.choices = [choice]
+            resp.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+            return resp
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create = AsyncMock(side_effect=_fake_create)
+        fake_client.embeddings.create = AsyncMock(return_value=MagicMock(data=[]))
+
+        with (
+            patch("bot.services.openai_ai.is_openai_configured", return_value=True),
+            patch("bot.services.openai_ai.logger") as mock_ai_logger,
+        ):
+            gpt_ans = await answer_remind_topic(
+                question="Що робити при відключенні світла та генератор?",
+                role_filter=None,
+                user_id=1001,
+                db_path=self.db_path,
+                client=fake_client,
+            )
+            self.assertEqual(gpt_ans["status"], "ok")
+            self.assertIn("Інструкція: Аварійне відключення світла", gpt_ans["text"])
+            self.assertTrue(captured_messages)
+            sys_prompt = captured_messages[0][0]["content"]
+            self.assertIn("[Інструкція: Назва теми]", sys_prompt)
+            logged_lines = [call.args[0] for call in mock_ai_logger.info.call_args_list if call.args]
+            self.assertTrue(
+                any(
+                    "instruction_chunks=1" in line
+                    and "Інструкція: Аварійне відключення світла" in line
+                    for line in logged_lines
+                ),
+                f"Expected instruction telemetry in GPT logs, got: {logged_lines}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

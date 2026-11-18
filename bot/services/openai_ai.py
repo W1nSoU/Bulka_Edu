@@ -239,10 +239,36 @@ async def _synthesize_answer_from_chunks(
         return (NO_ANSWER_MARKER, True) if allow_no_answer else (None, False)
 
     citation_rule = (
-        "Обов'язково вказуй джерело у форматі [Посада, День X] для кожного факту або блоку."
+        "Обов'язково вказуй джерело для кожного факту або блоку: "
+        "для навчальних матеріалів у форматі [Посада, День X], "
+        "а для корпоративних інструкцій у форматі [Інструкція: Назва теми]."
         if is_network_wide
-        else "Обов'язково вказуй, до якого дня відноситься інформація (наприклад: [День X])."
+        else "Обов'язково вказуй джерело для кожного факту або блоку: "
+        "до якого дня відноситься навчальний матеріал (наприклад: [День X]) "
+        "або назву корпоративної інструкції (наприклад: [Інструкція: Назва теми])."
     )
+
+    instruction_chunks = 0
+    instruction_sources: list[str] = []
+    for item in results:
+        srcs = item.get("sources") or []
+        inst_labels = [
+            (s.get("title") or s.get("display_role") or "").strip()
+            for s in srcs
+            if int(s.get("day") or 0) == 0
+            and (
+                str(s.get("title") or "").startswith("Інструкція:")
+                or str(s.get("display_role") or "").startswith("Інструкція:")
+            )
+        ]
+        lbl = (item.get("sources_label") or "").strip()
+        if not inst_labels and "Інструкція:" in lbl:
+            inst_labels = [lbl]
+        if inst_labels:
+            instruction_chunks += 1
+            for cand in inst_labels:
+                if cand and cand not in instruction_sources:
+                    instruction_sources.append(cand)
 
     no_answer_rule = (
         f"• Тільки якщо надані фрагменти тематично зовсім не стосуються запиту й не містять жодної "
@@ -280,7 +306,8 @@ async def _synthesize_answer_from_chunks(
 
     logger.info(
         f"GPT tutor call: user={user_id}, scope='{role_label}', "
-        f"chunks={len(results)}, context_len={len(context)}, "
+        f"chunks={len(results)}, instruction_chunks={instruction_chunks}, "
+        f"instruction_sources={instruction_sources}, context_len={len(context)}, "
         f"question='{question[:80]}...'"
     )
 
