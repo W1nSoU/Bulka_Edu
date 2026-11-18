@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -11,20 +12,26 @@ import docx
 from aiogram import Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from bot.handlers import register_handlers
+from bot.handlers import process_keyword_search, register_handlers
 from bot.menus.developer import _admin_study_keyboard
 from bot.menus.instructions import (
     InstructionStates,
     dev_inst_add_start_handler,
+    dev_inst_back_to_step2_handler,
     dev_inst_delete_do_handler,
     dev_inst_download_template_handler,
     dev_inst_edit_file_start_handler,
+    dev_inst_edit_orig_start_handler,
     dev_inst_edit_title_start_handler,
     dev_inst_process_edit_file,
+    dev_inst_process_edit_orig_file,
     dev_inst_process_edit_title,
     dev_inst_process_new_file,
+    dev_inst_process_new_original_file,
     dev_inst_process_new_title,
+    dev_inst_replace_menu_handler,
     dev_inst_save_empty_handler,
+    dev_inst_skip_original_handler,
     dev_inst_view_handler,
     dev_instructions_menu_handler,
     dev_instructions_page_handler,
@@ -35,7 +42,7 @@ from bot.services.instructions_docx import (
     extract_text_from_docx_bytes,
     generate_instruction_template_docx,
 )
-from bot.services.openai_ai import answer_remind_topic
+from bot.services.openai_ai import _extract_used_instruction_ids, answer_remind_topic
 from bot.services.semantic_search import hybrid_search_chunks, reset_semantic_search_index
 from database.instructions import (
     create_instruction,
@@ -43,8 +50,10 @@ from database.instructions import (
     get_all_instructions,
     get_instruction_by_id,
     get_instructions_paginated,
+    get_instructions_with_original_by_ids,
     init_instructions_db,
     update_instruction_file,
+    update_instruction_original_file,
     update_instruction_title,
 )
 from database.knowledge_chunks import get_materials_fingerprint
@@ -156,6 +165,78 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await get_instruction_by_id(first_id, db_path=self.db_path))
         self.assertFalse(os.path.exists(new_path))
 
+    async def test_db_original_migration_and_crud(self):
+        legacy_db = os.path.join(self.tmpdir.name, "legacy.db")
+        conn = sqlite3.connect(legacy_db)
+        conn.execute(
+            """
+            CREATE TABLE instructions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                content TEXT DEFAULT '',
+                file_path TEXT DEFAULT NULL,
+                telegram_file_id TEXT DEFAULT NULL,
+                file_name TEXT DEFAULT NULL,
+                created_by INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute("INSERT INTO instructions (title, content) VALUES ('Стара інструкція', 'Текст')")
+        conn.commit()
+        conn.close()
+
+        await init_instructions_db(db_path=legacy_db)
+        conn = sqlite3.connect(legacy_db)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(instructions)").fetchall()}
+        conn.close()
+        self.assertIn("original_file_path", cols)
+        self.assertIn("original_telegram_file_id", cols)
+        self.assertIn("original_file_name", cols)
+
+        ai_path = os.path.join(self.files_dir, "ai_1.docx")
+        orig_old = os.path.join(self.files_dir, "orig_old.pdf")
+        orig_new = os.path.join(self.files_dir, "orig_new.pdf")
+        for p in (ai_path, orig_old, orig_new):
+            with open(p, "wb") as f:
+                f.write(b"data")
+
+        id_with_orig = await create_instruction(
+            title="З оригіналом",
+            content="Текст для ШІ",
+            file_path=ai_path,
+            telegram_file_id="tg_ai_1",
+            file_name="ai_1.docx",
+            original_file_path=orig_old,
+            original_telegram_file_id="tg_orig_old",
+            original_file_name="orig_old.pdf",
+            db_path=legacy_db,
+        )
+        id_without_orig = await create_instruction(
+            title="Без оригіналу",
+            content="Лише текст",
+            db_path=legacy_db,
+        )
+
+        ok_orig = await update_instruction_original_file(
+            id_with_orig, orig_new, "tg_orig_new", "orig_new.pdf", db_path=legacy_db
+        )
+        self.assertTrue(ok_orig)
+        self.assertFalse(os.path.exists(orig_old))
+        self.assertTrue(os.path.exists(orig_new))
+
+        matched = await get_instructions_with_original_by_ids(
+            [id_without_orig, id_with_orig, id_with_orig, 99999],
+            db_path=legacy_db,
+        )
+        self.assertEqual([m["id"] for m in matched], [id_with_orig])
+        self.assertEqual(matched[0]["original_file_name"], "orig_new.pdf")
+
+        await delete_instruction(id_with_orig, db_path=legacy_db)
+        self.assertFalse(os.path.exists(ai_path))
+        self.assertFalse(os.path.exists(orig_new))
+
     def test_admin_only_visibility_in_study_keyboard(self):
         admin_kb = _admin_study_keyboard(is_observer=False, is_territorial=False)
         admin_cbs = [btn.callback_data for row in admin_kb.inline_keyboard for btn in row]
@@ -177,7 +258,18 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
             patch("bot.menus.instructions._check_instructions_admin", AsyncMock(return_value=True)),
             patch("bot.menus.instructions._schedule_ai_reindex") as mock_reindex,
         ):
-            # 1. Start creation
+            state_data = {}
+
+            async def _update_data(**kwargs):
+                state_data.update(kwargs)
+
+            async def _get_data():
+                return dict(state_data)
+
+            async def _clear():
+                state_data.clear()
+
+            # 1. Start creation (Step 1/3)
             cb = AsyncMock()
             cb.from_user = MagicMock(id=777)
             cb.message = AsyncMock()
@@ -186,11 +278,14 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
             cb.message.document = None
             cb.answer = AsyncMock()
             state = AsyncMock()
+            state.update_data.side_effect = _update_data
+            state.get_data.side_effect = _get_data
+            state.clear.side_effect = _clear
 
             await dev_inst_add_start_handler(cb, state)
             state.set_state.assert_awaited_with(InstructionStates.waiting_new_title)
 
-            # 2. Enter topic title
+            # 2. Enter topic title -> Step 2/3 (waiting_new_file)
             msg_title = AsyncMock()
             msg_title.from_user = MagicMock(id=777)
             msg_title.text = "Правила закриття зміни"
@@ -203,28 +298,40 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
             self.assertIn("dev_inst_save_empty", cbs)
 
             # 3. Download template stays in waiting_new_file
-            state.get_data.return_value = {"new_inst_title": "Правила закриття зміни"}
             await dev_inst_download_template_handler(cb, state)
             cb.message.answer_document.assert_awaited()
 
-            # 4. Save empty instruction
+            # 4. Skip AI file -> Step 3/3 (waiting_new_original_file), then skip original -> empty instruction
             await dev_inst_save_empty_handler(cb, state)
+            state.set_state.assert_awaited_with(InstructionStates.waiting_new_original_file)
+            await dev_inst_skip_original_handler(cb, state)
+
             all_insts = await get_all_instructions(db_path=self.db_path)
             self.assertEqual(len(all_insts), 1)
             empty_id = all_insts[0]["id"]
             self.assertEqual(all_insts[0]["content"], "")
+            self.assertIsNone(all_insts[0]["original_file_path"])
 
-            # 5. View instruction card
+            # 5. View instruction card -> button "🔄 Замінити файл" opens replace submenu
             cb.data = f"dev_inst_view:{empty_id}:1"
             cb.message.answer.reset_mock()
             await dev_inst_view_handler(cb, state)
             cb.message.answer.assert_awaited()
             card_kb = cb.message.answer.call_args.kwargs["reply_markup"]
             card_btns = [b.callback_data for row in card_kb.inline_keyboard for b in row]
-            self.assertIn(f"dev_inst_edit_file:{empty_id}:1", card_btns)
+            self.assertIn(f"dev_inst_replace_menu:{empty_id}:1", card_btns)
             self.assertIn(f"dev_inst_edit_title:{empty_id}:1", card_btns)
 
-            # 6. Click "Змінити файл" sends template (+ current if exists) and waits for file
+            cb.data = f"dev_inst_replace_menu:{empty_id}:1"
+            cb.message.answer.reset_mock()
+            cb.message.edit_text.reset_mock()
+            await dev_inst_replace_menu_handler(cb, state)
+            rep_kb = cb.message.edit_text.call_args.kwargs["reply_markup"]
+            rep_btns = [b.callback_data for row in rep_kb.inline_keyboard for b in row]
+            self.assertIn(f"dev_inst_edit_file:{empty_id}:1", rep_btns)
+            self.assertIn(f"dev_inst_edit_orig:{empty_id}:1", rep_btns)
+
+            # 6. Click "Замінити інструкцію" sends template (+ current if exists) and waits for .docx
             cb.data = f"dev_inst_edit_file:{empty_id}:1"
             cb.message.answer_document.reset_mock()
             cb.message.answer.reset_mock()
@@ -233,7 +340,6 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
             cb.message.answer_document.assert_awaited()  # template sent
 
             # Reject plain text during waiting_edit_file
-            state.get_data.return_value = {"edit_inst_id": empty_id, "edit_inst_page": 1}
             msg_bad = AsyncMock()
             msg_bad.from_user = MagicMock(id=777)
             msg_bad.text = "Це просто текст, не файл"
@@ -267,6 +373,39 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(os.path.exists(updated["file_path"]))
             mock_reindex.assert_called()
 
+            # 6b. Replace original file ("Замінити оригінал інструкції") with .pdf
+            cb.data = f"dev_inst_edit_orig:{empty_id}:1"
+            cb.message.answer.reset_mock()
+            cb.message.answer_document.reset_mock()
+            await dev_inst_edit_orig_start_handler(cb, state)
+            state.set_state.assert_awaited_with(InstructionStates.waiting_edit_original_file)
+
+            pdf_payload = b"%PDF-1.4 fake full original document"
+
+            async def _fake_pdf_dl(file_path, destination):
+                destination.write(pdf_payload)
+
+            msg_orig = AsyncMock()
+            msg_orig.from_user = MagicMock(id=777)
+            msg_orig.text = None
+            msg_orig.document = MagicMock(file_id="tg_pdf_456", file_name="zvit_original.pdf", file_size=len(pdf_payload))
+            msg_orig.bot = MagicMock()
+            msg_orig.bot.get_file = AsyncMock(return_value=MagicMock(file_path="docs/zvit_original.pdf"))
+            msg_orig.bot.download_file = AsyncMock(side_effect=_fake_pdf_dl)
+            msg_orig.answer = AsyncMock()
+            msg_orig.answer_document = AsyncMock()
+
+            await dev_inst_process_edit_orig_file(msg_orig, state)
+            with_orig = await get_instruction_by_id(empty_id, db_path=self.db_path)
+            self.assertEqual(with_orig["original_telegram_file_id"], "tg_pdf_456")
+            self.assertEqual(with_orig["original_file_name"], "zvit_original.pdf")
+            self.assertTrue(os.path.exists(with_orig["original_file_path"]))
+            # Card sent 2 files sequentially (1: AI docx, 2: PDF original with card keyboard)
+            self.assertEqual(msg_orig.answer_document.await_count, 2)
+            second_kb = msg_orig.answer_document.call_args_list[1].kwargs["reply_markup"]
+            second_btns = [b.callback_data for row in second_kb.inline_keyboard for b in row]
+            self.assertIn(f"dev_inst_replace_menu:{empty_id}:1", second_btns)
+
             # 7. Rename instruction
             cb.data = f"dev_inst_edit_title:{empty_id}:1"
             await dev_inst_edit_title_start_handler(cb, state)
@@ -281,13 +420,18 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
             renamed = await get_instruction_by_id(empty_id, db_path=self.db_path)
             self.assertEqual(renamed["title"], "Регламент Z-звіту")
 
-            # 8. Delete instruction
+            # 8. Delete instruction removes DB row and both files on disk
+            old_ai_path = renamed["file_path"]
+            old_orig_path = renamed["original_file_path"]
             cb.data = f"dev_inst_del_do:{empty_id}:1"
             await dev_inst_delete_do_handler(cb, state)
             self.assertIsNone(await get_instruction_by_id(empty_id, db_path=self.db_path))
+            self.assertFalse(os.path.exists(old_ai_path))
+            self.assertFalse(os.path.exists(old_orig_path))
 
-            # 9. Create instruction directly with .docx file (Step 2)
-            state.get_data.return_value = {"new_inst_title": "Пряме завантаження"}
+            # 9. Full 3-step creation: Step 1 Title -> Step 2 .docx -> Step 3 original .pdf (and test Back->Step2 cleanup)
+            state_data.clear()
+            state_data["new_inst_title"] = "Пряме завантаження"
             doc2_bytes = _make_docx_bytes(["Інструкція з санітарної обробки обладнання."])
 
             async def _fake_dl2(file_path, destination):
@@ -304,9 +448,35 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
             msg_new_doc.answer_document = AsyncMock()
 
             await dev_inst_process_new_file(msg_new_doc, state)
+            state.set_state.assert_awaited_with(InstructionStates.waiting_new_original_file)
+            self.assertEqual(len(await get_all_instructions(db_path=self.db_path)), 0)
+            temp_ai_path = state_data["new_inst_file_path"]
+            self.assertTrue(os.path.exists(temp_ai_path))
+
+            # Test back from Step 3 to Step 2 cleans temp file and keeps title
+            await dev_inst_back_to_step2_handler(cb, state)
+            state.set_state.assert_awaited_with(InstructionStates.waiting_new_file)
+            self.assertFalse(os.path.exists(temp_ai_path))
+
+            # Re-upload AI .docx on Step 2, then upload PDF original on Step 3
+            await dev_inst_process_new_file(msg_new_doc, state)
+            msg_new_orig = AsyncMock()
+            msg_new_orig.from_user = MagicMock(id=777)
+            msg_new_orig.text = None
+            msg_new_orig.document = MagicMock(file_id="tg_orig_new_1", file_name="sanitary_orig.pdf", file_size=len(pdf_payload))
+            msg_new_orig.bot = MagicMock()
+            msg_new_orig.bot.get_file = AsyncMock(return_value=MagicMock(file_path="docs/sanitary_orig.pdf"))
+            msg_new_orig.bot.download_file = AsyncMock(side_effect=_fake_pdf_dl)
+            msg_new_orig.answer = AsyncMock()
+            msg_new_orig.answer_document = AsyncMock()
+
+            await dev_inst_process_new_original_file(msg_new_orig, state)
             created_list = await get_all_instructions(db_path=self.db_path)
             self.assertEqual(len(created_list), 1)
             self.assertIn("санітарної обробки", created_list[0]["content"])
+            self.assertEqual(created_list[0]["original_file_name"], "sanitary_orig.pdf")
+            self.assertTrue(os.path.exists(created_list[0]["original_file_path"]))
+            self.assertEqual(msg_new_orig.answer_document.await_count, 2)
 
             # 10. Pagination UI test across 2 pages (add 9 more -> total 10)
             for idx in range(2, 11):
@@ -358,9 +528,16 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
             )
 
         fp_before = await get_materials_fingerprint(self.db_path)
-        await create_instruction(
+        orig_pdf_path = os.path.join(self.files_dir, "blackout_original.pdf")
+        with open(orig_pdf_path, "wb") as f:
+            f.write(b"%PDF-1.4 blackout full")
+
+        inst_id = await create_instruction(
             title="Аварійне відключення світла",
             content="При зникненні електроенергії генератор запускається протягом 3 хвилин, а тісто з печі перекладається у розстійку.",
+            original_file_path=orig_pdf_path,
+            original_telegram_file_id="tg_orig_blackout",
+            original_file_name="Аварійне_відключення.pdf",
             created_by=1,
             db_path=self.db_path,
         )
@@ -394,6 +571,7 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(ans["used_network_fallback"])
             self.assertIn("Інструкція: Аварійне відключення світла", ans["text"])
             self.assertIn("генератор запускається протягом 3 хвилин", ans["text"])
+            self.assertEqual(ans["used_instruction_ids"], [inst_id])
 
         # Перевіряємо логування instruction_chunks/instruction_sources та інструкції цитування у GPT-промпті
         captured_messages = []
@@ -425,6 +603,7 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
                 client=fake_client,
             )
             self.assertEqual(gpt_ans["status"], "ok")
+            self.assertEqual(gpt_ans["used_instruction_ids"], [inst_id])
             self.assertIn("Інструкція: Аварійне відключення світла", gpt_ans["text"])
             self.assertTrue(captured_messages)
             sys_prompt = captured_messages[0][0]["content"]
@@ -438,6 +617,99 @@ class TestInstructionsFeature(unittest.IsolatedAsyncioTestCase):
                 ),
                 f"Expected instruction telemetry in GPT logs, got: {logged_lines}",
             )
+
+    def test_extract_used_instruction_ids_rules(self):
+        fake_results = [
+            {
+                "sources": [
+                    {"material_id": -10, "day": 0, "title": "Інструкція: Касова дисципліна"},
+                ]
+            },
+            {
+                "sources": [
+                    {"material_id": -20, "day": 0, "title": "Інструкція: Списання товару"},
+                    {"material_id": 5, "day": 2, "title": "День 2"},
+                ]
+            },
+        ]
+        # 1. Explicit citation selects only cited instruction
+        self.assertEqual(
+            _extract_used_instruction_ids(fake_results, "Використовуйте правила [Інструкція: Списання товару]."),
+            [20],
+        )
+        # 2. No explicit citation -> falls back to top-1 if top-1 is instruction
+        self.assertEqual(
+            _extract_used_instruction_ids(fake_results, "Потрібно перевіряти чек."),
+            [10],
+        )
+        # 3. No explicit citation and top-1 is regular material -> []
+        mat_first_results = [fake_results[1], fake_results[0]]
+        mat_first_only = [{"sources": [{"material_id": 5, "day": 2, "title": "День 2"}]}, fake_results[0]]
+        self.assertEqual(_extract_used_instruction_ids(mat_first_only, "Без згадки"), [])
+        self.assertEqual(len(_extract_used_instruction_ids(mat_first_results, "Текст без цитати")), 1)
+
+    async def test_remind_topic_sends_original_document_for_used_instructions(self):
+        orig_pdf_path = os.path.join(self.files_dir, "transfer_full.pdf")
+        with open(orig_pdf_path, "wb") as f:
+            f.write(b"%PDF-1.4 transfer instructions")
+
+        inst_id = await create_instruction(
+            title="Переміщення товару",
+            content="Переміщення оформлюється через ТЗД.",
+            original_file_path=orig_pdf_path,
+            original_telegram_file_id="tg_orig_transfer",
+            original_file_name="Переміщення_товару.pdf",
+            created_by=1,
+            db_path=self.db_path,
+        )
+
+        thinking_msg = AsyncMock()
+        thinking_msg.delete = AsyncMock()
+        final_text_msg = AsyncMock()
+
+        msg = AsyncMock()
+        msg.from_user = MagicMock(id=777)
+        msg.text = "Як оформити переміщення?"
+        msg.answer = AsyncMock(side_effect=[thinking_msg, final_text_msg])
+        msg.answer_document = AsyncMock()
+
+        state = AsyncMock()
+        state.get_data = AsyncMock(return_value={"mode": "dev_test", "role": None})
+        state.clear = AsyncMock()
+
+        with (
+            patch("database.instructions.DB_PATH", self.db_path),
+            patch("bot.handlers.is_developer_user", AsyncMock(return_value=True)),
+            patch(
+                "bot.handlers.answer_remind_topic",
+                AsyncMock(
+                    return_value={
+                        "status": "ok",
+                        "text": "Оформлюйте переміщення через ТЗД [Інструкція: Переміщення товару].",
+                        "used_network_fallback": False,
+                        "used_gpt": True,
+                        "matches": [],
+                        "used_instruction_ids": [inst_id],
+                    }
+                ),
+            ),
+        ):
+            await process_keyword_search(msg, state)
+
+        # Text answer sent without keyboard, original document sent with keyboard attached
+        self.assertEqual(msg.answer.await_count, 2)
+        text_call_kwargs = msg.answer.call_args_list[1].kwargs
+        self.assertIsNone(text_call_kwargs.get("reply_markup"))
+        self.assertIn("Оформлюйте переміщення", msg.answer.call_args_list[1].args[0])
+
+        msg.answer_document.assert_awaited_once()
+        doc_kwargs = msg.answer_document.call_args.kwargs
+        self.assertIn("Оригінал інструкції", doc_kwargs["caption"])
+        self.assertIn("Переміщення товару", doc_kwargs["caption"])
+        self.assertIsNotNone(doc_kwargs.get("reply_markup"))
+        cbs = [b.callback_data for row in doc_kwargs["reply_markup"].inline_keyboard for b in row]
+        self.assertIn("remind_topic_global", cbs)
+        self.assertIn("main_menu", cbs)
 
 
 if __name__ == "__main__":

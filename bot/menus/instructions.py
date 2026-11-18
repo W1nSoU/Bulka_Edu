@@ -5,6 +5,7 @@ import html
 import io
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional, Union
 
@@ -34,6 +35,7 @@ from database.instructions import (
     get_instruction_by_id,
     get_instructions_paginated,
     update_instruction_file,
+    update_instruction_original_file,
     update_instruction_title,
 )
 from database.managers import is_observer_user, is_territorial_user
@@ -48,7 +50,9 @@ TEMPLATE_FILENAME = "Шаблон_інструкції_BULKA.docx"
 class InstructionStates(StatesGroup):
     waiting_new_title = State()
     waiting_new_file = State()
+    waiting_new_original_file = State()
     waiting_edit_file = State()
+    waiting_edit_original_file = State()
     waiting_edit_title = State()
 
 
@@ -65,12 +69,27 @@ async def _check_instructions_admin(event: Union[CallbackQuery, Message]) -> boo
 async def _handle_start_escape(message: Message, state: FSMContext) -> bool:
     """Дозволяє вийти зі стану FSM командою /start."""
     if message.text and message.text.strip().startswith("/start"):
+        await _cleanup_temp_ai_file(state)
         await state.clear()
         from bot.handlers import command_start_handler
 
         await command_start_handler(message, state)
         return True
     return False
+
+
+async def _cleanup_temp_ai_file(state: FSMContext) -> None:
+    """Видаляє тимчасово збережений локальний .docx зі стану створення, якщо процес не завершено."""
+    try:
+        data = await state.get_data()
+    except Exception:
+        return
+    temp_path = data.get("new_inst_file_path")
+    if temp_path and os.path.exists(temp_path):
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
 
 
 async def _safe_edit_or_send(
@@ -113,7 +132,7 @@ def _schedule_ai_reindex() -> None:
 def _instruction_card_keyboard(inst_id: int, page: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Змінити файл", callback_data=f"dev_inst_edit_file:{inst_id}:{page}")],
+            [InlineKeyboardButton(text="🔄 Замінити файл", callback_data=f"dev_inst_replace_menu:{inst_id}:{page}")],
             [InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"dev_inst_edit_title:{inst_id}:{page}")],
             [InlineKeyboardButton(text="🗑 Видалити", callback_data=f"dev_inst_del_ask:{inst_id}:{page}")],
             [InlineKeyboardButton(text="🔙 Назад", callback_data=f"dev_inst_page:{page}")],
@@ -121,16 +140,39 @@ def _instruction_card_keyboard(inst_id: int, page: int) -> InlineKeyboardMarkup:
     )
 
 
-async def _send_instruction_document(
+def _step2_ai_file_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📥 Викачати шаблон", callback_data="dev_inst_dl_template")],
+            [InlineKeyboardButton(text="⏭ Залишити пусту", callback_data="dev_inst_save_empty")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_inst_add")],
+        ]
+    )
+
+
+def _step3_original_file_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⏭ Залишити без оригіналу", callback_data="dev_inst_skip_orig")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_inst_back_step2")],
+        ]
+    )
+
+
+async def _send_document_from_record(
     target_msg: Message,
     inst: Dict[str, Any],
+    *,
+    prefix: str = "",
     caption: Optional[str] = None,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
 ) -> bool:
-    """Надсилає файл інструкції (з диска або за file_id у Telegram). Повертає True, якщо файл надіслано."""
-    f_path = inst.get("file_path")
-    tg_file_id = inst.get("telegram_file_id")
-    f_name = inst.get("file_name") or sanitize_instruction_filename(inst.get("title"), inst.get("id"))
+    """Надсилає файл інструкції (prefix='') або оригіналу (prefix='original_'). Повертає True у разі успіху."""
+    f_path = inst.get(f"{prefix}file_path")
+    tg_file_id = inst.get(f"{prefix}telegram_file_id")
+    raw_name = inst.get(f"{prefix}file_name")
+    default_name = sanitize_instruction_filename(inst.get("title"), inst.get("id"))
+    f_name = raw_name or (f"original_{default_name}" if prefix else default_name)
 
     if f_path and os.path.exists(f_path):
         await target_msg.answer_document(
@@ -151,6 +193,50 @@ async def _send_instruction_document(
         return True
 
     return False
+
+
+async def _send_instruction_document(
+    target_msg: Message,
+    inst: Dict[str, Any],
+    caption: Optional[str] = None,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> bool:
+    """Надсилає файл інструкції для ШІ (з диска або за file_id у Telegram)."""
+    return await _send_document_from_record(
+        target_msg,
+        inst,
+        prefix="",
+        caption=caption,
+        reply_markup=reply_markup,
+    )
+
+
+async def _send_original_document(
+    target_msg: Message,
+    inst: Dict[str, Any],
+    caption: Optional[str] = None,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> bool:
+    """Надсилає файл оригіналу інструкції (з диска або за file_id у Telegram)."""
+    return await _send_document_from_record(
+        target_msg,
+        inst,
+        prefix="original_",
+        caption=caption,
+        reply_markup=reply_markup,
+    )
+
+
+def _sanitize_original_filename(raw_name: Optional[str], topic_title: str) -> str:
+    name = (raw_name or "").strip()
+    base, ext = os.path.splitext(name)
+    ext_clean = re.sub(r"[^a-zA-Z0-9.]", "", ext)[:12]
+    if not base:
+        base = topic_title or "original"
+    cleaned_base = re.sub(r'[\\/*?:"<>|\r\n\t]+', "", base)
+    cleaned_base = re.sub(r"[^\w\s\-'.а-яА-ЯіїєґІЇЄҐ]", "", cleaned_base, flags=re.UNICODE)
+    cleaned_base = re.sub(r"\s+", "_", cleaned_base).strip("._ ") or "original"
+    return f"{cleaned_base[:70]}{ext_clean}"
 
 
 async def _render_instructions_menu(
@@ -179,10 +265,16 @@ async def _render_instructions_menu(
     ]
 
     for item in items:
-        has_file = bool(item.get("file_path") or item.get("telegram_file_id"))
+        has_ai_file = bool(item.get("file_path") or item.get("telegram_file_id"))
+        has_orig_file = bool(item.get("original_file_path") or item.get("original_telegram_file_id"))
         raw_title = (item.get("title") or f"Інструкція #{item['id']}").strip()
-        short_title = raw_title if len(raw_title) <= 38 else raw_title[:35] + "..."
-        suffix = "" if has_file else " (порожня)"
+        short_title = raw_title if len(raw_title) <= 36 else raw_title[:33] + "..."
+        if has_ai_file:
+            suffix = ""
+        elif has_orig_file:
+            suffix = " (без ШІ)"
+        else:
+            suffix = " (порожня)"
         buttons.append(
             [
                 InlineKeyboardButton(
@@ -233,21 +325,46 @@ async def _render_instruction_card(
             pass
 
     title_escaped = html.escape(inst.get("title") or "")
+    has_ai = bool(inst.get("file_path") or inst.get("telegram_file_id"))
+    has_orig = bool(inst.get("original_file_path") or inst.get("original_telegram_file_id"))
+
+    ai_status = html.escape(inst.get("file_name") or "завантажено") if has_ai else "<i>не завантажено</i>"
+    orig_status = html.escape(inst.get("original_file_name") or "завантажено") if has_orig else "<i>не завантажено</i>"
+
     kb = _instruction_card_keyboard(inst_id, page)
-    caption = (
+    card_text = (
         f"📋 <b>Інструкція: {title_escaped}</b>\n"
         f"───────────────────\n"
-        f"🔍 <i>Індексується в пошуку ШІ разом із навчальними матеріалами.</i>"
+        f"📄 <b>Інструкція (для ШІ):</b> {ai_status}\n"
+        f"📎 <b>Оригінал документа:</b> {orig_status}\n\n"
+        f"🔍 <i>Пошук ШІ працює за текстом інструкції; оригінал надсилається користувачу разом із відповіддю.</i>"
     )
 
-    sent_doc = await _send_instruction_document(target_msg, inst, caption=caption, reply_markup=kb)
-    if not sent_doc:
-        empty_text = (
-            f"📋 <b>Інструкція: {title_escaped}</b>\n"
-            f"───────────────────\n"
-            f"⚠️ <i>Файл інструкції ще не завантажено (порожня інструкція).</i>"
+    if has_ai and has_orig:
+        await _send_instruction_document(
+            target_msg,
+            inst,
+            caption=f"📄 <b>Інструкція для ШІ:</b> {title_escaped}",
         )
-        await target_msg.answer(empty_text, reply_markup=kb, parse_mode="HTML")
+        sent_orig = await _send_original_document(
+            target_msg,
+            inst,
+            caption=card_text,
+            reply_markup=kb,
+        )
+        if not sent_orig:
+            await target_msg.answer(card_text, reply_markup=kb, parse_mode="HTML")
+        return
+
+    if has_ai:
+        if await _send_instruction_document(target_msg, inst, caption=card_text, reply_markup=kb):
+            return
+
+    if has_orig:
+        if await _send_original_document(target_msg, inst, caption=card_text, reply_markup=kb):
+            return
+
+    await target_msg.answer(card_text, reply_markup=kb, parse_mode="HTML")
 
 
 async def _download_and_save_docx(
@@ -289,6 +406,40 @@ async def _download_and_save_docx(
     return extracted_text, local_path, doc.file_id, orig_name, ""
 
 
+async def _download_and_save_original_document(
+    message: Message,
+    topic_title: str,
+) -> tuple[str, str, str, str]:
+    """
+    Завантажує файл оригіналу інструкції будь-якого формату із Telegram.
+    Повертає (local_file_path, tg_file_id, orig_file_name, display_err).
+    """
+    doc = message.document
+    if not doc:
+        return "", "", "", (
+            "⚠️ Будь ласка, надішліть саме <b>файл оригіналу інструкції</b> "
+            "(документ <code>.pdf</code>, <code>.docx</code> тощо)."
+        )
+
+    if (doc.file_size or 0) > MAX_TELEGRAM_BOT_DOWNLOAD_BYTES:
+        return "", "", "", "⚠️ Розмір файлу перевищує ліміт 20 МБ."
+
+    orig_name = doc.file_name or sanitize_instruction_filename(topic_title)
+    tg_file = await message.bot.get_file(doc.file_id)
+    buf = io.BytesIO()
+    await message.bot.download_file(tg_file.file_path, destination=buf)
+    raw_bytes = buf.getvalue()
+
+    os.makedirs(INSTRUCTIONS_FILES_DIR, exist_ok=True)
+    safe_name = _sanitize_original_filename(orig_name, topic_title)
+    ts = int(time.time() * 1000)
+    local_path = os.path.join(INSTRUCTIONS_FILES_DIR, f"orig_{ts}_{safe_name}")
+    with open(local_path, "wb") as fh:
+        fh.write(raw_bytes)
+
+    return local_path, doc.file_id, orig_name, ""
+
+
 # =========================================================================
 # ХЕНДЛЕРИ МЕНЮ ТА ПАГІНАЦІЇ
 # =========================================================================
@@ -299,6 +450,7 @@ async def dev_instructions_menu_handler(callback: CallbackQuery, state: FSMConte
         await callback.answer("⛔️ Доступ дозволено лише адміністраторам.", show_alert=True)
         return
 
+    await _cleanup_temp_ai_file(state)
     await state.clear()
     await callback.answer()
     await _render_instructions_menu(callback, page=1)
@@ -309,6 +461,7 @@ async def dev_instructions_page_handler(callback: CallbackQuery, state: FSMConte
         await callback.answer("⛔️ Доступ дозволено лише адміністраторам.", show_alert=True)
         return
 
+    await _cleanup_temp_ai_file(state)
     await state.clear()
     page = 1
     try:
@@ -324,7 +477,7 @@ async def dev_instructions_noop_handler(callback: CallbackQuery) -> None:
 
 
 # =========================================================================
-# СТВОРЕННЯ ІНСТРУКЦІЇ
+# СТВОРЕННЯ ІНСТРУКЦІЇ (3 КРОКИ: НАЗВА -> ІНСТРУКЦІЯ .DOCX -> ОРИГІНАЛ)
 # =========================================================================
 
 
@@ -333,10 +486,11 @@ async def dev_inst_add_start_handler(callback: CallbackQuery, state: FSMContext)
         await callback.answer("⛔️ Доступ дозволено лише адміністраторам.", show_alert=True)
         return
 
+    await _cleanup_temp_ai_file(state)
     await state.clear()
     await state.set_state(InstructionStates.waiting_new_title)
     text = (
-        "📝 <b>Створення інструкції — Крок 1/2</b>\n"
+        "📝 <b>Створення інструкції - Крок 1/3</b>\n"
         "───────────────────\n\n"
         "Вкажіть назву теми:"
     )
@@ -345,6 +499,30 @@ async def dev_inst_add_start_handler(callback: CallbackQuery, state: FSMContext)
     )
     await callback.answer()
     await _safe_edit_or_send(callback, text, reply_markup=kb)
+
+
+async def _prompt_step2_ai_file(target_msg: Message, title: str) -> None:
+    await target_msg.answer(
+        f"📂 <b>Створення інструкції - Крок 2/3</b>\n"
+        f"📌 Тема: <b>{html.escape(title)}</b>\n"
+        f"───────────────────\n\n"
+        f"Надішліть заповнений файл інструкції для ШІ у форматі <code>.docx</code>, "
+        f"завантажте шаблон або залиште інструкцію порожньою:",
+        reply_markup=_step2_ai_file_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+async def _prompt_step3_original_file(target: Union[CallbackQuery, Message], title: str) -> None:
+    text = (
+        f"📎 <b>Створення інструкції - Крок 3/3</b>\n"
+        f"📌 Тема: <b>{html.escape(title)}</b>\n"
+        f"───────────────────\n\n"
+        f"Тепер надішліть повний <b>оригінал інструкції</b> "
+        f"(документ будь-якого формату: <code>.pdf</code>, <code>.docx</code>, <code>.xlsx</code> тощо) "
+        f"або натисніть «Залишити без оригіналу»:"
+    )
+    await _safe_edit_or_send(target, text, reply_markup=_step3_original_file_keyboard())
 
 
 async def dev_inst_process_new_title(message: Message, state: FSMContext) -> None:
@@ -367,23 +545,7 @@ async def dev_inst_process_new_title(message: Message, state: FSMContext) -> Non
 
     await state.update_data(new_inst_title=title)
     await state.set_state(InstructionStates.waiting_new_file)
-
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📥 Викачати шаблон", callback_data="dev_inst_dl_template")],
-            [InlineKeyboardButton(text="⏭ Залишити пусту", callback_data="dev_inst_save_empty")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_inst_add")],
-        ]
-    )
-    await message.answer(
-        f"📂 <b>Створення інструкції — Крок 2/2</b>\n"
-        f"📌 Тема: <b>{html.escape(title)}</b>\n"
-        f"───────────────────\n\n"
-        f"Надішліть заповнений файл інструкції у форматі <code>.docx</code>, "
-        f"завантажте шаблон або залиште інструкцію порожньою:",
-        reply_markup=kb,
-        parse_mode="HTML",
-    )
+    await _prompt_step2_ai_file(message, title)
 
 
 async def dev_inst_download_template_handler(callback: CallbackQuery, state: FSMContext) -> None:
@@ -401,8 +563,8 @@ async def dev_inst_download_template_handler(callback: CallbackQuery, state: FSM
             document=BufferedInputFile(template_io.getvalue(), filename=TEMPLATE_FILENAME),
             caption=(
                 "📥 <b>Шаблон інструкції BULKA</b>\n\n"
-                "Заповніть цей документ та надішліть його сюди у відповідь — "
-                "бот автоматично збереже інструкцію та додасть її в пошук ШІ."
+                "Заповніть цей документ та надішліть його сюди у відповідь - "
+                "далі бот попросить прикріпити оригінал документа."
             ),
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -415,6 +577,7 @@ async def dev_inst_download_template_handler(callback: CallbackQuery, state: FSM
 
 
 async def dev_inst_save_empty_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    """Крок 2/3 -> пропуск файлу інструкції для ШІ та перехід до Кроку 3/3 (оригінал)."""
     if not await _check_instructions_admin(callback):
         await callback.answer("⛔️ Доступ дозволено лише адміністраторам.", show_alert=True)
         return
@@ -425,21 +588,20 @@ async def dev_inst_save_empty_handler(callback: CallbackQuery, state: FSMContext
         await callback.answer("⚠️ Спочатку вкажіть назву теми.", show_alert=True)
         return
 
-    inst_id = await create_instruction(
-        title=title,
-        content="",
-        file_path=None,
-        telegram_file_id=None,
-        file_name=None,
-        created_by=callback.from_user.id,
+    await _cleanup_temp_ai_file(state)
+    await state.update_data(
+        new_inst_content="",
+        new_inst_file_path=None,
+        new_inst_tg_file_id=None,
+        new_inst_file_name=None,
     )
-    await state.clear()
-    await callback.answer("✅ Порожню інструкцію створено!")
-    if callback.message:
-        await _render_instruction_card(callback.message, inst_id, page=1, delete_source_msg=True)
+    await state.set_state(InstructionStates.waiting_new_original_file)
+    await callback.answer()
+    await _prompt_step3_original_file(callback, title)
 
 
 async def dev_inst_process_new_file(message: Message, state: FSMContext) -> None:
+    """Крок 2/3 -> збереження файлу інструкції для ШІ в FSM та перехід до Кроку 3/3 (оригінал)."""
     if await _handle_start_escape(message, state):
         return
     if not await _check_instructions_admin(message):
@@ -456,32 +618,148 @@ async def dev_inst_process_new_file(message: Message, state: FSMContext) -> None
 
     extracted, local_path, tg_file_id, orig_name, err = await _download_and_save_docx(message, title)
     if err:
-        await message.answer(
-            err,
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="📥 Викачати шаблон", callback_data="dev_inst_dl_template")],
-                    [InlineKeyboardButton(text="⏭ Залишити пусту", callback_data="dev_inst_save_empty")],
-                    [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_inst_add")],
-                ]
-            ),
-            parse_mode="HTML",
-        )
+        await message.answer(err, reply_markup=_step2_ai_file_keyboard(), parse_mode="HTML")
         return
 
+    await _cleanup_temp_ai_file(state)
+    await state.update_data(
+        new_inst_content=extracted,
+        new_inst_file_path=local_path,
+        new_inst_tg_file_id=tg_file_id,
+        new_inst_file_name=orig_name,
+    )
+    await state.set_state(InstructionStates.waiting_new_original_file)
+    await _prompt_step3_original_file(message, title)
+
+
+async def dev_inst_back_to_step2_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    """Повертає з Кроку 3/3 на Крок 2/3, очищаючи тимчасово завантажений .docx."""
+    if not await _check_instructions_admin(callback):
+        await callback.answer("⛔️ Доступ дозволено лише адміністраторам.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    title = (data.get("new_inst_title") or "").strip()
+    if not title:
+        await dev_inst_add_start_handler(callback, state)
+        return
+
+    await _cleanup_temp_ai_file(state)
+    await state.update_data(
+        new_inst_content="",
+        new_inst_file_path=None,
+        new_inst_tg_file_id=None,
+        new_inst_file_name=None,
+    )
+    await state.set_state(InstructionStates.waiting_new_file)
+    await callback.answer()
+    if callback.message:
+        await _safe_edit_or_send(
+            callback,
+            f"📂 <b>Створення інструкції - Крок 2/3</b>\n"
+            f"📌 Тема: <b>{html.escape(title)}</b>\n"
+            f"───────────────────\n\n"
+            f"Надішліть заповнений файл інструкції для ШІ у форматі <code>.docx</code>, "
+            f"завантажте шаблон або залиште інструкцію порожньою:",
+            reply_markup=_step2_ai_file_keyboard(),
+        )
+
+
+async def _finalize_new_instruction(
+    target_msg: Message,
+    state: FSMContext,
+    user_id: int,
+    *,
+    original_file_path: Optional[str] = None,
+    original_telegram_file_id: Optional[str] = None,
+    original_file_name: Optional[str] = None,
+    delete_source_msg: bool = False,
+) -> Optional[int]:
+    data = await state.get_data()
+    title = (data.get("new_inst_title") or "").strip()
+    if not title:
+        return None
+
+    content = data.get("new_inst_content") or ""
     inst_id = await create_instruction(
         title=title,
-        content=extracted,
-        file_path=local_path,
-        telegram_file_id=tg_file_id,
-        file_name=orig_name,
-        created_by=message.from_user.id,
+        content=content,
+        file_path=data.get("new_inst_file_path"),
+        telegram_file_id=data.get("new_inst_tg_file_id"),
+        file_name=data.get("new_inst_file_name"),
+        original_file_path=original_file_path,
+        original_telegram_file_id=original_telegram_file_id,
+        original_file_name=original_file_name,
+        created_by=user_id,
     )
     await state.clear()
-    _schedule_ai_reindex()
+    if content.strip():
+        _schedule_ai_reindex()
 
-    await message.answer("✅ Інструкцію збережено та додано до пошуку ШІ!")
-    await _render_instruction_card(message, inst_id, page=1, delete_source_msg=False)
+    if delete_source_msg:
+        try:
+            await target_msg.delete()
+        except Exception:
+            pass
+
+    if content.strip():
+        await target_msg.answer("✅ Інструкцію збережено та додано до пошуку ШІ!")
+    else:
+        await target_msg.answer("✅ Інструкцію збережено!")
+    await _render_instruction_card(target_msg, inst_id, page=1, delete_source_msg=False)
+    return inst_id
+
+
+async def dev_inst_skip_original_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _check_instructions_admin(callback):
+        await callback.answer("⛔️ Доступ дозволено лише адміністраторам.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    if not (data.get("new_inst_title") or "").strip():
+        await callback.answer("⚠️ Спочатку вкажіть назву теми.", show_alert=True)
+        return
+
+    await callback.answer("✅ Інструкцію створено!")
+    if callback.message:
+        await _finalize_new_instruction(
+            callback.message,
+            state,
+            callback.from_user.id,
+            delete_source_msg=True,
+        )
+
+
+async def dev_inst_process_new_original_file(message: Message, state: FSMContext) -> None:
+    if await _handle_start_escape(message, state):
+        return
+    if not await _check_instructions_admin(message):
+        await _cleanup_temp_ai_file(state)
+        await state.clear()
+        await message.answer("⛔️ Доступ дозволено лише адміністраторам.")
+        return
+
+    data = await state.get_data()
+    title = (data.get("new_inst_title") or "").strip()
+    if not title:
+        await state.set_state(InstructionStates.waiting_new_title)
+        await message.answer("⚠️ Сесію скинуто. Вкажіть назву теми:")
+        return
+
+    orig_path, orig_tg_id, orig_name, err = await _download_and_save_original_document(message, title)
+    if err:
+        await message.answer(err, reply_markup=_step3_original_file_keyboard(), parse_mode="HTML")
+        return
+
+    await _finalize_new_instruction(
+        message,
+        state,
+        message.from_user.id,
+        original_file_path=orig_path,
+        original_telegram_file_id=orig_tg_id,
+        original_file_name=orig_name,
+        delete_source_msg=False,
+    )
 
 
 # =========================================================================
@@ -502,6 +780,37 @@ async def dev_inst_view_handler(callback: CallbackQuery, state: FSMContext) -> N
     await callback.answer()
     if callback.message:
         await _render_instruction_card(callback.message, inst_id, page=page, delete_source_msg=True)
+
+
+async def dev_inst_replace_menu_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    """Відкриває вибір: замінити інструкцію для ШІ або замінити оригінал інструкції."""
+    if not await _check_instructions_admin(callback):
+        await callback.answer("⛔️ Доступ дозволено лише адміністраторам.", show_alert=True)
+        return
+
+    await state.clear()
+    parts = callback.data.split(":")
+    inst_id = int(parts[1])
+    page = int(parts[2]) if len(parts) > 2 else 1
+
+    inst = await get_instruction_by_id(inst_id)
+    if not inst:
+        await callback.answer("❌ Інструкцію не знайдено.", show_alert=True)
+        return
+
+    await callback.answer()
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📄 Замінити інструкцію", callback_data=f"dev_inst_edit_file:{inst_id}:{page}")],
+            [InlineKeyboardButton(text="📎 Замінити оригінал інструкції", callback_data=f"dev_inst_edit_orig:{inst_id}:{page}")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data=f"dev_inst_view:{inst_id}:{page}")],
+        ]
+    )
+    await _safe_edit_or_send(
+        callback,
+        f"🔄 <b>Заміна файлів: {html.escape(inst['title'])}</b>\n\nОберіть, який файл бажаєте замінити:",
+        reply_markup=kb,
+    )
 
 
 async def dev_inst_edit_file_start_handler(callback: CallbackQuery, state: FSMContext) -> None:
@@ -543,7 +852,7 @@ async def dev_inst_edit_file_start_handler(callback: CallbackQuery, state: FSMCo
 
     # 3. Запитуємо новий файл (лише .docx) + кнопка Назад
     await msg.answer(
-        f"🔄 <b>Оновлення файлу інструкції: {html.escape(inst['title'])}</b>\n\n"
+        f"🔄 <b>Оновлення файлу інструкції (для ШІ): {html.escape(inst['title'])}</b>\n\n"
         f"Надішліть новий файл інструкції у форматі <code>.docx</code> (лише файл):",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data=f"dev_inst_view:{inst_id}:{page}")]]
@@ -592,6 +901,85 @@ async def dev_inst_process_edit_file(message: Message, state: FSMContext) -> Non
     _schedule_ai_reindex()
 
     await message.answer("✅ Файл інструкції оновлено та переіндексовано для пошуку ШІ!")
+    await _render_instruction_card(message, inst_id, page=page, delete_source_msg=False)
+
+
+async def dev_inst_edit_orig_start_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _check_instructions_admin(callback):
+        await callback.answer("⛔️ Доступ дозволено лише адміністраторам.", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    inst_id = int(parts[1])
+    page = int(parts[2]) if len(parts) > 2 else 1
+
+    inst = await get_instruction_by_id(inst_id)
+    if not inst:
+        await callback.answer("❌ Інструкцію не знайдено.", show_alert=True)
+        return
+
+    await state.set_state(InstructionStates.waiting_edit_original_file)
+    await state.update_data(edit_inst_id=inst_id, edit_inst_page=page)
+    await callback.answer()
+
+    msg = callback.message
+    if not msg:
+        return
+
+    await _send_original_document(
+        msg,
+        inst,
+        caption=f"📎 <b>Поточний оригінал інструкції:</b> {html.escape(inst['title'])}",
+    )
+
+    await msg.answer(
+        f"📎 <b>Оновлення оригіналу інструкції: {html.escape(inst['title'])}</b>\n\n"
+        f"Надішліть новий повний файл оригіналу (<code>.pdf</code>, <code>.docx</code>, <code>.xlsx</code> тощо):",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data=f"dev_inst_view:{inst_id}:{page}")]]
+        ),
+        parse_mode="HTML",
+    )
+
+
+async def dev_inst_process_edit_orig_file(message: Message, state: FSMContext) -> None:
+    if await _handle_start_escape(message, state):
+        return
+    if not await _check_instructions_admin(message):
+        await state.clear()
+        await message.answer("⛔️ Доступ дозволено лише адміністраторам.")
+        return
+
+    data = await state.get_data()
+    inst_id = data.get("edit_inst_id")
+    page = int(data.get("edit_inst_page") or 1)
+
+    inst = await get_instruction_by_id(inst_id) if inst_id else None
+    if not inst:
+        await state.clear()
+        await message.answer("❌ Інструкцію не знайдено.")
+        return
+
+    local_path, tg_file_id, orig_name, err = await _download_and_save_original_document(message, inst["title"])
+    if err:
+        await message.answer(
+            err,
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data=f"dev_inst_view:{inst_id}:{page}")]]
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    await update_instruction_original_file(
+        inst_id=inst_id,
+        original_file_path=local_path,
+        original_telegram_file_id=tg_file_id,
+        original_file_name=orig_name,
+    )
+    await state.clear()
+
+    await message.answer("✅ Оригінал інструкції оновлено!")
     await _render_instruction_card(message, inst_id, page=page, delete_source_msg=False)
 
 
@@ -679,7 +1067,7 @@ async def dev_inst_delete_ask_handler(callback: CallbackQuery) -> None:
         callback,
         f"⚠️ <b>Видалення інструкції</b>\n\n"
         f"Ви дійсно бажаєте видалити інструкцію «<b>{html.escape(inst['title'])}</b>»?\n"
-        f"<i>Файл і текст інструкції буде вилучено також із пошуку ШІ.</i>",
+        f"<i>Обидва файли та текст інструкції буде вилучено також із пошуку ШІ.</i>",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="✅ Так, видалити", callback_data=f"dev_inst_del_do:{inst_id}:{page}")],
@@ -720,17 +1108,23 @@ def register_instructions_handlers(dp: Dispatcher) -> None:
     dp.callback_query.register(dev_instructions_page_handler, lambda c: c.data and c.data.startswith("dev_inst_page:"))
     dp.callback_query.register(dev_instructions_noop_handler, lambda c: c.data == "dev_inst_noop")
 
-    # Створення
+    # Створення (Крок 1: назва -> Крок 2: файл .docx для ШІ -> Крок 3: оригінал документа)
     dp.callback_query.register(dev_inst_add_start_handler, lambda c: c.data == "dev_inst_add")
     dp.message.register(dev_inst_process_new_title, InstructionStates.waiting_new_title)
     dp.callback_query.register(dev_inst_download_template_handler, lambda c: c.data == "dev_inst_dl_template")
     dp.callback_query.register(dev_inst_save_empty_handler, lambda c: c.data == "dev_inst_save_empty")
     dp.message.register(dev_inst_process_new_file, InstructionStates.waiting_new_file)
+    dp.callback_query.register(dev_inst_back_to_step2_handler, lambda c: c.data == "dev_inst_back_step2")
+    dp.callback_query.register(dev_inst_skip_original_handler, lambda c: c.data == "dev_inst_skip_orig")
+    dp.message.register(dev_inst_process_new_original_file, InstructionStates.waiting_new_original_file)
 
     # Перегляд та редагування
     dp.callback_query.register(dev_inst_view_handler, lambda c: c.data and c.data.startswith("dev_inst_view:"))
+    dp.callback_query.register(dev_inst_replace_menu_handler, lambda c: c.data and c.data.startswith("dev_inst_replace_menu:"))
     dp.callback_query.register(dev_inst_edit_file_start_handler, lambda c: c.data and c.data.startswith("dev_inst_edit_file:"))
     dp.message.register(dev_inst_process_edit_file, InstructionStates.waiting_edit_file)
+    dp.callback_query.register(dev_inst_edit_orig_start_handler, lambda c: c.data and c.data.startswith("dev_inst_edit_orig:"))
+    dp.message.register(dev_inst_process_edit_orig_file, InstructionStates.waiting_edit_original_file)
     dp.callback_query.register(dev_inst_edit_title_start_handler, lambda c: c.data and c.data.startswith("dev_inst_edit_title:"))
     dp.message.register(dev_inst_process_edit_title, InstructionStates.waiting_edit_title)
 

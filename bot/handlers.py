@@ -1775,14 +1775,45 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
         ]
     )
 
+    orig_instructions = []
+    if result.get("status") in ("ok", "fallback_lexical") and result.get("used_instruction_ids"):
+        from database.instructions import get_instructions_with_original_by_ids
+
+        orig_instructions = await get_instructions_with_original_by_ids(result["used_instruction_ids"])
+
+    text_kb = None if orig_instructions else kb
+
     if len(text) <= SAFE_MESSAGE_LENGTH:
-        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+        await message.answer(text, reply_markup=text_kb, parse_mode="HTML")
     else:
         parts = split_text(text, page_size=SAFE_MESSAGE_LENGTH - 150)
         for idx, part in enumerate(parts):
             safe_part = sanitize_telegram_html(part) or part
             is_last = idx == len(parts) - 1
-            await message.answer(safe_part, reply_markup=kb if is_last else None, parse_mode="HTML")
+            await message.answer(safe_part, reply_markup=text_kb if is_last else None, parse_mode="HTML")
+
+    if orig_instructions:
+        from bot.menus.instructions import _send_original_document
+
+        kb_attached = False
+        for idx, inst in enumerate(orig_instructions):
+            is_last_orig = idx == len(orig_instructions) - 1
+            doc_markup = kb if is_last_orig else None
+            caption = f"📎 <b>Оригінал інструкції:</b> {html.escape(inst.get('title') or '')}"
+            try:
+                ok_sent = await _send_original_document(
+                    message,
+                    inst,
+                    caption=caption,
+                    reply_markup=doc_markup,
+                )
+                if ok_sent and is_last_orig:
+                    kb_attached = True
+            except Exception as exc:
+                logger.warning(f"Failed to send original document for instruction {inst.get('id')}: {exc}")
+
+        if not kb_attached:
+            await message.answer("Оберіть наступну дію:", reply_markup=kb)
 
     await state.clear()
 

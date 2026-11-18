@@ -339,6 +339,61 @@ async def _synthesize_answer_from_chunks(
         return None, False
 
 
+def _extract_used_instruction_ids(results: list[dict], answer_text: str) -> list[int]:
+    """
+    Повертає впорядкований список ID інструкцій із `results`, які ШІ реально використав:
+    1) інструкції, назви або мітки яких ([Інструкція: ...]) згадано в `answer_text`;
+    2) якщо явної згадки немає, але топ-1 чанк (results[0]) належить інструкції — береться вона.
+    """
+    if not results:
+        return []
+
+    candidates_by_id: dict[int, tuple[str, str]] = {}
+    ordered_ids: list[int] = []
+    top1_instruction_ids: list[int] = []
+
+    for idx, item in enumerate(results):
+        for src in item.get("sources") or []:
+            try:
+                day_val = int(src.get("day") or 0)
+                mat_id = int(src.get("material_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if day_val != 0 or mat_id >= 0:
+                continue
+
+            inst_id = abs(mat_id)
+            raw_title = (src.get("title") or src.get("display_role") or "").strip()
+            clean_title = (
+                raw_title[len("Інструкція:") :].strip()
+                if raw_title.startswith("Інструкція:")
+                else raw_title
+            )
+            if inst_id not in candidates_by_id:
+                candidates_by_id[inst_id] = (raw_title, clean_title)
+                ordered_ids.append(inst_id)
+            if idx == 0 and inst_id not in top1_instruction_ids:
+                top1_instruction_ids.append(inst_id)
+
+    if not ordered_ids:
+        return []
+
+    normalized_answer = re.sub(r"\s+", " ", html.unescape(answer_text or "")).strip().lower()
+    matched_ids: list[int] = []
+    for inst_id in ordered_ids:
+        raw_title, clean_title = candidates_by_id[inst_id]
+        raw_norm = re.sub(r"\s+", " ", raw_title).strip().lower()
+        clean_norm = re.sub(r"\s+", " ", clean_title).strip().lower()
+        if (raw_norm and raw_norm in normalized_answer) or (
+            len(clean_norm) >= 3 and clean_norm in normalized_answer
+        ):
+            matched_ids.append(inst_id)
+
+    if matched_ids:
+        return matched_ids
+    return top1_instruction_ids
+
+
 async def _finalize_final_scope_answer(
     clean_question: str,
     search_res: dict,
@@ -397,6 +452,7 @@ async def _finalize_final_scope_answer(
                     "used_network_fallback": used_network_fallback,
                     "used_gpt": False,
                     "matches": results,
+                    "used_instruction_ids": _extract_used_instruction_ids(results[:8], fallback_txt),
                 }
             return {
                 "status": "not_found",
@@ -404,6 +460,7 @@ async def _finalize_final_scope_answer(
                 "used_network_fallback": used_network_fallback,
                 "used_gpt": True,
                 "matches": [],
+                "used_instruction_ids": [],
             }
         final_text = f"{NETWORK_FALLBACK_NOTE}{answer}" if used_network_fallback else answer
         return {
@@ -412,14 +469,19 @@ async def _finalize_final_scope_answer(
             "used_network_fallback": used_network_fallback,
             "used_gpt": True,
             "matches": results,
+            "used_instruction_ids": _extract_used_instruction_ids(results, final_text),
         }
 
+    fallback_txt = _format_extractive_fallback(
+        clean_question, results, used_network_fallback=used_network_fallback
+    )
     return {
         "status": "fallback_lexical",
-        "text": _format_extractive_fallback(clean_question, results, used_network_fallback=used_network_fallback),
+        "text": fallback_txt,
         "used_network_fallback": used_network_fallback,
         "used_gpt": False,
         "matches": results,
+        "used_instruction_ids": _extract_used_instruction_ids(results[:8], fallback_txt),
     }
 
 
@@ -448,6 +510,7 @@ async def answer_remind_topic(
             "used_network_fallback": False,
             "used_gpt": False,
             "matches": [],
+            "used_instruction_ids": [],
         }
 
     # --- Global mode ("Всі посади") ---
@@ -466,6 +529,7 @@ async def answer_remind_topic(
                 "used_network_fallback": False,
                 "used_gpt": False,
                 "matches": [],
+                "used_instruction_ids": [],
             }
         return await _finalize_final_scope_answer(
             clean_question=clean_question,
@@ -504,14 +568,21 @@ async def answer_remind_topic(
                 "used_network_fallback": False,
                 "used_gpt": True,
                 "matches": stage1_res["results"],
+                "used_instruction_ids": _extract_used_instruction_ids(stage1_res["results"], answer),
             }
         if not gpt_ok:
+            fallback_txt = _format_extractive_fallback(
+                clean_question, stage1_res["results"], used_network_fallback=False
+            )
             return {
                 "status": "fallback_lexical",
-                "text": _format_extractive_fallback(clean_question, stage1_res["results"], used_network_fallback=False),
+                "text": fallback_txt,
                 "used_network_fallback": False,
                 "used_gpt": False,
                 "matches": stage1_res["results"],
+                "used_instruction_ids": _extract_used_instruction_ids(
+                    stage1_res["results"][:8], fallback_txt
+                ),
             }
         # GPT inspected Stage 1 chunks and confirmed answer is absent there.
         inspected_hashes = {r["chunk_hash"] for r in stage1_res["results"]}
@@ -532,6 +603,7 @@ async def answer_remind_topic(
             "used_network_fallback": True,
             "used_gpt": False,
             "matches": [],
+            "used_instruction_ids": [],
         }
 
     return await _finalize_final_scope_answer(
