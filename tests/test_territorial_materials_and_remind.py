@@ -2,7 +2,11 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 from aiogram.types import InlineKeyboardMarkup
 
-from bot.handlers import remind_topic_global_callback
+from bot.handlers import (
+    process_keyword_search,
+    remind_role_select_callback,
+    remind_topic_global_callback,
+)
 from bot.menus.developer import (
     _ensure_developer,
     developer_materials_view,
@@ -225,3 +229,93 @@ class TestTerritorialMaterialsAndRemind(unittest.IsolatedAsyncioTestCase):
 
         # Blocked with alert
         cb.answer.assert_called_with("⛔️ Доступ заборонено. Ви не маєте відповідних прав.", show_alert=True)
+
+    @patch("bot.handlers.answer_remind_topic", new_callable=AsyncMock)
+    @patch("bot.handlers.is_hr_user", new_callable=AsyncMock)
+    @patch("bot.handlers.is_developer_user", new_callable=AsyncMock)
+    @patch("bot.handlers.is_observer_user", new_callable=AsyncMock)
+    @patch("bot.handlers.is_manager_user", new_callable=AsyncMock)
+    @patch("bot.handlers.is_territorial_user", new_callable=AsyncMock)
+    @patch("bot.handlers.get_searchable_roles", new_callable=AsyncMock)
+    async def test_territorial_can_complete_remind_role_select_and_keyword_search(
+        self,
+        mock_roles,
+        mock_is_terr,
+        mock_is_mgr,
+        mock_is_obs,
+        mock_is_dev,
+        mock_is_hr,
+        mock_answer_remind,
+    ):
+        mock_is_hr.return_value = False
+        mock_is_dev.return_value = False
+        mock_is_obs.return_value = False
+        mock_is_mgr.return_value = False
+        mock_is_terr.return_value = True
+        mock_roles.return_value = ["Бариста", "Касир"]
+        mock_answer_remind.return_value = {
+            "status": "ok",
+            "text": "Стандарт приготування еспресо.",
+            "used_network_fallback": False,
+            "used_gpt": True,
+            "matches": [],
+        }
+
+        state_store = {}
+
+        async def _update_data(**kwargs):
+            state_store.update(kwargs)
+
+        async def _get_data():
+            return dict(state_store)
+
+        state = AsyncMock()
+        state.update_data.side_effect = _update_data
+        state.get_data.side_effect = _get_data
+        state.set_state = AsyncMock()
+        state.clear = AsyncMock()
+
+        # 1. Вибір ролі для «Нагадати тему»
+        cb = AsyncMock()
+        cb.from_user = self.user
+        cb.data = "remind_role_select:0"
+        cb.message = AsyncMock()
+        cb.message.photo = None
+
+        await remind_role_select_callback(cb, state)
+        self.assertEqual(state_store.get("mode"), "dev_test")
+        self.assertEqual(state_store.get("role"), "Бариста")
+
+        # 2. Відправка пошукового запиту територіалом
+        msg = AsyncMock()
+        msg.from_user = self.user
+        msg.text = "Яка температура води для еспресо?"
+        thinking_msg = AsyncMock()
+        thinking_msg.delete = AsyncMock()
+        msg.answer = AsyncMock(side_effect=[thinking_msg, AsyncMock()])
+
+        await process_keyword_search(msg, state)
+
+        mock_answer_remind.assert_awaited_once_with(
+            question="Яка температура води для еспресо?",
+            role_filter="Бариста",
+            user_id=self.user.id,
+        )
+        sent_texts = [call.args[0] for call in msg.answer.call_args_list if call.args]
+        self.assertFalse(any("Цей режим доступний лише для керівництва." in t for t in sent_texts))
+        self.assertTrue(any("Стандарт приготування еспресо." in t for t in sent_texts))
+
+        # Також перевіримо mode == "global" для територіала
+        state_store["mode"] = "global"
+        msg_global = AsyncMock()
+        msg_global.from_user = self.user
+        msg_global.text = "Глобальний запит"
+        thinking_global = AsyncMock()
+        thinking_global.delete = AsyncMock()
+        msg_global.answer = AsyncMock(side_effect=[thinking_global, AsyncMock()])
+
+        await process_keyword_search(msg_global, state)
+
+        global_texts = [call.args[0] for call in msg_global.answer.call_args_list if call.args]
+        self.assertFalse(any("Цей режим доступний лише HR" in t for t in global_texts))
+        self.assertTrue(any("Стандарт приготування еспресо." in t for t in global_texts))

@@ -1680,8 +1680,12 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
 
     # --- Перевірка доступу і визначення ролі ---
     if mode == "global":
-        if not (await is_hr_user(user_id) or await is_developer_user(user_id)):
-            await message.answer("Цей режим доступний лише HR та Адміністраторам.")
+        if not (
+            await is_hr_user(user_id)
+            or await is_developer_user(user_id)
+            or await is_territorial_user(user_id)
+        ):
+            await message.answer("Цей режим доступний лише HR, Адміністраторам та Територіалам.")
             await state.clear()
             return
         role_filter = None
@@ -1699,6 +1703,7 @@ async def process_keyword_search(message: types.Message, state: FSMContext):
             or await is_developer_user(user_id)
             or await is_observer_user(user_id)
             or await is_manager_user(user_id)
+            or await is_territorial_user(user_id)
         ):
             await message.answer("Цей режим доступний лише для керівництва.")
             await state.clear()
