@@ -4259,27 +4259,67 @@ def _materials_menu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+async def _get_dev_material_roles() -> list[str]:
+    """Повертає актуальний список посад із таблиці positions для редактора матеріалів."""
+    system_roles = {"Developer", "Адміністратор", "Територіал", "Наглядач"}
+    try:
+        from database.positions import get_all_positions
+        positions = await get_all_positions()
+        roles = [
+            p["name"].strip()
+            for p in positions
+            if p.get("name") and p["name"].strip() not in system_roles
+        ]
+        if roles:
+            return list(dict.fromkeys(roles))
+    except Exception:
+        pass
+    return list(AVAILABLE_ROLES)
+
+
 async def developer_materials_menu(callback: CallbackQuery):
-    """Головне меню редагування матеріалів — вибір посади."""
+    """Головне меню редагування матеріалів — вибір посади з інлайн-пагінацією."""
     if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
-    
-    # Використовуємо AVAILABLE_ROLES з constants
+
+    page = 0
+    if callback.data and callback.data.startswith("dev_mat_roles_pg|"):
+        try:
+            page = int(callback.data.split("|", 1)[1])
+        except (ValueError, IndexError):
+            page = 0
+
+    roles = await _get_dev_material_roles()
+    per_page = 10
+    total_pages = max(1, (len(roles) + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * per_page
+    end_idx = min(start_idx + per_page, len(roles))
+
     buttons = []
-    for i, role in enumerate(AVAILABLE_ROLES):
-        # Скорочуємо назву для кнопки
-        short_name = role[:25] + "..." if len(role) > 28 else role
+    for i in range(start_idx, end_idx):
+        role = roles[i]
+        short_name = role[:32] + "..." if len(role) > 35 else role
         buttons.append([InlineKeyboardButton(
             text=short_name,
             callback_data=f"dev_mat_role|{i}"
         )])
-    
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_mat_roles_pg|{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {page + 1}/{total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_mat_roles_pg|{page + 1}"))
+        buttons.append(nav_row)
+
     buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_main_study")])
-    
+
     await _edit_or_answer(
         callback.message,
-        "📝 <b>Редагування навчального матеріалу</b>\n\n"
-        "Оберіть посаду для редагування матеріалів:",
+        f"📝 <b>Редагування навчального матеріалу</b>\n\n"
+        f"Оберіть посаду (всього: <b>{len(roles)}</b>):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     await callback.answer()
@@ -4321,13 +4361,14 @@ async def developer_materials_select_day(callback: CallbackQuery, state: FSMCont
     if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
+    roles = await _get_dev_material_roles()
     try:
         _, role_part = callback.data.split("|", 1)
         role_index = int(role_part)
-        if not (0 <= role_index < len(AVAILABLE_ROLES)):
+        if not (0 <= role_index < len(roles)):
             await callback.answer("Неправильний індекс ролі.", show_alert=True)
             return
-        role = AVAILABLE_ROLES[role_index]
+        role = roles[role_index]
     except (ValueError, IndexError):
         await callback.answer("Помилка формату ролі.", show_alert=True)
         return
@@ -5601,13 +5642,14 @@ async def developer_videos_select_day(callback: CallbackQuery, state: FSMContext
     if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
+    roles = await _get_dev_material_roles()
     try:
         _, role_part = callback.data.split("|", 1)
         role_index = int(role_part)
-        if not (0 <= role_index < len(AVAILABLE_ROLES)):
+        if not (0 <= role_index < len(roles)):
             await callback.answer("Неправильний індекс ролі.", show_alert=True)
             return
-        role = AVAILABLE_ROLES[role_index]
+        role = roles[role_index]
     except (ValueError, IndexError):
         await callback.answer("Помилка формату ролі.", show_alert=True)
         return
@@ -6020,13 +6062,14 @@ async def developer_photos_select_day(callback: CallbackQuery, state: FSMContext
     if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
     
+    roles = await _get_dev_material_roles()
     try:
         _, role_part = callback.data.split("|", 1)
         role_index = int(role_part)
-        if not (0 <= role_index < len(AVAILABLE_ROLES)):
+        if not (0 <= role_index < len(roles)):
             await callback.answer("Неправильний індекс ролі.", show_alert=True)
             return
-        role = AVAILABLE_ROLES[role_index]
+        role = roles[role_index]
     except (ValueError, IndexError):
         await callback.answer("Помилка формату ролі.", show_alert=True)
         return
@@ -12838,7 +12881,7 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_ack_export_xlsx_callback, lambda c: c.data and c.data.startswith("dev_ack_export_xlsx:"))
 
     # Materials Editor
-    dp.callback_query.register(developer_materials_menu, lambda c: c.data == "dev_materials_menu")
+    dp.callback_query.register(developer_materials_menu, lambda c: c.data == "dev_materials_menu" or (c.data and c.data.startswith("dev_mat_roles_pg|")))
     dp.callback_query.register(developer_materials_select_day, lambda c: c.data and c.data.startswith("dev_mat_role|"))
     dp.callback_query.register(developer_materials_select_type, lambda c: c.data and c.data.startswith("dev_mat_day|"))
     dp.callback_query.register(developer_materials_view, lambda c: c.data and c.data.startswith("dev_mat_type|"))
