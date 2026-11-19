@@ -1482,6 +1482,23 @@ async def show_syllabus(callback: CallbackQuery):
 async def syllabus_locked(callback: CallbackQuery):
     await callback.answer("🔒 Зміст стане доступним після завершення 5-го дня навчання!", show_alert=True)
 
+async def _edit_remind_prompt(message, prompt: str, reply_markup: InlineKeyboardMarkup):
+    """Безпечно редагує текстове чи медіа-повідомлення, або надсилає нове."""
+    if not message:
+        return
+    try:
+        if message.text is not None:
+            await message.edit_text(prompt, reply_markup=reply_markup)
+            return
+        if message.photo or message.video or message.document or message.animation or message.audio or message.caption is not None:
+            await message.edit_caption(caption=prompt, reply_markup=reply_markup)
+            return
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return
+    await message.answer(prompt, reply_markup=reply_markup)
+
+
 async def remind_topic_self_callback(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     user_details = await get_user_details(user_id)
@@ -1515,11 +1532,7 @@ async def remind_topic_self_callback(callback: CallbackQuery, state: FSMContext)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ В головне меню", callback_data="main_menu")]
     ])
-    if callback.message:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=prompt, reply_markup=kb)
-        else:
-            await callback.message.edit_text(prompt, reply_markup=kb)
+    await _edit_remind_prompt(callback.message, prompt, kb)
     await callback.answer()
 
 async def remind_topic_global_callback(callback: CallbackQuery, state: FSMContext):
@@ -1551,11 +1564,7 @@ async def remind_topic_global_callback(callback: CallbackQuery, state: FSMContex
         "🧠 <b>Нагадати тему</b>\n\n"
         "Обери посаду, по якій шукати матеріали:"
     )
-    if callback.message:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=prompt, reply_markup=kb)
-        else:
-            await callback.message.edit_text(prompt, reply_markup=kb)
+    await _edit_remind_prompt(callback.message, prompt, kb)
     await callback.answer()
 
 
@@ -1608,11 +1617,7 @@ async def remind_role_select_callback(callback: CallbackQuery, state: FSMContext
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="remind_topic_global")]
     ])
-    if callback.message:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=prompt, reply_markup=kb)
-        else:
-            await callback.message.edit_text(prompt, reply_markup=kb)
+    await _edit_remind_prompt(callback.message, prompt, kb)
     await callback.answer()
 
 async def remind_topic_for_intern_callback(callback: CallbackQuery, state: FSMContext):
@@ -1657,11 +1662,7 @@ async def remind_topic_for_intern_callback(callback: CallbackQuery, state: FSMCo
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ В головне меню", callback_data="main_menu")]
     ])
-    if callback.message:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=prompt, reply_markup=kb)
-        else:
-            await callback.message.edit_text(prompt, reply_markup=kb)
+    await _edit_remind_prompt(callback.message, prompt, kb)
     await callback.answer()
 
 async def process_keyword_search(message: types.Message, state: FSMContext):
@@ -2884,7 +2885,8 @@ async def global_error_handler(event: ErrorEvent):
             "message is not modified",
             "message can't be deleted for everyone",
             "message to delete not found",
-            "canceled by new editmessagemedia request"
+            "canceled by new editmessagemedia request",
+            "canceled by new edit message request"
         ]):
             return
 

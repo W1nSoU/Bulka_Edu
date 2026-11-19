@@ -1783,8 +1783,8 @@ async def manager_promote_confirm_handler(callback: CallbackQuery):
     await callback.answer("✅ Статус оновлено: Працівник", show_alert=False)
     if back_cb == "profile":
         from bot.handlers import manager_intern_profile_handler
-        callback.data = f"manager_intern_profile_{intern_id}"
-        await manager_intern_profile_handler(callback)
+        updated_cb = callback.model_copy(update={"data": f"manager_intern_profile_{intern_id}"})
+        await manager_intern_profile_handler(updated_cb)
     else:
         await _show_intern_details(callback, intern_id, back_callback=back_cb)
 

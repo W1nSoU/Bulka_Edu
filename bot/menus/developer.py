@@ -157,6 +157,7 @@ class DeveloperStates(StatesGroup):
     waiting_material_parts = State() # New state for multi-message input
     waiting_test_input = State() # State for editing tests
     waiting_fix_page = State() # New state for fixing a specific page content
+    waiting_page_jump = State() # State for jumping to a specific page number
     waiting_complement_type = State() # Start/End/Between
     waiting_insert_start_idx = State() # First page index
     waiting_insert_end_idx = State() # Second page index
@@ -3579,8 +3580,8 @@ async def dev_mgr_toggle_status_handler(callback: CallbackQuery, state: FSMConte
     else:
         await callback.answer("⚠️ Не вдалося оновити роль у базі.", show_alert=True)
 
-    callback.data = f"dev_mgr_edit_menu:{manager_uid}"
-    await dev_mgr_edit_menu(callback, state)
+    updated_cb = callback.model_copy(update={"data": f"dev_mgr_edit_menu:{manager_uid}"})
+    await dev_mgr_edit_menu(updated_cb, state)
 
 
 async def dev_mgr_change_name_start(callback: CallbackQuery, state: FSMContext):
@@ -5059,7 +5060,10 @@ def _get_dev_pagination_keyboard(current_page, total_pages, material_id, day, co
         nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_pag:{material_id}:{day}:{current_page-1}:{content_type}"))
     
     if total_pages > 1:
-        nav_row.append(InlineKeyboardButton(text=f"{current_page+1}/{total_pages}", callback_data="noop"))
+        nav_row.append(InlineKeyboardButton(
+            text=f"{current_page+1}/{total_pages}",
+            callback_data=f"dev_pag_jump:{material_id}:{day}:{current_page}:{content_type}"
+        ))
     
     if current_page < total_pages - 1:
         nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_pag:{material_id}:{day}:{current_page+1}:{content_type}"))
@@ -5084,6 +5088,22 @@ def _get_dev_pagination_keyboard(current_page, total_pages, material_id, day, co
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def _build_dev_material_pages(material: dict, ctype: str) -> list:
+    """Розбиває матеріал розробника на сторінки для пагінації."""
+    if ctype == "text":
+        return parse_material_content(material.get("content", ""))
+    if ctype == "video":
+        return [{"text": material.get("resource_url", "")}]
+    if ctype == "photo_files":
+        try:
+            file_ids = json.loads(material.get("content", "[]"))
+            return [{"photo": fid, "text": f"Фото {i+1}"} for i, fid in enumerate(file_ids)]
+        except json.JSONDecodeError:
+            return []
+    from bot.utils.paginator import split_text
+    return [{"text": p} for p in split_text(material.get("content", ""))]
+
+
 async def developer_pagination_handler(callback: CallbackQuery):
     if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
         return
@@ -5101,20 +5121,7 @@ async def developer_pagination_handler(callback: CallbackQuery):
         await callback.answer("Матеріал не знайдено.")
         return
 
-    if ctype == "text":
-        pages = parse_material_content(material.get("content", ""))
-    elif ctype == "video":
-        pages = [{"text": material.get("resource_url", "")}]
-    elif ctype == "photo_files":
-        try:
-            file_ids = json.loads(material.get("content", "[]"))
-            pages = [{"photo": fid, "text": f"Фото {i+1}"} for i, fid in enumerate(file_ids)]
-        except json.JSONDecodeError:
-            pages = []
-    else:
-        # Fallback for other types
-        from bot.utils.paginator import split_text
-        pages = [{"text": p} for p in split_text(material.get("content", ""))]
+    pages = _build_dev_material_pages(material, ctype)
 
     is_obs = await is_observer_user(callback.from_user.id) or await is_territorial_user(callback.from_user.id)
     if 0 <= page < len(pages):
@@ -5127,24 +5134,159 @@ async def developer_pagination_handler(callback: CallbackQuery):
         is_photo_message = bool(callback.message.photo)
         is_text_message = bool(callback.message.text)
         
-        if photo:
-            if is_photo_message:
-                 media = InputMediaPhoto(media=photo, caption=text)
-                 await callback.message.edit_media(media=media, reply_markup=kb)
+        try:
+            if photo:
+                if is_photo_message:
+                    media = InputMediaPhoto(media=photo, caption=text)
+                    await callback.message.edit_media(media=media, reply_markup=kb)
+                else:
+                    await callback.message.delete()
+                    await callback.message.answer_photo(photo, caption=text, reply_markup=kb)
             else:
-                 await callback.message.delete()
-                 await callback.message.answer_photo(photo, caption=text, reply_markup=kb)
-        else:
-            if is_text_message:
-                 if callback.message.text != text:
-                     await callback.message.edit_text(text, reply_markup=kb)
-                 else:
-                     await callback.message.edit_reply_markup(reply_markup=kb)
-            else:
-                 await callback.message.delete()
-                 await callback.message.answer(text, reply_markup=kb)
+                if is_text_message:
+                    if callback.message.text != text:
+                        await callback.message.edit_text(text, reply_markup=kb)
+                    else:
+                        await callback.message.edit_reply_markup(reply_markup=kb)
+                else:
+                    await callback.message.delete()
+                    await callback.message.answer(text, reply_markup=kb)
+        except TelegramBadRequest as e:
+            err_msg = str(e).lower()
+            if "canceled by new edit" not in err_msg and "message is not modified" not in err_msg:
+                raise
     
     await callback.answer()
+
+
+async def developer_pagination_jump_start(callback: CallbackQuery, state: FSMContext):
+    """Запитує номер сторінки для швидкого переходу при натисканні на лічильник 2/54."""
+    if not await _ensure_developer(callback, allow_observer=True, allow_territorial=True):
+        return
+    try:
+        _, mid_str, day_str, page_str, ctype = callback.data.split(":")
+        material_id = int(mid_str)
+        day = int(day_str)
+        current_page = int(page_str)
+    except (ValueError, IndexError):
+        await callback.answer("Помилка навігації.")
+        return
+
+    material = await get_material_by_id(material_id)
+    if not material:
+        await callback.answer("Матеріал не знайдено.")
+        return
+
+    pages = _build_dev_material_pages(material, ctype)
+    total_pages = len(pages)
+    if total_pages <= 1:
+        await callback.answer()
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_pag_jump_cancel")]
+    ])
+    prompt_msg = await callback.message.answer(
+        f"🔢 Введіть номер сторінки (від <b>1</b> до <b>{total_pages}</b>):",
+        reply_markup=kb
+    )
+    await state.update_data(
+        jump_material_id=material_id,
+        jump_day=day,
+        jump_ctype=ctype,
+        jump_source_msg_id=callback.message.message_id,
+        jump_source_has_photo=bool(callback.message.photo),
+        jump_prompt_msg_id=prompt_msg.message_id,
+        jump_total_pages=total_pages,
+        jump_current_page=current_page
+    )
+    await state.set_state(DeveloperStates.waiting_page_jump)
+    await callback.answer()
+
+
+async def developer_pagination_jump_cancel(callback: CallbackQuery, state: FSMContext):
+    """Скасовує перехід на вказану сторінку."""
+    await state.set_state(None)
+    if callback.message:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+    await callback.answer("Скасовано")
+
+
+async def developer_pagination_jump_process(message: Message, state: FSMContext):
+    """Обробляє введений номер сторінки та перемикає матеріал на потрібну сторінку."""
+    data = await state.get_data()
+    total_pages = data.get("jump_total_pages", 1)
+    raw = (message.text or "").strip()
+
+    if not raw.isdigit():
+        await message.answer(f"⚠️ Введіть ціле число від <b>1</b> до <b>{total_pages}</b>.")
+        return
+
+    page_num = int(raw)
+    if not (1 <= page_num <= total_pages):
+        await message.answer(f"⚠️ Сторінка має бути від <b>1</b> до <b>{total_pages}</b>.")
+        return
+
+    material_id = data.get("jump_material_id")
+    day = data.get("jump_day")
+    ctype = data.get("jump_ctype", "text")
+    source_msg_id = data.get("jump_source_msg_id")
+    source_has_photo = data.get("jump_source_has_photo", False)
+    prompt_msg_id = data.get("jump_prompt_msg_id")
+
+    await state.set_state(None)
+
+    # Прибираємо повідомлення користувача і підказку
+    for mid in (message.message_id, prompt_msg_id):
+        if mid:
+            try:
+                await message.bot.delete_message(chat_id=message.chat.id, message_id=mid)
+            except Exception:
+                pass
+
+    material = await get_material_by_id(material_id)
+    if not material:
+        await message.answer("Матеріал не знайдено.")
+        return
+
+    pages = _build_dev_material_pages(material, ctype)
+    target_idx = page_num - 1
+    if not (0 <= target_idx < len(pages)):
+        await message.answer("⚠️ Сторінку не знайдено.")
+        return
+
+    is_obs = await is_observer_user(message.from_user.id) or await is_territorial_user(message.from_user.id)
+    kb = _get_dev_pagination_keyboard(target_idx, len(pages), material_id, day, ctype, is_observer=is_obs)
+    page_data = pages[target_idx]
+    text = page_data.get("text", "")
+    photo = page_data.get("photo")
+
+    if source_msg_id:
+        try:
+            if photo:
+                if source_has_photo:
+                    media = InputMediaPhoto(media=photo, caption=text)
+                    await message.bot.edit_message_media(chat_id=message.chat.id, message_id=source_msg_id, media=media, reply_markup=kb)
+                    return
+                await message.bot.delete_message(chat_id=message.chat.id, message_id=source_msg_id)
+            else:
+                if not source_has_photo:
+                    await message.bot.edit_message_text(chat_id=message.chat.id, message_id=source_msg_id, text=text, reply_markup=kb)
+                    return
+                await message.bot.delete_message(chat_id=message.chat.id, message_id=source_msg_id)
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e).lower():
+                return
+        except Exception:
+            pass
+
+    if photo:
+        await message.answer_photo(photo, caption=text, reply_markup=kb)
+    else:
+        await message.answer(text, reply_markup=kb)
 
 async def developer_materials_full_view(callback: CallbackQuery, state: FSMContext):
     """Надсилає повний текст матеріалу розробнику з пагінацією."""
@@ -8996,8 +9138,8 @@ async def developer_toggle_user_status(callback: CallbackQuery, state: FSMContex
     await update_user_role(user_id, new_status, actor_id=callback.from_user.id)
     await callback.answer(f"✅ Статус оновлено: {new_status}", show_alert=True)
 
-    callback.data = f"dev_user_modify:{user_id}:{ret_code}"
-    await developer_user_modify_menu(callback, state)
+    updated_cb = callback.model_copy(update={"data": f"dev_user_modify:{user_id}:{ret_code}"})
+    await developer_user_modify_menu(updated_cb, state)
 
 async def developer_change_fullname_start(callback: CallbackQuery, state: FSMContext):
     try:
@@ -11864,8 +12006,8 @@ async def dev_terr_process_city_set(callback: CallbackQuery, state: FSMContext):
     else:
         await callback.answer("⚠️ Помилка оновлення міста.", show_alert=True)
 
-    callback.data = f"dev_terr_edit_menu:{t_uid}"
-    await developer_territorial_edit_menu(callback, state)
+    updated_cb = callback.model_copy(update={"data": f"dev_terr_edit_menu:{t_uid}"})
+    await developer_territorial_edit_menu(updated_cb, state)
 
 
 async def dev_terr_toggle_type_handler(callback: CallbackQuery, state: FSMContext):
@@ -11890,8 +12032,8 @@ async def dev_terr_toggle_type_handler(callback: CallbackQuery, state: FSMContex
     else:
         await callback.answer("⚠️ Помилка оновлення напряму.", show_alert=True)
 
-    callback.data = f"dev_terr_edit_menu:{t_uid}"
-    await developer_territorial_edit_menu(callback, state)
+    updated_cb = callback.model_copy(update={"data": f"dev_terr_edit_menu:{t_uid}"})
+    await developer_territorial_edit_menu(updated_cb, state)
 
 # ADDING TERRITORIAL — 24H INVITE LINK WIZARD: city → type → transfer prompt → generate link
 async def developer_add_territorial_start(callback: CallbackQuery, state: FSMContext):
@@ -12702,6 +12844,9 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(developer_materials_view, lambda c: c.data and c.data.startswith("dev_mat_type|"))
     dp.callback_query.register(developer_materials_full_view, lambda c: c.data and c.data.startswith("dev_mat_full_view|"))
     dp.callback_query.register(developer_pagination_handler, lambda c: c.data and c.data.startswith("dev_pag:")) # NEW
+    dp.callback_query.register(developer_pagination_jump_start, lambda c: c.data and c.data.startswith("dev_pag_jump:"))
+    dp.callback_query.register(developer_pagination_jump_cancel, lambda c: c.data == "dev_pag_jump_cancel")
+    dp.message.register(developer_pagination_jump_process, DeveloperStates.waiting_page_jump)
     dp.callback_query.register(developer_material_fix_start, lambda c: c.data and c.data.startswith("dev_mat_fix:"))
     dp.callback_query.register(developer_material_delete_request, lambda c: c.data and c.data.startswith("dev_mat_del_req:"))
     dp.callback_query.register(developer_material_delete_confirm, lambda c: c.data and c.data.startswith("dev_mat_del_conf:"))
