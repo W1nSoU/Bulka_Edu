@@ -167,6 +167,9 @@ class DeveloperStates(StatesGroup):
     waiting_replace_range = State() # очікування діапазону сторінок для заміни, напр. "3-5"
     waiting_replace_array_content = State() # FSM цикл для заміни до команди ГОТОВО
     waiting_announce_decision = State() # рішення щодо розсилки повідомлень користувачам
+    waiting_announce_mode = State() # вибір режиму: вручну чи автоматично (і опціональний коментар)
+    waiting_announce_comment = State() # очікування короткого коментаря зверху в авто-режимі
+    waiting_announce_confirm = State() # превʼю та підтвердження перед стартом розсилки
     # Стани для оповіщення про зміни
     waiting_notify_decision = State()
     waiting_notify_message = State()
@@ -4376,11 +4379,29 @@ async def developer_materials_select_day(callback: CallbackQuery, state: FSMCont
     await state.update_data(edit_role=role, edit_role_index=role_index)
     
     kb = await _build_dev_days_picker_keyboard(role, "dev_mat_day", "dev_materials_menu", page=0)
+    is_obs = await is_observer_user(callback.from_user.id) or await is_territorial_user(callback.from_user.id)
+    draft_hint = ""
+    if not is_obs:
+        from database.material_notifications import get_draft_items
+        draft_items = await get_draft_items(callback.from_user.id, role)
+        if draft_items:
+            draft_count = len(draft_items)
+            draft_hint = f"\n\n📥 <i>У чернетці накопичено змін: <b>{draft_count}</b> стор.</i>"
+            draft_rows = [
+                [InlineKeyboardButton(text=f"📢 Оголосити накопичені зміни ({draft_count} стор.)", callback_data="dev_draft_announce")],
+                [InlineKeyboardButton(text=f"🗑 Очистити чернетку ({draft_count} стор.)", callback_data="dev_draft_clear")],
+            ]
+            # Вставляємо перед останньою кнопкою «Назад»
+            if kb.inline_keyboard:
+                kb = InlineKeyboardMarkup(inline_keyboard=kb.inline_keyboard[:-1] + draft_rows + [kb.inline_keyboard[-1]])
+            else:
+                kb = InlineKeyboardMarkup(inline_keyboard=draft_rows)
     
     await _edit_or_answer(
         callback.message,
         f"📝 <b>Редагування матеріалів</b>\n\n"
-        f"Посада: <b>{role}</b>\n\n"
+        f"Посада: <b>{role}</b>"
+        f"{draft_hint}\n\n"
         f"Оберіть день:",
         reply_markup=kb
     )
@@ -4665,14 +4686,21 @@ async def developer_process_complement_content(message: Message, state: FSMConte
     
     await message.answer(f"✅ Матеріал успішно доповнено! Нова сторінка додана на позицію {target_page + 1}.")
     
-    # Move to notification decision
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Оголосити зараз", callback_data="dev_notify:now")],
-        [InlineKeyboardButton(text="📥 Обʼєднати з наступним", callback_data="dev_notify:merge")],
-        [InlineKeyboardButton(text="🔇 Не оголошувати", callback_data="dev_notify:none")]
-    ])
-    await message.answer("Сповістити користувачів про зміни в матеріалі?", reply_markup=kb)
-    await state.set_state(DeveloperStates.waiting_announce_decision)
+    role = data.get("edit_role") or material.get("role") or ""
+    day = data.get("edit_day") or material.get("day") or 1
+    change_item = dict(new_page)
+    change_item["change_type"] = "added"
+    await _prompt_material_change_announcement(
+        message,
+        message.from_user.id,
+        state,
+        role=role,
+        day=day,
+        content_type="text",
+        change_items=[change_item],
+        back_callback="dev_mat_type|text",
+        use_edit=False,
+    )
 
 async def developer_process_insert_mode(callback: CallbackQuery, state: FSMContext):
     mode = callback.data.split(":")[1]
@@ -4748,14 +4776,20 @@ async def developer_process_insert_array_done(callback: CallbackQuery, state: FS
     
     await callback.message.answer(f"✅ Успішно додано {len(insert_array)} сторінок!")
     
-    # Move to notification decision
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Оголосити зараз", callback_data="dev_notify:now")],
-        [InlineKeyboardButton(text="📥 Обʼєднати з наступним", callback_data="dev_notify:merge")],
-        [InlineKeyboardButton(text="🔇 Не оголошувати", callback_data="dev_notify:none")]
-    ])
-    await _edit_or_answer(callback.message, "Сповістити користувачів про зміни в матеріалі?", reply_markup=kb)
-    await state.set_state(DeveloperStates.waiting_announce_decision)
+    role = data.get("edit_role") or material.get("role") or ""
+    day = data.get("edit_day") or material.get("day") or 1
+    change_items = [{**p, "change_type": "added"} for p in insert_array]
+    await _prompt_material_change_announcement(
+        callback.message,
+        callback.from_user.id,
+        state,
+        role=role,
+        day=day,
+        content_type="text",
+        change_items=change_items,
+        back_callback="dev_mat_type|text",
+        use_edit=True,
+    )
     await callback.answer()
 
 async def developer_material_replace_range_start(callback: CallbackQuery, state: FSMContext):
@@ -4832,60 +4866,538 @@ async def developer_process_replace_array_done(callback: CallbackQuery, state: F
     
     await callback.message.answer(f"✅ Успішно замінено діапазон на {len(replace_array)} нових сторінок!")
     
-    # Move to notification decision
+    role = data.get("edit_role") or material.get("role") or ""
+    day = data.get("edit_day") or material.get("day") or 1
+    change_items = [{**p, "change_type": "modified"} for p in replace_array]
+    await _prompt_material_change_announcement(
+        callback.message,
+        callback.from_user.id,
+        state,
+        role=role,
+        day=day,
+        content_type="text",
+        change_items=change_items,
+        back_callback="dev_mat_type|text",
+        use_edit=True,
+    )
+    await callback.answer()
+
+
+async def _replace_with_text(message: Message, text: str, reply_markup=None) -> Message:
+    """Коректно переходить з медіа-повідомлення (фото/відео) назад на текстове меню."""
+    if message.photo or message.video or message.document:
+        new_msg = await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return new_msg
+    return await _edit_or_answer(message, text, reply_markup=reply_markup)
+
+
+async def _prompt_material_change_announcement(
+    target_message: Message,
+    admin_id: int,
+    state: FSMContext,
+    *,
+    role: str,
+    day: int,
+    content_type: str,
+    change_items: list[dict],
+    back_callback: str = "dev_materials_menu",
+    use_edit: bool = False,
+) -> None:
+    """Єдина точка запиту Адміністратору про оголошення оновлення матеріалів."""
+    from database.material_notifications import get_draft_items
+    from bot.services.wave_broadcaster import normalize_change_page
+
+    norm_items = []
+    for raw in (change_items or []):
+        item = normalize_change_page(raw, default_day=day, default_change_type="modified")
+        item["day"] = int(raw.get("day", day)) if isinstance(raw, dict) else day
+        item["source_type"] = str(raw.get("source_type") or content_type) if isinstance(raw, dict) else content_type
+        norm_items.append(item)
+
+    if not norm_items:
+        norm_items = [{
+            "text": f"Оновлено навчальні матеріали ({content_type}, День {day})",
+            "change_type": "modified",
+            "day": day,
+            "source_type": content_type,
+        }]
+
+    existing_draft = await get_draft_items(admin_id, role)
+
+    await state.update_data(
+        ann_role=role,
+        ann_day=day,
+        ann_content_type=content_type,
+        ann_current_items=norm_items,
+        ann_back_callback=back_callback,
+    )
+    await state.set_state(DeveloperStates.waiting_announce_decision)
+
+    draft_note = ""
+    if existing_draft:
+        draft_note = (
+            f"\n📥 У чернетці по цій посаді вже є <b>{len(existing_draft)}</b> стор. "
+            f"(при «Оголосити зараз» вони обʼєднаються автоматично)."
+        )
+
+    prompt_text = (
+        f"📢 <b>Оголошуємо зміну навчальних матеріалів?</b>\n\n"
+        f"📚 Посада: <b>{role}</b>\n"
+        f"📅 День: <b>{day}</b>\n"
+        f"📄 Змінено/додано сторінок зараз: <b>{len(norm_items)}</b>"
+        f"{draft_note}"
+    )
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Оголосити зараз", callback_data="dev_notify:now")],
         [InlineKeyboardButton(text="📥 Обʼєднати з наступним", callback_data="dev_notify:merge")],
-        [InlineKeyboardButton(text="🔇 Не оголошувати", callback_data="dev_notify:none")]
+        [InlineKeyboardButton(text="🔇 Не оголошувати", callback_data="dev_notify:none")],
     ])
-    await _edit_or_answer(callback.message, "Сповістити користувачів про зміни в матеріалі?", reply_markup=kb)
-    await state.set_state(DeveloperStates.waiting_announce_decision)
-    await callback.answer()
+
+    if use_edit:
+        await _replace_with_text(target_message, prompt_text, reply_markup=kb)
+    else:
+        await target_message.answer(prompt_text, reply_markup=kb, parse_mode="HTML")
+
+
+async def _show_announce_mode_screen(message: Message, state: FSMContext, *, use_edit: bool = True) -> None:
+    """Показує Адміністратору вибір: написати оголошення вручну або показати зміни автоматично."""
+    data = await state.get_data()
+    role = data.get("ann_role") or data.get("edit_role") or ""
+    merged_items = data.get("ann_merged_items") or data.get("ann_current_items") or []
+    pages_count = len(merged_items)
+
+    text = (
+        f"📢 <b>Як саме оголосити оновлення?</b>\n\n"
+        f"📚 Посада: <b>{role}</b>\n"
+        f"📄 Накопичено сторінок для показу: <b>{pages_count}</b>\n\n"
+        f"• <b>✍️ Написати самостійно</b> — ви вводите власний текст (або фото з підписом).\n"
+        f"• <b>🤖 Автоматично</b> — бот покаже всі додані/змінені/видалені сторінки з пагінацією."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Написати самостійно", callback_data="dev_ann_mode:manual")],
+        [InlineKeyboardButton(text=f"🤖 Автоматично ({pages_count} стор.)", callback_data="dev_ann_mode:auto")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_ann_cancel")],
+    ])
+    await state.set_state(DeveloperStates.waiting_announce_mode)
+    if use_edit:
+        await _replace_with_text(message, text, reply_markup=kb)
+    else:
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+async def _show_announce_confirm_screen(message: Message, state: FSMContext, *, use_edit: bool = True) -> None:
+    """Показує екран превʼю та підтвердження перед стартом хвильової розсилки."""
+    from database.material_notifications import get_recipients_preview_stats
+
+    data = await state.get_data()
+    role = data.get("ann_role") or ""
+    mode = data.get("ann_mode") or "auto"
+    final_pages = data.get("ann_final_pages") or []
+    description = data.get("ann_description") or ""
+
+    stats = await get_recipients_preview_stats(role)
+    total = stats["total"]
+    waves = stats["waves"]
+    est_minutes = max(0, (waves - 1) * 4) if waves > 0 else 0
+
+    mode_label = "✍️ Вручну" if mode == "manual" else "🤖 Автоматично (пагінація змін)"
+    short_desc = description if len(description) <= 220 else description[:217] + "..."
+
+    text = (
+        f"🚀 <b>Підтвердження розсилки оновлення</b>\n"
+        f"───────────────────\n"
+        f"📚 Посада: <b>{role}</b>\n"
+        f"⚙️ Режим: <b>{mode_label}</b>\n"
+        f"📄 Сторінок у розсилці: <b>{len(final_pages)}</b>\n"
+        f"📝 Опис: <i>{short_desc}</i>\n\n"
+        f"👥 <b>Отримувачі: {total}</b>\n"
+        f"   • Працівники: {stats['workers']}\n"
+        f"   • Стажери: {stats['interns']}\n"
+        f"   • Керівники: {stats['managers']}\n"
+        f"   • Територіали напрямку: {stats['territorials']}\n\n"
+        f"🌊 <b>Хвиль: {waves}</b> (по 40 осіб кожні 4 хв"
+        + (f", ~{est_minutes} хв до завершення" if est_minutes > 0 else ", 1 хвиля одразу")
+        + ")\n"
+        f"🔘 Кожен користувач отримає кнопку «Зі змінами ознайомлений/а»"
+        + (" на останній сторінці." if len(final_pages) > 1 else ".")
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👀 Переглянути як користувач", callback_data="dev_ann_preview:0")],
+        [InlineKeyboardButton(text="🚀 Запустити розсилку", callback_data="dev_ann_confirm_send")],
+        [InlineKeyboardButton(text="⬅️ Змінити режим", callback_data="dev_ann_back_mode")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_ann_cancel")],
+    ])
+    await state.set_state(DeveloperStates.waiting_announce_confirm)
+    if use_edit:
+        await _replace_with_text(message, text, reply_markup=kb)
+    else:
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
 
 async def developer_process_notify_decision(callback: CallbackQuery, state: FSMContext):
+    """Обробляє вибір після збереження змін: Оголосити зараз / Обʼєднати / Не оголошувати."""
+    if not await _ensure_developer(callback):
+        return
     decision = callback.data.split(":")[1]
-    
+    data = await state.get_data()
+    role = data.get("ann_role") or data.get("edit_role") or data.get("edit_video_role") or data.get("edit_photo_role") or ""
+    day = data.get("ann_day") or data.get("edit_day") or data.get("edit_video_day") or data.get("edit_photo_day") or 1
+    content_type = data.get("ann_content_type") or data.get("content_type") or "text"
+    current_items = data.get("ann_current_items") or []
+    back_cb = data.get("ann_back_callback") or "dev_materials_menu"
+
     if decision == "now":
-        from database.material_notifications import create_material_change_event, create_recipients_for_event
-        from bot.services.wave_broadcaster import start_event_wave_broadcast
-        
-        data = await state.get_data()
-        role = data.get("edit_role") or data.get("edit_video_role") or data.get("edit_photo_role") or data.get("test_role") or "ALL"
-        day = data.get("edit_day") or data.get("edit_video_day") or data.get("edit_photo_day") or data.get("test_day") or 1
-        content_type = data.get("content_type") or "text"
-        pages = data.get("insert_array") or data.get("replace_array") or data.get("pages")
-        if not pages:
-            material_id = data.get("material_id")
-            if material_id:
-                mat = await get_material_by_id(material_id)
-                if mat and mat.get("content"):
-                    try:
-                        pages = json.loads(mat["content"])
-                    except Exception:
-                        pages = [mat["content"]]
-        if not pages:
-            pages = [f"Оновлено навчальні матеріали ({content_type})"]
+        from database.material_notifications import get_draft_items
+        existing_draft = await get_draft_items(callback.from_user.id, role) if role else []
+        merged_items = list(existing_draft) + list(current_items)
+        if not merged_items:
+            merged_items = [{
+                "text": f"Оновлено навчальні матеріали ({content_type}, День {day})",
+                "change_type": "modified",
+                "day": day,
+                "source_type": content_type,
+            }]
+        await state.update_data(
+            ann_role=role,
+            ann_day=day,
+            ann_content_type=content_type,
+            ann_merged_items=merged_items,
+        )
+        await _show_announce_mode_screen(callback.message, state, use_edit=True)
+        await callback.answer()
+        return
 
-        description = f"Оновлення матеріалів {content_type} (День {day})"
-        event_id = await create_material_change_event(role, day, content_type, description, pages)
-        recipients_count = await create_recipients_for_event(event_id, role)
+    if decision == "merge":
+        from database.material_notifications import append_draft_items
+        total_saved = await append_draft_items(callback.from_user.id, role, current_items)
+        await state.set_state(None)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"📢 Оголосити зараз ({total_saved} стор.)", callback_data="dev_draft_announce")],
+            [InlineKeyboardButton(text="⬅️ Продовжити редагування", callback_data=back_cb)],
+            [InlineKeyboardButton(text="🏠 До Панелі Адміністратора", callback_data="developer_menu")],
+        ])
+        await _replace_with_text(
+            callback.message,
+            f"📥 <b>Зміни додано до чернетки!</b>\n\n"
+            f"📚 Посада: <b>{role}</b>\n"
+            f"📄 Всього накопичено в чернетці: <b>{total_saved}</b> стор.\n\n"
+            f"Коли завершите всі правки, натисніть «Оголосити зараз» — бот обʼєднає їх в одне оголошення.",
+            reply_markup=kb,
+        )
+        await callback.answer()
+        return
+
+    # decision == "none"
+    await state.set_state(None)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Повернутись", callback_data=back_cb)],
+        [InlineKeyboardButton(text="🏠 До Панелі Адміністратора", callback_data="developer_menu")],
+    ])
+    await _replace_with_text(
+        callback.message,
+        "🔇 <b>Зміни збережено без оголошення.</b>",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+async def developer_draft_announce(callback: CallbackQuery, state: FSMContext):
+    """Відкриває вибір режиму оголошення для накопиченої чернетки по поточній посаді."""
+    if not await _ensure_developer(callback):
+        return
+    from database.material_notifications import get_draft_items
+
+    data = await state.get_data()
+    role = data.get("ann_role") or data.get("edit_role") or ""
+    role_index = data.get("edit_role_index")
+    if not role:
+        await callback.answer("Посаду не визначено. Оберіть її в меню матеріалів.", show_alert=True)
+        return
+
+    draft_items = await get_draft_items(callback.from_user.id, role)
+    if not draft_items:
+        await callback.answer("Чернетка змін порожня.", show_alert=True)
+        return
+
+    last_day = draft_items[-1].get("day", 1) if isinstance(draft_items[-1], dict) else 1
+    back_cb = f"dev_mat_role|{role_index}" if role_index is not None else "dev_materials_menu"
+    await state.update_data(
+        ann_role=role,
+        ann_day=last_day,
+        ann_content_type="mixed",
+        ann_current_items=[],
+        ann_merged_items=draft_items,
+        ann_back_callback=back_cb,
+    )
+    await _show_announce_mode_screen(callback.message, state, use_edit=True)
+    await callback.answer()
+
+
+async def developer_draft_clear(callback: CallbackQuery, state: FSMContext):
+    """Очищає накопичену чернетку змін по поточній посаді."""
+    if not await _ensure_developer(callback):
+        return
+    from database.material_notifications import clear_draft
+
+    data = await state.get_data()
+    role = data.get("edit_role") or data.get("ann_role") or ""
+    role_index = data.get("edit_role_index")
+    if role:
+        await clear_draft(callback.from_user.id, role)
+    await callback.answer("🗑 Чернетку змін очищено.", show_alert=True)
+
+    if role_index is not None:
+        mock_cb = callback.model_copy(update={"data": f"dev_mat_role|{role_index}"})
+        await developer_materials_select_day(mock_cb, state)
+    else:
+        await developer_materials_menu(callback)
+
+
+async def developer_announce_mode_select(callback: CallbackQuery, state: FSMContext):
+    """Обробляє вибір режиму оголошення: manual або auto."""
+    if not await _ensure_developer(callback):
+        return
+    mode = callback.data.split(":")[1]
+    data = await state.get_data()
+    role = data.get("ann_role") or ""
+    merged_items = data.get("ann_merged_items") or []
+
+    if mode == "manual":
+        await state.update_data(ann_mode="manual")
+        await state.set_state(DeveloperStates.waiting_notify_message)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад до вибору режиму", callback_data="dev_ann_back_mode")],
+            [InlineKeyboardButton(text="❌ Скасувати", callback_data="dev_ann_cancel")],
+        ])
+        await _replace_with_text(
+            callback.message,
+            f"✍️ <b>Ручне оголошення про зміни</b>\n\n"
+            f"📚 Посада: <b>{role}</b>\n\n"
+            f"Надішліть текст оголошення або фото з підписом — саме це побачать користувачі.\n\n"
+            f"<b>Приклад:</b>\n"
+            f"<i>🔄 Оновлено навчальний матеріал:\n"
+            f"• Додано інструкцію прийому яєць\n"
+            f"• Оновлено стандарти викладки</i>",
+            reply_markup=kb,
+        )
+        await callback.answer()
+        return
+
+    # mode == "auto"
+    await state.update_data(ann_mode="auto")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Додати короткий коментар зверху", callback_data="dev_ann_comment:add")],
+        [InlineKeyboardButton(text="⏭ Без коментаря (до превʼю)", callback_data="dev_ann_comment:skip")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_ann_back_mode")],
+    ])
+    await _replace_with_text(
+        callback.message,
+        f"🤖 <b>Автоматичне оголошення ({len(merged_items)} стор.)</b>\n\n"
+        f"📚 Посада: <b>{role}</b>\n\n"
+        f"Бот покаже всі додані, змінені або видалені сторінки з пагінацією.\n"
+        f"Хочете додати короткий коментар на першій сторінці зверху (що саме змінилось)?",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+async def developer_announce_comment_choice(callback: CallbackQuery, state: FSMContext):
+    """Вибір: додати короткий коментар зверху в авто-режимі чи одразу перейти до превʼю."""
+    if not await _ensure_developer(callback):
+        return
+    choice = callback.data.split(":")[1]
+    data = await state.get_data()
+
+    if choice == "add":
+        await state.set_state(DeveloperStates.waiting_announce_comment)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏭ Пропустити коментар", callback_data="dev_ann_comment:skip")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_ann_back_mode")],
+        ])
+        await _replace_with_text(
+            callback.message,
+            "💬 <b>Короткий коментар зверху</b>\n\n"
+            "Напишіть 1–2 речення, які користувачі побачать на першій сторінці перед доданими/зміненими матеріалами:",
+            reply_markup=kb,
+        )
+        await callback.answer()
+        return
+
+    # choice == "skip"
+    from bot.services.wave_broadcaster import summarize_change_pages
+    merged_items = [dict(p) for p in (data.get("ann_merged_items") or [])]
+    if merged_items and "comment" in merged_items[0]:
+        merged_items[0].pop("comment", None)
+    description = summarize_change_pages(merged_items)
+    await state.update_data(
+        ann_mode="auto",
+        ann_final_pages=merged_items,
+        ann_description=description,
+    )
+    await _show_announce_confirm_screen(callback.message, state, use_edit=True)
+    await callback.answer()
+
+
+async def developer_process_announce_comment(message: Message, state: FSMContext):
+    """Зберігає введений коментар зверху для авто-режиму та відкриває превʼю."""
+    comment = (message.text or message.caption or "").strip()
+    if not comment:
+        await message.answer("❌ Коментар не може бути порожнім. Напишіть текст або натисніть «Пропустити коментар».")
+        return
+
+    data = await state.get_data()
+    merged_items = [dict(p) for p in (data.get("ann_merged_items") or [])]
+    if merged_items:
+        merged_items[0]["comment"] = comment
+
+    await state.update_data(
+        ann_mode="auto",
+        ann_final_pages=merged_items,
+        ann_description=comment[:220],
+    )
+    await _show_announce_confirm_screen(message, state, use_edit=False)
+
+
+async def developer_announce_back_mode(callback: CallbackQuery, state: FSMContext):
+    """Повернення на екран вибору режиму (Вручну / Автоматично)."""
+    if not await _ensure_developer(callback):
+        return
+    await _show_announce_mode_screen(callback.message, state, use_edit=True)
+    await callback.answer()
+
+
+async def developer_announce_preview_page(callback: CallbackQuery, state: FSMContext):
+    """Інтерактивне превʼю сторінок очима користувача перед розсилкою."""
+    if not await _ensure_developer(callback):
+        return
+    from bot.services.wave_broadcaster import edit_or_replace_change_page, normalize_change_pages
+
+    try:
+        page_idx = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        page_idx = 0
+
+    data = await state.get_data()
+    role = data.get("ann_role") or ""
+    day = data.get("ann_day") or 1
+    final_pages = normalize_change_pages(data.get("ann_final_pages") or [], default_day=day)
+    total_pages = len(final_pages)
+    page_idx = max(0, min(page_idx, total_pages - 1))
+
+    kb_rows = []
+    if total_pages > 1:
+        nav_row = []
+        if page_idx > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_ann_preview:{page_idx - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {page_idx + 1}/{total_pages}", callback_data="ignore"))
+        if page_idx < total_pages - 1:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_ann_preview:{page_idx + 1}"))
+        kb_rows.append(nav_row)
+
+    if page_idx == total_pages - 1 or total_pages <= 1:
+        kb_rows.append([InlineKeyboardButton(text="🔘 Зі змінами ознайомлений/а (превʼю)", callback_data="ignore")])
+
+    kb_rows.append([InlineKeyboardButton(text="⬅️ До підтвердження", callback_data="dev_ann_preview_back")])
+
+    await edit_or_replace_change_page(
+        callback.message,
+        role=role,
+        default_day=day,
+        pages=final_pages,
+        page_idx=page_idx,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
+        header_title="👀 <b>ПРЕВʼЮ ДЛЯ КОРИСТУВАЧА</b>\n📢 <b>Оновлення навчальних матеріалів</b>",
+    )
+    await callback.answer()
+
+
+async def developer_announce_preview_back(callback: CallbackQuery, state: FSMContext):
+    """Повернення з превʼю сторінок до екрану підтвердження."""
+    if not await _ensure_developer(callback):
+        return
+    await _show_announce_confirm_screen(callback.message, state, use_edit=True)
+    await callback.answer()
+
+
+async def developer_announce_confirm_send(callback: CallbackQuery, state: FSMContext):
+    """Створює подію, формує отримувачів, очищає чернетку та запускає хвильову розсилку (40 осіб / 4 хв)."""
+    if not await _ensure_developer(callback):
+        return
+    from database.material_notifications import (
+        WAVE_BATCH_SIZE,
+        create_material_change_event,
+        create_recipients_for_event,
+        clear_draft,
+    )
+    from bot.services.wave_broadcaster import start_event_wave_broadcast
+
+    data = await state.get_data()
+    role = data.get("ann_role") or ""
+    day = data.get("ann_day") or 1
+    content_type = data.get("ann_content_type") or "text"
+    final_pages = data.get("ann_final_pages") or []
+    description = data.get("ann_description") or f"Оновлення матеріалів (День {day})"
+    back_cb = data.get("ann_back_callback") or "dev_materials_menu"
+
+    if not role or not final_pages:
+        await callback.answer("❌ Дані для розсилки втрачено. Почніть знову.", show_alert=True)
+        await state.clear()
+        return
+
+    event_id = await create_material_change_event(role, day, content_type, description, final_pages)
+    recipients_count = await create_recipients_for_event(event_id, role)
+    await clear_draft(callback.from_user.id, role)
+
+    if recipients_count > 0:
         start_event_wave_broadcast(callback.bot, event_id)
-
-        waves_total = max(1, (recipients_count + 39) // 40)
-        await callback.message.answer(
+        waves_total = max(1, (recipients_count + WAVE_BATCH_SIZE - 1) // WAVE_BATCH_SIZE)
+        status_block = (
             f"📢 <b>Хвильову розсилку запущено!</b>\n\n"
             f"📚 Посада: <b>{role}</b> | 📅 День: <b>{day}</b>\n"
+            f"📄 Сторінок: <b>{len(final_pages)}</b>\n"
             f"👥 Всього отримувачів: <b>{recipients_count}</b>\n"
-            f"🌊 Кількість хвиль: <b>{waves_total}</b> (по 40 осіб на годину)\n"
+            f"🌊 Хвиль: <b>{waves_total}</b> (по {WAVE_BATCH_SIZE} осіб кожні 4 хвилини)\n"
             f"⏳ Першу хвилю надіслано негайно."
         )
-    elif decision == "merge":
-        await callback.message.answer("📥 Зміни збережено для наступного оголошення.")
-    elif decision == "none":
-        await callback.message.answer("🔇 Зміни збережено без оголошення.")
-        
-    await state.clear()
-    await developer_material_menu_back(callback, state)
+    else:
+        status_block = (
+            f"⚠️ <b>Подію створено, але активних отримувачів не знайдено.</b>\n\n"
+            f"📚 Посада: <b>{role}</b> | 📅 День: <b>{day}</b>"
+        )
+
+    await state.set_state(None)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Аналітика ознайомлення", callback_data=f"dev_ack_ev:{event_id}:0")],
+        [InlineKeyboardButton(text="⬅️ Повернутись", callback_data=back_cb)],
+        [InlineKeyboardButton(text="🏠 До Панелі Адміністратора", callback_data="developer_menu")],
+    ])
+    await _replace_with_text(callback.message, status_block, reply_markup=kb)
+    await callback.answer()
+
+
+async def developer_announce_cancel(callback: CallbackQuery, state: FSMContext):
+    """Скасовує запуск оголошення без втрати збереженої чернетки."""
+    if not await _ensure_developer(callback):
+        return
+    data = await state.get_data()
+    back_cb = data.get("ann_back_callback") or "dev_materials_menu"
+    await state.set_state(None)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Повернутись", callback_data=back_cb)],
+        [InlineKeyboardButton(text="🏠 До Панелі Адміністратора", callback_data="developer_menu")],
+    ])
+    await _replace_with_text(
+        callback.message,
+        "❌ <b>Оголошення скасовано.</b>\n<i>Зміни в матеріалах залишились збереженими (якщо була чернетка — вона також збережена).</i>",
+        reply_markup=kb,
+    )
+    await callback.answer()
 
 async def developer_material_delete_request(callback: CallbackQuery):
     """Asks for confirmation before deleting a page."""
@@ -4911,7 +5423,7 @@ async def developer_material_delete_request(callback: CallbackQuery):
     )
     await callback.answer()
 
-async def developer_material_delete_confirm(callback: CallbackQuery):
+async def developer_material_delete_confirm(callback: CallbackQuery, state: FSMContext):
     """Performs the actual deletion of a page."""
     if not await _ensure_developer(callback): return
     
@@ -4931,23 +5443,30 @@ async def developer_material_delete_confirm(callback: CallbackQuery):
     pages = parse_material_content(material.get("content", "[]"))
     
     if 0 <= page < len(pages):
-        pages.pop(page)
+        removed_page = pages.pop(page)
         
         # Save updated content
         new_content_json = json.dumps(pages, ensure_ascii=False)
         await update_material_content(material_id, new_content_json)
         
         await callback.answer("✅ Сторінку видалено!", show_alert=True)
-        
-        if not pages:
-            # If no pages left, go back to material view
-            await developer_materials_view(callback, None)
-        else:
-            # Show the new page at the same index (or the last one if we deleted the end)
-            new_page_idx = page if page < len(pages) else len(pages) - 1
-            # Mock callback to trigger pagination view
-            callback = callback.model_copy(update={"data": f"dev_pag:{material_id}:{day}:{new_page_idx}:{ctype}"})
-            await developer_pagination_handler(callback)
+
+        role = material.get("role") or (await state.get_data()).get("edit_role") or ""
+        back_cb = f"dev_pag:{material_id}:{day}:{page if page < len(pages) else max(0, len(pages) - 1)}:{ctype}" if pages else f"dev_mat_type|{ctype}"
+        deleted_item = dict(removed_page) if isinstance(removed_page, dict) else {"text": str(removed_page)}
+        deleted_item["change_type"] = "deleted"
+
+        await _prompt_material_change_announcement(
+            callback.message,
+            callback.from_user.id,
+            state,
+            role=role,
+            day=day,
+            content_type=ctype,
+            change_items=[deleted_item],
+            back_callback=back_cb,
+            use_edit=True,
+        )
     else:
         await callback.answer("Помилка: сторінка вже не існує.")
 
@@ -5082,15 +5601,34 @@ async def developer_process_fix_page(message: Message, state: FSMContext):
             await message.answer(text_display, reply_markup=kb)
     else:
         await message.answer(text_display, reply_markup=kb)
-        
-    await state.clear()
+
+    mat_obj = await get_material_by_id(material_id)
+    role = (mat_obj.get("role") if mat_obj else None) or data.get("edit_role") or data.get("edit_photo_role") or ""
+    fixed_item = dict(page_data)
+    fixed_item["change_type"] = "modified"
+    await _prompt_material_change_announcement(
+        message,
+        message.from_user.id,
+        state,
+        role=role,
+        day=day,
+        content_type=ctype,
+        change_items=[fixed_item],
+        back_callback=f"dev_pag:{material_id}:{day}:{page}:{ctype}",
+        use_edit=False,
+    )
 
 
 async def developer_material_menu_back(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     ctype = data.get("edit_type", "text")
+    role = data.get("edit_role")
     await state.set_state(None)
-    await developer_materials_view(callback, state) # Go back to material view
+    if role:
+        mock_cb = callback.model_copy(update={"data": f"dev_mat_type|{ctype}"})
+        await developer_materials_view(mock_cb, state)
+    else:
+        await developer_materials_menu(callback)
 
 def _get_dev_pagination_keyboard(current_page, total_pages, material_id, day, content_type, is_observer: bool = False):
     buttons = []
@@ -5497,6 +6035,7 @@ async def _finalize_material_update(message: Message, state: FSMContext, new_con
     
     data = await state.get_data()
     material_id = data.get("edit_material_id") # Get the original material ID
+    was_existing = bool(material_id)
 
     # Зберігаємо новий контент у стейті для подальшого збереження
     await state.update_data(
@@ -5513,10 +6052,21 @@ async def _finalize_material_update(message: Message, state: FSMContext, new_con
             f"✅ <b>Матеріал оновлено!</b>\n\n"
             f"Посада: {role}\n"
             f"День: {day}\n"
-            f"Тип: {content_type}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]
-            ])
+            f"Тип: {content_type}"
+        )
+        parts = parse_material_content(new_content)
+        ch_type = "modified" if was_existing else "added"
+        change_items = [{**p, "change_type": ch_type} for p in parts]
+        await _prompt_material_change_announcement(
+            message,
+            message.from_user.id,
+            state,
+            role=role,
+            day=day,
+            content_type="text",
+            change_items=change_items,
+            back_callback="dev_mat_type|text",
+            use_edit=False,
         )
     else:
         await message.answer(
@@ -5525,8 +6075,7 @@ async def _finalize_material_update(message: Message, state: FSMContext, new_con
                 [InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]
             ])
         )
-    
-    await state.clear()
+        await state.clear()
 
 
 async def developer_process_material_video(message: Message, state: FSMContext):
@@ -5538,6 +6087,7 @@ async def developer_process_material_video(message: Message, state: FSMContext):
 
     data = await state.get_data()
     material_id = data.get("edit_material_id")
+    was_existing = bool(material_id)
     await state.update_data(
         pending_content=new_url,
         pending_content_type="video",
@@ -5548,13 +6098,23 @@ async def developer_process_material_video(message: Message, state: FSMContext):
     
     if success:
         await message.answer(
-            f"✅ <b>Матеріал оновлено!</b>\n\nПосада: {role}\nДень: {day}\nТип: {content_type}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]])
+            f"✅ <b>Матеріал оновлено!</b>\n\nПосада: {role}\nДень: {day}\nТип: {content_type}"
+        )
+        ch_type = "modified" if was_existing else "added"
+        await _prompt_material_change_announcement(
+            message,
+            message.from_user.id,
+            state,
+            role=role,
+            day=day,
+            content_type="video",
+            change_items=[{"text": f"🎥 Відео-матеріал:\n{new_url}", "change_type": ch_type}],
+            back_callback="dev_mat_type|video",
+            use_edit=False,
         )
     else:
         await message.answer("❌ Помилка збереження матеріалу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]]))
-    
-    await state.clear()
+        await state.clear()
 
 
 async def _finalize_video_update(message: Message, state: FSMContext, video_file_ids: list[str]):
@@ -5565,6 +6125,7 @@ async def _finalize_video_update(message: Message, state: FSMContext, video_file
 
     data = await state.get_data()
     material_id = data.get("edit_video_material_id")
+    was_existing = bool(material_id)
     await state.update_data(
         pending_content=json.dumps(video_file_ids),
         pending_content_type="video_files",
@@ -5575,13 +6136,27 @@ async def _finalize_video_update(message: Message, state: FSMContext, video_file
     
     if success:
         await message.answer(
-            f"✅ <b>Матеріал оновлено!</b>\n\nПосада: {role}\nДень: {day}\nТип: {content_type}\nЗавантажено файлів: {len(video_file_ids)}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]])
+            f"✅ <b>Матеріал оновлено!</b>\n\nПосада: {role}\nДень: {day}\nТип: {content_type}\nЗавантажено файлів: {len(video_file_ids)}"
+        )
+        ch_type = "modified" if was_existing else "added"
+        change_items = [
+            {"text": f"🎥 Відео {i + 1}", "video": fid, "change_type": ch_type}
+            for i, fid in enumerate(video_file_ids)
+        ]
+        await _prompt_material_change_announcement(
+            message,
+            message.from_user.id,
+            state,
+            role=role,
+            day=day,
+            content_type="video_files",
+            change_items=change_items,
+            back_callback=f"dev_video_day|{day}",
+            use_edit=False,
         )
     else:
         await message.answer("❌ Помилка збереження матеріалу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]]))
-    
-    await state.clear()
+        await state.clear()
 
 
 # ==================== Tests Editor ====================
@@ -6247,6 +6822,7 @@ async def _finalize_photo_update(message: Message, state: FSMContext, photo_file
     role = data.get("edit_photo_role", "")
     day = data.get("edit_photo_day", 1)
     material_id = data.get("edit_photo_material_id")
+    was_existing = bool(material_id)
 
     await state.update_data(
         pending_content=json.dumps(photo_file_ids),
@@ -6260,13 +6836,27 @@ async def _finalize_photo_update(message: Message, state: FSMContext, photo_file
     
     if success:
         await message.answer(
-            f"✅ <b>Матеріал оновлено!</b>\n\nПосада: {role}\nДень: {day}\nТип: {content_type}\nЗавантажено файлів: {len(photo_file_ids)}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]])
+            f"✅ <b>Матеріал оновлено!</b>\n\nПосада: {role}\nДень: {day}\nТип: {content_type}\nЗавантажено файлів: {len(photo_file_ids)}"
+        )
+        ch_type = "modified" if was_existing else "added"
+        change_items = [
+            {"text": f"🖼 Фото {i + 1}", "photo": fid, "change_type": ch_type}
+            for i, fid in enumerate(photo_file_ids)
+        ]
+        await _prompt_material_change_announcement(
+            message,
+            message.from_user.id,
+            state,
+            role=role,
+            day=day,
+            content_type="photo_files",
+            change_items=change_items,
+            back_callback=f"dev_photo_day|{day}",
+            use_edit=False,
         )
     else:
         await message.answer("❌ Помилка збереження матеріалу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]]))
-    
-    await state.clear()
+        await state.clear()
 
 
 async def developer_process_photo_uploads(message: Message, state: FSMContext):
@@ -6644,15 +7234,39 @@ async def notify_cancel(callback: CallbackQuery, state: FSMContext):
 
 
 async def process_notify_message(message: Message, state: FSMContext):
-    """Обробка тексту оповіщення та хвильова розсилка."""
-    notify_text = message.text.strip() if message.text else ""
-    if not notify_text:
-        await message.answer("❌ Текст оповіщення не може бути порожнім.")
+    """Обробка ручного оголошення (текст або фото з підписом) та перехід до превʼю/підтвердження."""
+    notify_text = (message.caption if message.caption is not None else (message.text or "")).strip()
+    photo_id = message.photo[-1].file_id if message.photo else None
+
+    if not notify_text and not photo_id:
+        await message.answer("❌ Надішліть текст оголошення або фото з підписом.")
         return
-    
-    # Спочатку зберігаємо матеріал
+
+    data = await state.get_data()
+
+    # Новий уніфікований флоу (матеріал вже збережено, показуємо екран превʼю та підтвердження)
+    if data.get("ann_role"):
+        day = data.get("ann_day") or 1
+        manual_page = {
+            "text": notify_text,
+            "change_type": "manual",
+            "day": day,
+            "source_type": "manual",
+        }
+        if photo_id:
+            manual_page["photo"] = photo_id
+
+        description = notify_text[:220] if notify_text else "Фото-оголошення"
+        await state.update_data(
+            ann_mode="manual",
+            ann_final_pages=[manual_page],
+            ann_description=description,
+        )
+        await _show_announce_confirm_screen(message, state, use_edit=False)
+        return
+
+    # Зворотна сумісність із застарілим потоком notify_yes (якщо викликано напряму)
     success, role, content_type, day = await _save_pending_material(state)
-    
     if not success:
         await message.answer(
             "❌ Помилка збереження матеріалу.",
@@ -6663,27 +7277,36 @@ async def process_notify_message(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    from database.material_notifications import create_material_change_event, create_recipients_for_event
+    from database.material_notifications import WAVE_BATCH_SIZE, create_material_change_event, create_recipients_for_event
     from bot.services.wave_broadcaster import start_event_wave_broadcast
 
-    event_id = await create_material_change_event(role, day, content_type, notify_text, [notify_text])
+    manual_page = {
+        "text": notify_text,
+        "change_type": "manual",
+        "day": day,
+        "source_type": "manual",
+    }
+    if photo_id:
+        manual_page["photo"] = photo_id
+    description = notify_text[:220] if notify_text else "Фото-оголошення"
+
+    event_id = await create_material_change_event(role, day, content_type, description, [manual_page])
     recipients_count = await create_recipients_for_event(event_id, role)
     start_event_wave_broadcast(message.bot, event_id)
-    waves_total = max(1, (recipients_count + 39) // 40)
-    
+    waves_total = max(1, (recipients_count + WAVE_BATCH_SIZE - 1) // WAVE_BATCH_SIZE) if recipients_count else 0
+
     await message.answer(
         f"✅ <b>Матеріал оновлено та хвильову розсилку запущено!</b>\n\n"
         f"📚 Посада: <b>{role}</b>\n"
         f"📅 День: <b>{day}</b>\n"
         f"📝 Тип: <b>{content_type}</b>\n\n"
         f"👥 Всього отримувачів: <b>{recipients_count}</b>\n"
-        f"🌊 Кількість хвиль: <b>{waves_total}</b> (по 40 осіб на годину)\n"
+        f"🌊 Кількість хвиль: <b>{waves_total}</b> (по {WAVE_BATCH_SIZE} осіб кожні 4 хвилини)\n"
         f"⏳ Першу хвилю надіслано негайно.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ До Панелі Адміністратора", callback_data="developer_menu")]
         ])
     )
-    
     await state.clear()
 
 
@@ -6817,7 +7440,7 @@ async def developer_ack_event_card_view(callback: CallbackQuery):
     )
 
     buttons = [
-        [InlineKeyboardButton(text="📝 Зміст змін", callback_data=f"dev_ack_changes:{event_id}:{page}")],
+        [InlineKeyboardButton(text="📝 Зміст змін", callback_data=f"dev_ack_changes:{event_id}:0")],
         [InlineKeyboardButton(text="📥 Вивантажити результати (XLSX)", callback_data=f"dev_ack_export_xlsx:{event_id}")]
     ]
 
@@ -6849,7 +7472,7 @@ async def developer_ack_event_card_view(callback: CallbackQuery):
 
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="dev_an_ack_menu")])
 
-    await _edit_or_answer(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _replace_with_text(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 
@@ -6965,6 +7588,8 @@ async def developer_ack_changes_view(callback: CallbackQuery):
     page_idx = int(parts[2]) if len(parts) > 2 else 0
 
     from database.material_notifications import get_event_by_id
+    from bot.services.wave_broadcaster import normalize_change_pages, edit_or_replace_change_page
+
     event = await get_event_by_id(event_id)
     if not event:
         await callback.answer("Подію не знайдено.", show_alert=True)
@@ -6977,74 +7602,37 @@ async def developer_ack_changes_view(callback: CallbackQuery):
     except Exception:
         dt_formatted = created_str[:16]
 
-    pages = []
-    try:
-        raw_pages = json.loads(event.get('pages_json', '[]'))
-        if isinstance(raw_pages, list):
-            pages = raw_pages
-        elif raw_pages:
-            pages = [str(raw_pages)]
-    except Exception:
-        pages = []
-
-    header_lines = [
-        "📝 <b>Зміст оновлення матеріалу</b>",
-        "───────────────────",
-        f"📚 Посада: <b>{event['role']}</b> | 📅 День: <b>{event['day']}</b>",
-        f"🕒 Дата оновлення: <b>{dt_formatted}</b>",
-        "───────────────────"
-    ]
+    pages = normalize_change_pages(
+        event.get('pages_json', '[]'),
+        fallback_text=event.get('description') or "Матеріали відсутні або зміст не збережено.",
+        default_day=event.get('day', 1),
+    )
 
     total_pages = len(pages)
+    page_idx = max(0, min(page_idx, total_pages - 1))
+
     buttons = []
-
-    if not pages:
-        body_text = "<i>Матеріали відсутні або зміст не збережено.</i>"
-    else:
-        page_idx = max(0, min(page_idx, total_pages - 1))
-        curr_page = pages[page_idx]
-
-        is_deleted = False
-        if isinstance(curr_page, dict):
-            p_text = curr_page.get('text') or curr_page.get('content') or str(curr_page)
-            if curr_page.get('status') == 'deleted' or curr_page.get('deleted') is True or curr_page.get('type') == 'deleted':
-                is_deleted = True
-        elif isinstance(curr_page, str):
-            p_text = curr_page
-            lowered = p_text.lower()
-            if "❌" in p_text[:15] or "видалено" in lowered[:25] or "[видалено]" in lowered[:25]:
-                is_deleted = True
-            elif event.get('content_type') == 'delete' or 'видален' in (event.get('description') or '').lower():
-                is_deleted = True
-        else:
-            p_text = str(curr_page)
-
-        if is_deleted:
-            # Очищуємо зайві префікси [ВИДАЛЕНО] якщо вони вже є в тексті
-            clean_text = p_text
-            for prefix in ["[ВИДАЛЕНО]", "ВИДАЛЕНО:", "❌ ВИДАЛЕНО", "❌ВИДАЛЕНО"]:
-                if clean_text.startswith(prefix):
-                    clean_text = clean_text[len(prefix):].strip()
-            body_text = f"❌ <b>ВИДАЛЕНО (Сторінка {page_idx + 1} з {total_pages})</b>\n\n{clean_text}"
-        else:
-            body_text = f"📄 <b>Сторінка {page_idx + 1} з {total_pages}</b>\n\n{p_text}"
-
-        # Пагінація між сторінками
-        if total_pages > 1:
-            nav_row = []
-            if page_idx > 0:
-                nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_ack_changes:{event_id}:{page_idx - 1}"))
-            nav_row.append(InlineKeyboardButton(text=f"📄 {page_idx + 1}/{total_pages}", callback_data="ignore"))
-            if page_idx < total_pages - 1:
-                nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_ack_changes:{event_id}:{page_idx + 1}"))
-            buttons.append(nav_row)
-
-    full_text = "\n".join(header_lines) + "\n" + body_text
-    if len(full_text) > 4000:
-        full_text = full_text[:3950] + "\n\n<i>[Текст скорочено через обмеження Telegram]</i>"
+    if total_pages > 1:
+        nav_row = []
+        if page_idx > 0:
+            nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"dev_ack_changes:{event_id}:{page_idx - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f"📄 {page_idx + 1}/{total_pages}", callback_data="ignore"))
+        if page_idx < total_pages - 1:
+            nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"dev_ack_changes:{event_id}:{page_idx + 1}"))
+        buttons.append(nav_row)
 
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_ack_ev:{event_id}:0")])
-    await _edit_or_answer(callback.message, full_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+    await edit_or_replace_change_page(
+        callback.message,
+        role=event['role'],
+        default_day=event['day'],
+        pages=pages,
+        page_idx=page_idx,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        header_title="📝 <b>Зміст оновлення матеріалу</b>",
+        extra_header_line=f"🕒 Дата оновлення: <b>{dt_formatted}</b>",
+    )
     await callback.answer()
 
 
@@ -12913,6 +13501,16 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.message.register(developer_process_replace_array_content, DeveloperStates.waiting_replace_array_content)
     dp.callback_query.register(developer_process_replace_array_done, lambda c: c.data == "dev_rep_array_done")
     dp.callback_query.register(developer_process_notify_decision, lambda c: c.data and c.data.startswith("dev_notify:"))
+    dp.callback_query.register(developer_draft_announce, lambda c: c.data == "dev_draft_announce")
+    dp.callback_query.register(developer_draft_clear, lambda c: c.data == "dev_draft_clear")
+    dp.callback_query.register(developer_announce_mode_select, lambda c: c.data and c.data.startswith("dev_ann_mode:"))
+    dp.callback_query.register(developer_announce_comment_choice, lambda c: c.data and c.data.startswith("dev_ann_comment:"))
+    dp.callback_query.register(developer_announce_back_mode, lambda c: c.data == "dev_ann_back_mode")
+    dp.callback_query.register(developer_announce_preview_page, lambda c: c.data and c.data.startswith("dev_ann_preview:"))
+    dp.callback_query.register(developer_announce_preview_back, lambda c: c.data == "dev_ann_preview_back")
+    dp.callback_query.register(developer_announce_confirm_send, lambda c: c.data == "dev_ann_confirm_send")
+    dp.callback_query.register(developer_announce_cancel, lambda c: c.data == "dev_ann_cancel")
+    dp.message.register(developer_process_announce_comment, DeveloperStates.waiting_announce_comment)
     
     dp.callback_query.register(developer_materials_edit_start, lambda c: c.data and c.data.startswith("dev_mat_edit|"))
     dp.message.register(developer_process_material_parts, DeveloperStates.waiting_material_parts)

@@ -9,6 +9,8 @@ from . import DB_PATH
 from database.managers import MANAGERS_DB_PATH
 
 NOTIFICATIONS_DB_PATH = DB_PATH.replace("users.db", "material_notifications.db")
+NOTIF_DB_PATH = NOTIFICATIONS_DB_PATH
+WAVE_BATCH_SIZE = 40
 
 
 async def init_material_notifications_db():
@@ -45,9 +47,21 @@ async def init_material_notifications_db():
         )
         ''')
 
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS material_change_drafts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            items_json TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(admin_id, role)
+        )
+        ''')
+
         await db.execute('CREATE INDEX IF NOT EXISTS idx_mat_recip_event ON material_change_recipients(event_id)')
         await db.execute('CREATE INDEX IF NOT EXISTS idx_mat_recip_user ON material_change_recipients(user_id)')
         await db.execute('CREATE INDEX IF NOT EXISTS idx_mat_recip_wave ON material_change_recipients(wave_number, status)')
+        await db.execute('CREATE INDEX IF NOT EXISTS idx_mat_draft_admin_role ON material_change_drafts(admin_id, role)')
         await db.commit()
 
 
@@ -56,7 +70,7 @@ async def create_material_change_event(
     day: int,
     content_type: str,
     description: str,
-    pages: List[str]
+    pages: List[Any]
 ) -> int:
     """Створює нову подію зміни матеріалів."""
     pages_json = json.dumps(pages if pages else [description], ensure_ascii=False)
@@ -72,12 +86,10 @@ async def create_material_change_event(
         return cursor.lastrowid
 
 
-async def create_recipients_for_event(event_id: int, role: str) -> int:
+async def _collect_recipients_for_role(role: str) -> List[Dict[str, Any]]:
     """
     Збирає активних користувачів цільової посади, керівників компанії та територіалів відповідного напрямку.
     Наглядачі гарантовано виключаються зі списку отримувачів.
-    Розбиває на хвилі по 40 осіб та зберігає в material_change_recipients.
-    Повертає загальну кількість створених записів отримувачів.
     """
     recipients_data: List[Dict[str, Any]] = []
     seen_user_ids = set()
@@ -193,11 +205,38 @@ async def create_recipients_for_event(event_id: int, role: str) -> int:
     except Exception as e:
         print(f"Помилка завантаження територіалів: {e}")
 
-    # 4. Розбиваємо на батчі по 40 осіб
-    BATCH_SIZE = 40
+    return recipients_data
+
+
+async def get_recipients_preview_stats(role: str) -> Dict[str, int]:
+    """Повертає точну статистику аудиторії для екрану превʼю без запису в БД."""
+    recipients = await _collect_recipients_for_role(role)
+    workers = sum(1 for r in recipients if r['role_type'] == 'працівник')
+    interns = sum(1 for r in recipients if r['role_type'] == 'стажер')
+    managers = sum(1 for r in recipients if r['role_type'] == 'керівник')
+    territorials = sum(1 for r in recipients if r['role_type'] == 'територіал')
+    total = len(recipients)
+    waves = max(1, (total + WAVE_BATCH_SIZE - 1) // WAVE_BATCH_SIZE) if total > 0 else 0
+    return {
+        'total': total,
+        'workers': workers,
+        'interns': interns,
+        'managers': managers,
+        'territorials': territorials,
+        'waves': waves,
+    }
+
+
+async def create_recipients_for_event(event_id: int, role: str) -> int:
+    """
+    Збирає активних отримувачів для посади, розбиває на хвилі по 40 осіб
+    та зберігає в material_change_recipients. Повертає кількість отримувачів.
+    """
+    recipients_data = await _collect_recipients_for_role(role)
+
     async with aiosqlite.connect(NOTIFICATIONS_DB_PATH) as db:
         for idx, rec in enumerate(recipients_data):
-            wave_num = (idx // BATCH_SIZE) + 1
+            wave_num = (idx // WAVE_BATCH_SIZE) + 1
             await db.execute(
                 '''
                 INSERT INTO material_change_recipients 
@@ -209,6 +248,118 @@ async def create_recipients_for_event(event_id: int, role: str) -> int:
         await db.commit()
 
     return len(recipients_data)
+
+
+async def append_draft_items(admin_id: int, role: str, items: List[Dict[str, Any]]) -> int:
+    """Додає сторінки змін до чернетки адміністратора для конкретної посади."""
+    if not items:
+        existing = await get_draft_items(admin_id, role)
+        return len(existing)
+
+    async with aiosqlite.connect(NOTIFICATIONS_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT items_json FROM material_change_drafts WHERE admin_id = ? AND role = ?",
+            (admin_id, role)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        existing_items: List[Dict[str, Any]] = []
+        if row and row['items_json']:
+            try:
+                parsed = json.loads(row['items_json'])
+                if isinstance(parsed, list):
+                    existing_items = parsed
+            except Exception:
+                existing_items = []
+
+        merged = existing_items + list(items)
+        merged_json = json.dumps(merged, ensure_ascii=False)
+
+        await db.execute(
+            '''
+            INSERT INTO material_change_drafts (admin_id, role, items_json, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(admin_id, role) DO UPDATE SET
+                items_json = excluded.items_json,
+                updated_at = CURRENT_TIMESTAMP
+            ''',
+            (admin_id, role, merged_json)
+        )
+        await db.commit()
+        return len(merged)
+
+
+async def get_draft_items(admin_id: int, role: str) -> List[Dict[str, Any]]:
+    """Повертає накопичені сторінки змін у чернетці адміністратора для посади."""
+    async with aiosqlite.connect(NOTIFICATIONS_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT items_json FROM material_change_drafts WHERE admin_id = ? AND role = ?",
+            (admin_id, role)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row or not row['items_json']:
+                return []
+            try:
+                parsed = json.loads(row['items_json'])
+                return parsed if isinstance(parsed, list) else []
+            except Exception:
+                return []
+
+
+async def clear_draft(admin_id: int, role: str) -> None:
+    """Видаляє чернетку адміністратора для вказаної посади."""
+    async with aiosqlite.connect(NOTIFICATIONS_DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM material_change_drafts WHERE admin_id = ? AND role = ?",
+            (admin_id, role)
+        )
+        await db.commit()
+
+
+async def update_recipient_message_id(recipient_id: int, message_id: int) -> None:
+    """Оновлює message_id повідомлення отримувача (наприклад, після перемикання текст <-> медіа)."""
+    async with aiosqlite.connect(NOTIFICATIONS_DB_PATH) as db:
+        await db.execute(
+            "UPDATE material_change_recipients SET message_id = ? WHERE id = ?",
+            (message_id, recipient_id)
+        )
+        await db.commit()
+
+
+async def get_events_with_pending_recipients() -> List[int]:
+    """Повертає список event_id, у яких ще є невідправлені (pending) отримувачі."""
+    async with aiosqlite.connect(NOTIFICATIONS_DB_PATH) as db:
+        async with db.execute(
+            '''
+            SELECT DISTINCT r.event_id
+            FROM material_change_recipients r
+            JOIN material_change_events e ON e.id = r.event_id
+            WHERE r.status = 'pending'
+            ORDER BY r.event_id ASC
+            '''
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+
+async def mark_event_completed_if_done(event_id: int) -> bool:
+    """Переводить подію у статус 'completed', якщо більше немає отримувачів зі статусом 'pending'."""
+    async with aiosqlite.connect(NOTIFICATIONS_DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM material_change_recipients WHERE event_id = ? AND status = 'pending'",
+            (event_id,)
+        ) as cursor:
+            pending_count = (await cursor.fetchone())[0]
+        if pending_count == 0:
+            await db.execute(
+                "UPDATE material_change_events SET status = 'completed' WHERE id = ?",
+                (event_id,)
+            )
+            await db.commit()
+            return True
+        return False
 
 
 async def get_pending_wave_recipients(wave_number: Optional[int] = None, event_id: Optional[int] = None) -> List[Dict[str, Any]]:

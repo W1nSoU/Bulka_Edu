@@ -207,6 +207,15 @@ async def start_bot():
     # Запускаємо scheduler
     scheduler.start()
     print_status("✅", "Планувальник запущено", indent=5)
+
+    # Авто-відновлення незавершених хвильових розсилок змін матеріалів після рестарту
+    try:
+        from bot.services.wave_broadcaster import resume_pending_wave_broadcasts
+        resumed_waves = await resume_pending_wave_broadcasts(bot)
+        if resumed_waves:
+            print_status("🌊", f"Відновлено незавершених хвильових розсилок: {resumed_waves}", indent=5)
+    except Exception as wave_err:
+        print_status("⚠️", f"Помилка відновлення хвильових розсилок: {wave_err}", indent=5)
     
     # Запускаємо фонові воркери
     background_tasks = [

@@ -511,7 +511,7 @@ async def menu_days_page_callback(callback: CallbackQuery):
 
 
 async def material_notification_page_callback(callback: CallbackQuery):
-    """Обробляє пагінацію сторінок у повідомленні про зміну матеріалів."""
+    """Обробляє пагінацію сторінок у повідомленні про зміну матеріалів (текст, фото, відео)."""
     try:
         _, event_id_str, recipient_id_str, page_str = callback.data.split(":")
         event_id = int(event_id_str)
@@ -521,28 +521,48 @@ async def material_notification_page_callback(callback: CallbackQuery):
         await callback.answer()
         return
 
-    from database.material_notifications import get_event_by_id, get_recipient_by_id
-    from bot.services.wave_broadcaster import format_material_notification_text, build_material_notification_keyboard
+    from database.material_notifications import (
+        get_event_by_id,
+        get_recipient_by_id,
+        update_recipient_message_id,
+    )
+    from bot.services.wave_broadcaster import (
+        normalize_change_pages,
+        build_material_notification_keyboard,
+        edit_or_replace_change_page,
+    )
 
     event = await get_event_by_id(event_id)
     recipient = await get_recipient_by_id(recipient_id)
     if not event or not recipient:
-        await callback.answer("Матеріал не знайдено.")
+        await callback.answer("Матеріал не знайдено.", show_alert=True)
         return
 
-    pages = json.loads(event.get("pages_json", "[]"))
-    if not pages:
-        pages = [event.get("description", "Оновлено матеріали")]
+    pages = normalize_change_pages(
+        event.get("pages_json", "[]"),
+        fallback_text=event.get("description") or "Оновлено навчальні матеріали",
+        default_day=event.get("day", 1),
+    )
 
     total_pages = len(pages)
     page = max(0, min(page, total_pages - 1))
-    
+
     is_acknowledged = bool(recipient.get("acknowledged_at"))
-    new_text = format_material_notification_text(event["role"], event["day"], pages[page], page, total_pages)
-    kb = build_material_notification_keyboard(event_id, recipient_id, page, total_pages, is_acknowledged=is_acknowledged)
+    kb = build_material_notification_keyboard(
+        event_id, recipient_id, page, total_pages, is_acknowledged=is_acknowledged
+    )
 
     try:
-        await callback.message.edit_text(new_text, reply_markup=kb, parse_mode="HTML")
+        new_msg, replaced = await edit_or_replace_change_page(
+            callback.message,
+            role=event["role"],
+            default_day=event["day"],
+            pages=pages,
+            page_idx=page,
+            reply_markup=kb,
+        )
+        if replaced and new_msg:
+            await update_recipient_message_id(recipient_id, new_msg.message_id)
     except Exception:
         pass
     await callback.answer()
@@ -560,7 +580,10 @@ async def material_notification_ack_callback(callback: CallbackQuery):
 
     user_id = callback.from_user.id
     from database.material_notifications import mark_recipient_acknowledged, get_event_by_id
-    from bot.services.wave_broadcaster import build_material_notification_keyboard
+    from bot.services.wave_broadcaster import (
+        normalize_change_pages,
+        build_material_notification_keyboard,
+    )
 
     success, is_late = await mark_recipient_acknowledged(event_id, user_id)
     if not success:
@@ -570,14 +593,17 @@ async def material_notification_ack_callback(callback: CallbackQuery):
     event = await get_event_by_id(event_id)
     total_pages = 1
     if event:
-        try:
-            pages = json.loads(event.get("pages_json", "[]"))
-            total_pages = max(1, len(pages))
-        except Exception:
-            total_pages = 1
+        pages = normalize_change_pages(
+            event.get("pages_json", "[]"),
+            fallback_text=event.get("description") or "Оновлено навчальні матеріали",
+            default_day=event.get("day", 1),
+        )
+        total_pages = max(1, len(pages))
 
-    # Оновлюємо клавіатуру на останній сторінці
-    kb = build_material_notification_keyboard(event_id, recipient_id, total_pages - 1, total_pages, is_acknowledged=True)
+    # Оновлюємо клавіатуру на останній сторінці (працює однаково для тексту, фото та відео)
+    kb = build_material_notification_keyboard(
+        event_id, recipient_id, total_pages - 1, total_pages, is_acknowledged=True
+    )
     try:
         await callback.message.edit_reply_markup(reply_markup=kb)
     except Exception:
