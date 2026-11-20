@@ -201,6 +201,10 @@ async def start_bot():
     scheduler.add_job(auto_monthly_report_sender, "cron", day="last", hour=23, minute=0, args=(bot,), id="monthly_report_sender")
     print_status("  ✓", "Автоматичний місячний звіт (останній день місяця, 23:00)")
 
+    from bot.services.news_excel import auto_weekly_news_report_sender
+    scheduler.add_job(auto_weekly_news_report_sender, "cron", day_of_week="mon", hour=9, minute=0, args=(bot,), id="weekly_news_report")
+    print_status("  ✓", "Тижневий звіт по всіх новинах (щопонеділка о 09:00)")
+
     scheduler.add_job(raffle_maintenance_loop, "interval", minutes=10, id="raffle_maintenance")
     print_status("  ✓", "Обслуговування розіграшів та 60-денне очищення (кожні 10 хв)")
     

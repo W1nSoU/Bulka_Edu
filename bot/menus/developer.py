@@ -8610,6 +8610,7 @@ async def dev_news_menu_handler(callback: CallbackQuery, state: FSMContext = Non
     buttons = [
         [InlineKeyboardButton(text="📢 Опублікувати новину", callback_data="dev_news_create_start")],
         [InlineKeyboardButton(text="📚 Історія новин", callback_data="dev_news_history:1")],
+        [InlineKeyboardButton(text="📊 Тижневий звіт (Excel)", callback_data="dev_news_weekly_report")],
         [InlineKeyboardButton(text="🏷 Керування категоріями", callback_data="dev_news_categories_menu")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="dev_broadcasts_menu")]
     ]
@@ -9412,6 +9413,7 @@ async def dev_news_view_handler(callback: CallbackQuery):
     reaction_pct = round((total_reactions / sent * 100), 1) if sent > 0 else 0
 
     breakdown = summary.get("breakdown", {})
+    r_thumbs = breakdown.get("👍", 0)
     r_fire = breakdown.get("🔥", 0)
     r_laugh = breakdown.get("😁", 0) + breakdown.get("👎", 0)
     r_love = breakdown.get("❤️", 0)
@@ -9424,10 +9426,7 @@ async def dev_news_view_handler(callback: CallbackQuery):
     city_str = "Усі міста" if city == "all" else city
     clean_news_body = sanitize_telegram_html(news.get('text', ''))
 
-    text = (
-        f"📰 <b>Новина #{news_id}</b>\n"
-        f"───────────────────\n"
-        f"{clean_news_body}\n\n"
+    stats_block = (
         f"📊 <b>Статистика новини:</b>\n"
         f"📅 Дата публікації: <b>{created_at}</b>\n"
         f"👥 Аудиторія: <b>{roles_str} ({city_str})</b>\n"
@@ -9436,7 +9435,14 @@ async def dev_news_view_handler(callback: CallbackQuery):
         f"❌ Не вдалося доставити: <b>{failed}</b> ({failed_pct}%)\n"
         f"💬 Отримано реакцій: <b>{total_reactions}</b> ({reaction_pct}%)\n\n"
         f"<b>Емоції:</b>\n"
-        f"🔥 {r_fire}  |  😁 {r_laugh}  |  ❤️ {r_love}  |  🤔 {r_think}"
+        f"👍 {r_thumbs}  |  🔥 {r_fire}  |  😁 {r_laugh}  |  ❤️ {r_love}  |  🤔 {r_think}"
+    )
+
+    text = (
+        f"📰 <b>Новина #{news_id}</b>\n"
+        f"───────────────────\n"
+        f"{clean_news_body}\n\n"
+        f"{stats_block}"
     )
 
     buttons = [
@@ -9449,22 +9455,48 @@ async def dev_news_view_handler(callback: CallbackQuery):
     video_id = news.get("video_file_id")
     media_type = news.get("media_type")
 
+    from bot.services.news_excel import build_safe_news_media_caption
+
     if (media_type == "video" and video_id) or video_id:
         try:
             if callback.message:
                 await callback.message.delete()
         except Exception:
             pass
-        caption = text if len(text) <= 1024 else text[:1020] + "..."
-        await callback.message.answer_video(video=video_id, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+        caption = build_safe_news_media_caption(news_id, clean_news_body, stats_block, limit=1024)
+        try:
+            await callback.message.answer_video(video=video_id, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+        except TelegramBadRequest as e:
+            if "can't parse entities" in str(e).lower():
+                safe_caption = build_safe_news_media_caption(
+                    news_id, clean_news_body, stats_block, limit=1024, force_escape_body=True
+                )
+                try:
+                    await callback.message.answer_video(video=video_id, caption=safe_caption, reply_markup=reply_markup, parse_mode="HTML")
+                except TelegramBadRequest:
+                    await callback.message.answer_video(video=video_id, caption=safe_caption, reply_markup=reply_markup, parse_mode=None)
+            else:
+                raise
     elif photo_id:
         try:
             if callback.message:
                 await callback.message.delete()
         except Exception:
             pass
-        caption = text if len(text) <= 1024 else text[:1020] + "..."
-        await callback.message.answer_photo(photo=photo_id, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+        caption = build_safe_news_media_caption(news_id, clean_news_body, stats_block, limit=1024)
+        try:
+            await callback.message.answer_photo(photo=photo_id, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+        except TelegramBadRequest as e:
+            if "can't parse entities" in str(e).lower():
+                safe_caption = build_safe_news_media_caption(
+                    news_id, clean_news_body, stats_block, limit=1024, force_escape_body=True
+                )
+                try:
+                    await callback.message.answer_photo(photo=photo_id, caption=safe_caption, reply_markup=reply_markup, parse_mode="HTML")
+                except TelegramBadRequest:
+                    await callback.message.answer_photo(photo=photo_id, caption=safe_caption, reply_markup=reply_markup, parse_mode=None)
+            else:
+                raise
     else:
         await _edit_or_answer(callback.message, text, reply_markup=reply_markup)
 
@@ -9500,6 +9532,42 @@ async def dev_news_report_handler(callback: CallbackQuery):
     except Exception as e:
         logger.exception(f"Error generating news report: {e}")
         await callback.message.answer(f"❌ Помилка при генерації звіту: {e}")
+
+
+async def dev_news_weekly_report_handler(callback: CallbackQuery):
+    """Генерує та відправляє тижневий Excel-звіт по всіх новинах за останні 7 днів."""
+    if not await _check_news_access(callback):
+        await callback.answer("⛔️ Доступ заборонено.", show_alert=True)
+        return
+
+    from bot.services.news_excel import (
+        generate_weekly_news_report_xlsx,
+        format_weekly_news_summary_caption,
+    )
+    from aiogram.types import BufferedInputFile
+
+    await callback.answer("⏳ Формую тижневий Excel-звіт по новинах...", show_alert=False)
+
+    try:
+        stream, report_data = await generate_weekly_news_report_xlsx(days=7)
+        if report_data["news_count"] == 0:
+            await callback.message.answer(
+                f"ℹ️ За останні 7 днів (<b>{report_data['period_label']}</b>) новин не публікувалось.",
+                parse_mode="HTML",
+            )
+            return
+
+        now_tag = datetime.now().strftime("%Y%m%d_%H%M")
+        doc = BufferedInputFile(stream.getvalue(), filename=f"weekly_news_report_{now_tag}.xlsx")
+        caption = format_weekly_news_summary_caption(report_data)
+        await callback.message.answer_document(
+            document=doc,
+            caption=caption,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception(f"Error generating weekly news report: {e}")
+        await callback.message.answer(f"❌ Помилка при генерації тижневого звіту: {e}")
 
 
 # ==================== Tokens Management ====================
@@ -13684,6 +13752,7 @@ def register_developer_menu_handlers(dp: Dispatcher):
     dp.callback_query.register(dev_news_history_handler, lambda c: c.data and (c.data == "dev_news_history" or c.data.startswith("dev_news_history:")))
     dp.callback_query.register(dev_news_view_handler, lambda c: c.data and c.data.startswith("dev_news_view:"))
     dp.callback_query.register(dev_news_report_handler, lambda c: c.data and c.data.startswith("dev_news_report:"))
+    dp.callback_query.register(dev_news_weekly_report_handler, lambda c: c.data == "dev_news_weekly_report")
 
     # Attestation Handlers
     from bot.menus.attestation import register_attestation_handlers

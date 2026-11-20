@@ -593,3 +593,161 @@ async def get_news_reactions_detailed(
         return [dict(r) for r in rows]
 
 
+async def get_weekly_news_report_data(
+    days: int = 7,
+    db_path: str = DB_PATH,
+    now_dt: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """
+    Збирає повні дані для тижневого звіту по всіх новинах за останні `days` днів:
+    - період (start_str, end_str, period_label)
+    - сумарні KPI та розподіл реакцій (👍, 🔥, 😁, ❤️, 🤔)
+    - список новин із метриками та емоціями
+    - усі персональні реакції за період
+    - усі помилки доставки за період
+    """
+    tz = pytz.timezone(TIMEZONE)
+    end_dt = now_dt if now_dt is not None else datetime.now(tz)
+    start_dt = end_dt - timedelta(days=days)
+    start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+    period_label = f"{start_dt.strftime('%d.%m.%Y')} — {end_dt.strftime('%d.%m.%Y')}"
+
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT *
+            FROM news
+            WHERE created_at >= ? AND created_at <= ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (start_str, end_str),
+        )
+        raw_news = [dict(r) for r in await cursor.fetchall()]
+
+    news_items: List[Dict[str, Any]] = []
+    all_reactions: List[Dict[str, Any]] = []
+    all_failed: List[Dict[str, Any]] = []
+
+    total_recipients = 0
+    total_sent = 0
+    total_failed = 0
+    total_reactions = 0
+    total_breakdown = {r: 0 for r in NEWS_REACTIONS}
+    top_news: Optional[Dict[str, Any]] = None
+
+    for item in raw_news:
+        nid = item["id"]
+        try:
+            item["selected_roles"] = json.loads(item.get("selected_roles") or "[]")
+        except Exception:
+            item["selected_roles"] = []
+
+        summary = await get_news_reactions_summary(nid, db_path=db_path)
+        breakdown = summary.get("breakdown", {})
+        r_thumbs = breakdown.get("👍", 0)
+        r_fire = breakdown.get("🔥", 0)
+        r_laugh = breakdown.get("😁", 0) + breakdown.get("👎", 0)
+        r_love = breakdown.get("❤️", 0)
+        r_think = breakdown.get("🤔", 0)
+        n_reactions = r_thumbs + r_fire + r_laugh + r_love + r_think
+
+        n_total = item.get("total_recipients") or 0
+        n_sent = item.get("sent_count") or 0
+        n_failed = item.get("failed_count") or 0
+
+        item["sent_pct"] = round((n_sent / n_total * 100), 1) if n_total > 0 else 0.0
+        item["failed_pct"] = round((n_failed / n_total * 100), 1) if n_total > 0 else 0.0
+        item["reactions_total"] = n_reactions
+        item["reaction_pct"] = round((n_reactions / n_sent * 100), 1) if n_sent > 0 else 0.0
+        item["reactions_breakdown"] = {
+            "👍": r_thumbs,
+            "🔥": r_fire,
+            "😁": r_laugh,
+            "❤️": r_love,
+            "🤔": r_think,
+        }
+        news_items.append(item)
+
+        total_recipients += n_total
+        total_sent += n_sent
+        total_failed += n_failed
+        total_reactions += n_reactions
+        total_breakdown["👍"] += r_thumbs
+        total_breakdown["🔥"] += r_fire
+        total_breakdown["😁"] += r_laugh
+        total_breakdown["❤️"] += r_love
+        total_breakdown["🤔"] += r_think
+
+        if top_news is None or n_reactions > top_news["reactions_total"]:
+            top_news = item
+
+        # Детальні реакції та помилки з метаданими новини
+        detailed_r = await get_news_reactions_detailed(nid, db_path=db_path)
+        for rec in detailed_r:
+            rec["news_created_at"] = item.get("created_at") or "—"
+            all_reactions.append(rec)
+
+        detailed_f = await get_news_failed_deliveries_detailed(nid, db_path=db_path)
+        for rec in detailed_f:
+            rec["news_created_at"] = item.get("created_at") or "—"
+            all_failed.append(rec)
+
+    return {
+        "days": days,
+        "start_str": start_str,
+        "end_str": end_str,
+        "period_label": period_label,
+        "news_count": len(news_items),
+        "total_recipients": total_recipients,
+        "sent_count": total_sent,
+        "failed_count": total_failed,
+        "sent_pct": round((total_sent / total_recipients * 100), 1) if total_recipients > 0 else 0.0,
+        "failed_pct": round((total_failed / total_recipients * 100), 1) if total_recipients > 0 else 0.0,
+        "total_reactions": total_reactions,
+        "reaction_pct": round((total_reactions / total_sent * 100), 1) if total_sent > 0 else 0.0,
+        "reactions_breakdown": total_breakdown,
+        "top_news": top_news,
+        "news_items": news_items,
+        "reactions_detailed": all_reactions,
+        "failed_deliveries": all_failed,
+    }
+
+
+async def get_news_report_recipient_ids() -> List[int]:
+    """
+    Повертає унікальний список Telegram user_id усіх Адміністраторів та активних Наглядачів,
+    які мають право отримувати тижневий звіт по новинах.
+    """
+    from database.managers import MANAGERS_DB_PATH, get_all_developers
+
+    recipient_ids = set()
+
+    try:
+        devs = await get_all_developers()
+        for d in devs or []:
+            uid = d.get("user_id") if isinstance(d, dict) else d
+            if uid:
+                recipient_ids.add(int(uid))
+    except Exception as e:
+        logger.warning(f"Failed to fetch developers for weekly news report: {e}")
+
+    try:
+        async with aiosqlite.connect(MANAGERS_DB_PATH) as db:
+            async with db.execute(
+                """
+                SELECT uid FROM managers
+                WHERE process = 'Наглядач' AND (status IS NULL OR status != 'fired')
+                """
+            ) as cursor:
+                async for row in cursor:
+                    if row[0]:
+                        recipient_ids.add(int(row[0]))
+    except Exception as e:
+        logger.warning(f"Failed to fetch observers for weekly news report: {e}")
+
+    return sorted(recipient_ids)
+
+
+
