@@ -78,12 +78,30 @@ async def get_days_count_for_role(role_name: str) -> int:
 # Запис
 # ---------------------------------------------------------------------------
 
+RESERVED_SYSTEM_ROLES_LOWER = {
+    "адміністратор",
+    "developer",
+    "dev",
+    "територіал",
+    "наглядач",
+    "hr",
+}
+
+
 async def add_position(name: str, days_count: int = 5, territorial_type: str = "ТЗ") -> int:
     """
     Додає нову посаду. Повертає id нового запису.
-    Raises ValueError якщо посада з такою назвою вже існує.
+    Raises ValueError якщо посада з такою назвою вже існує або зарезервована під системну роль.
     territorial_type: 'ТЗ', 'ВВ', 'РЦ' або 'ОФІС'
     """
+    clean_name = (name or "").strip()
+    if not clean_name:
+        raise ValueError("Назва посади не може бути порожньою.")
+    if clean_name.casefold() in RESERVED_SYSTEM_ROLES_LOWER:
+        raise ValueError(
+            f"Назва '{clean_name}' зарезервована під системну роль бота і не може додаватись як навчальна посада."
+        )
+    name = clean_name
     if territorial_type not in VALID_POSITION_TYPES:
         territorial_type = "ВВ" if name.startswith("ВВ ") else "ТЗ"
     async with aiosqlite.connect(DB_PATH) as db:

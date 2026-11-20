@@ -711,9 +711,28 @@ async def manager_filter_city(callback: CallbackQuery):
         ret_code=f"city_{city_idx}"
     )
 
+FORBIDDEN_MANAGER_ASSIGN_ROLES_LOWER = {
+    "керівник",
+    "керівник стажер",
+    "територіал",
+    "наглядач",
+    "developer",
+    "dev",
+    "адміністратор",
+    "hr",
+}
+
+
+def is_forbidden_manager_assign_role(role: Optional[str]) -> bool:
+    """Перевіряє, чи є роль системною/керівною, яку керівник не має права призначати стажерам."""
+    if not role:
+        return True
+    return role.strip().casefold() in FORBIDDEN_MANAGER_ASSIGN_ROLES_LOWER
+
+
 async def _get_manager_add_roles() -> list[str]:
     """
-    Повертає список доступних для вибору посад (без Керівника).
+    Повертає список доступних для вибору посад (без Керівника, Адміністратора, Developer та інших системних ролей).
     Джерело правди: таблиця positions у БД.
     Якщо в БД порожньо або виникла помилка — fallback до AVAILABLE_ROLES.
     """
@@ -722,7 +741,7 @@ async def _get_manager_add_roles() -> list[str]:
         positions = await get_all_positions()
         db_roles = [
             p["name"].strip() for p in positions
-            if p.get("name") and p["name"].strip() not in ("Керівник", "Керівник Стажер")
+            if p.get("name") and not is_forbidden_manager_assign_role(p["name"])
         ]
         if db_roles:
             seen = set()
@@ -734,7 +753,7 @@ async def _get_manager_add_roles() -> list[str]:
             return unique_roles
     except Exception:
         pass
-    return [r for r in AVAILABLE_ROLES if r not in ("Керівник", "Керівник Стажер")]
+    return [r for r in AVAILABLE_ROLES if not is_forbidden_manager_assign_role(r)]
 
 
 def _render_add_roles_keyboard(
@@ -1310,6 +1329,13 @@ async def manager_process_add_role_callback(callback: CallbackQuery, state: FSMC
         role = roles[role_idx]
     except (ValueError, IndexError):
         await callback.answer("Помилка даних посади.", show_alert=True)
+        return
+
+    if is_forbidden_manager_assign_role(role):
+        await callback.answer(
+            "⛔️ Керівники не можуть створювати запрошення на системні ролі (Адміністратор, Developer тощо).",
+            show_alert=True,
+        )
         return
 
     data = await state.get_data()

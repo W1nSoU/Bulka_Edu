@@ -998,21 +998,39 @@ async def get_users_by_managers(manager_ids: list[int], active_only: bool = Fals
         users = await cursor.fetchall()
         return [dict(user) for user in users]
 
+def _normalize_search_text(text: str) -> str:
+    """Нормалізує ПІБ для регістронезалежного пошуку кирилицею (включно з латинською i -> і та апострофами)."""
+    if not text:
+        return ""
+    s = text.strip().casefold()
+    s = s.replace("i", "і").replace("'", "ʼ").replace("’", "ʼ")
+    return " ".join(s.split())
+
+
 async def get_users_by_full_name(full_name: str) -> list[dict]:
-    """Retrieves a list of users matching a full name (case-insensitive).
-    
-    Пошук не чутливий до регістру та знаходить часткові збіги.
-    Наприклад, "іван" знайде "Іванов Іван Іванович", "ІВАНОВ", "іванова" тощо.
+    """Retrieves a list of users matching a full name (true Unicode case-insensitive).
+
+    Пошук не чутливий до регістру кирилиці, порядку слів, зайвих пробілів та латинської i/I.
+    Наприклад, "іван іванов" або "ІВАН" знайде "Іванов Іван Іванович".
     """
+    query_norm = _normalize_search_text(full_name)
+    if not query_norm:
+        return []
+    tokens = query_norm.split(" ")
+
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        # Використовуємо LOWER() для регістронезалежного пошуку
-        cursor = await db.execute(
-            "SELECT * FROM users WHERE LOWER(full_name) LIKE LOWER(?)", 
-            (f'%{full_name}%',)
-        )
-        users = await cursor.fetchall()
-        return [dict(user) for user in users]
+        cursor = await db.execute("SELECT * FROM users WHERE full_name IS NOT NULL AND full_name != ''")
+        rows = await cursor.fetchall()
+
+    matched = []
+    for row in rows:
+        name_norm = _normalize_search_text(row["full_name"] or "")
+        if not name_norm:
+            continue
+        if query_norm in name_norm or all(tok in name_norm for tok in tokens):
+            matched.append(dict(row))
+    return matched
 
 async def get_users_by_shop(city: str, shop: str) -> list[dict]:
     """Retrieves a list of users filtered by city and shop."""

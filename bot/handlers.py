@@ -682,6 +682,12 @@ async def _all_days_accessible(user_id: int, role: Optional[str] = None) -> bool
     return True
 
 def _validate_invite_payload(role: Optional[str], city: Optional[str]) -> tuple[bool, Optional[str]]:
+    if role and role.strip().casefold() in {"адміністратор", "developer", "dev", "hr"}:
+        return False, (
+            "⛔️ <b>Помилка реєстрації!</b>\n\n"
+            "Системні ролі (Адміністратор / Developer) призначаються виключно Адміністраторами бота "
+            "і не можуть видаватися через стажерське посилання."
+        )
     if role in ["Наглядач", "Територіал", "Керівник", "Керівник Стажер"]:
         return True, None
     if not is_valid_role(role):
